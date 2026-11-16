@@ -4,6 +4,8 @@ accounts.json
 config.json
 upstream.json
 plugins/
+web/webui.local.html
+*.local.html
 .env
 .env.*
 !.env.example

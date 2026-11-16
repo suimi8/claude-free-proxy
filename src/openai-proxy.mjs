@@ -1562,6 +1562,8 @@ function authenticate(req) {
 }
 
 const UI_FILE = [
+  path.join(ROOT, 'web', 'webui.local.html'),
+  path.join(ROOT, 'webui.local.html'),
   path.join(ROOT, 'web', 'webui.html'),
   path.join(ROOT, 'webui.html'),
   path.join(HERE, 'webui.html'),
@@ -1838,6 +1840,38 @@ async function acquireAccount(exclude, signal, preferredId) {
   }
 }
 
+// ---------------------------------------------------------- 本地私有插件挂载机制
+// 动态挂载本地 plugins/ 目录下的扩展（plugins/ 目录被 .gitignore 忽略，不进入公开仓库）
+const PLUGIN_ROUTES = new Map();
+async function loadLocalPlugins() {
+  const pDir = path.join(ROOT, 'plugins');
+  if (!fs.existsSync(pDir)) return;
+  try {
+    for (const d of fs.readdirSync(pDir, { withFileTypes: true })) {
+      if (d.isDirectory()) {
+        const entry = path.join(pDir, d.name, 'plugin.mjs');
+        if (fs.existsSync(entry)) {
+          const mod = await import(`file://${entry}`);
+          if (typeof mod.registerPlugin === 'function') {
+            await mod.registerPlugin({
+              onRoute: (p, fn) => PLUGIN_ROUTES.set(p, fn),
+              KEYS,
+              POOL,
+              LOGIN,
+              json,
+              readBody,
+            });
+            console.log(`[plugin] 已挂载本地私有扩展: ${d.name}`);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[plugin] 加载本地扩展异常:', err.message);
+  }
+}
+await loadLocalPlugins();
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
@@ -1848,6 +1882,17 @@ const server = http.createServer(async (req, res) => {
       'access-control-allow-methods': '*',
     });
     return res.end();
+  }
+
+  // 优先执行本地扩展插件注册的自定义路由
+  const pluginHandler = PLUGIN_ROUTES.get(url.pathname);
+  if (pluginHandler) {
+    try {
+      const handled = await pluginHandler(req, res, { url, json, readBody });
+      if (handled !== false) return;
+    } catch (e) {
+      return json(res, 500, { error: { message: e.message, type: 'plugin_error' } });
+    }
   }
 
   // ---------------------------------------------------------- WebUI（页面本身免鉴权，本机回环访问；
@@ -2020,6 +2065,7 @@ const server = http.createServer(async (req, res) => {
     // ---------------------------------------------------------- 账号管理
     if (url.pathname === '/v1/accounts' && req.method === 'GET') {
       const st = POOL.status();
+      Object.assign(st, KEYS.settings() || {});
       st.price_per_million_tokens = KEYS.settings()?.pricePerMillionTokens || 0;
       st.server = KEYS.serverConfig();
       // 用请求级用量日志校准「已用 token」：
@@ -2218,14 +2264,11 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST') {
         const b = await readBody(req);
         try {
-          if (b.pricePerMillionTokens !== undefined) {
-            KEYS.updateSettings({
-              pricePerMillionTokens: b.pricePerMillionTokens !== undefined ? (+b.pricePerMillionTokens || 0) : undefined,
-            });
-          }
+          KEYS.updateSettings(b);
           const cfg = POOL.configure(b);
           return json(res, 200, {
             ...cfg,
+            ...(KEYS.settings() || {}),
             price_per_million_tokens: KEYS.settings()?.pricePerMillionTokens || 0,
           });
         } catch (e) {

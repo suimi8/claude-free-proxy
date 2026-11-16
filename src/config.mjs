@@ -331,8 +331,9 @@ export function createConfigStore(file) {
 
   function updateSettings(patch = {}) {
     if (!data) load();
-    for (const f of ['pricePerMillionTokens', 'injectKeyToLocalUI']) {
-      if (patch[f] !== undefined) data.settings[f] = patch[f];
+    if (!data.settings) data.settings = {};
+    for (const [k, v] of Object.entries(patch)) {
+      if (v !== undefined) data.settings[k] = v;
     }
     writeNow();
     return data.settings;
