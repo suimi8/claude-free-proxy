@@ -23,6 +23,7 @@
  * 运行时字段（不落盘）：inflight
  */
 import fs from 'node:fs';
+import { hasRecentRateLimit, selectOptimalAccount } from './network-optimizer.mjs';
 
 export const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
@@ -317,8 +318,16 @@ export class AccountPool {
 
     let pick;
     if (this.data.strategy === 'least-loaded') {
-      pick = list.slice().sort((x, y) =>
-        (loadScore(x) - loadScore(y)) || (x.stats.lastUsedAt - y.stats.lastUsedAt))[0];
+      pick = list.slice().sort((x, y) => {
+        const x429 = hasRecentRateLimit(x) ? 1 : 0;
+        const y429 = hasRecentRateLimit(y) ? 1 : 0;
+        if (x429 !== y429) return x429 - y429;
+        return (loadScore(x) - loadScore(y)) || (x.stats.lastUsedAt - y.stats.lastUsedAt);
+      })[0];
+    } else if (this.data.strategy === 'optimal') {
+      pick = selectOptimalAccount(list, exclude, preferredId, {
+        perAccountConcurrency: this.data.perAccountConcurrency,
+      });
     } else {
       // round-robin：从上次停下的位置往后找第一个可用的
       const ids = new Set(list.map(a => a.id));
@@ -330,6 +339,8 @@ export class AccountPool {
       }
       pick = pick || list[0];
     }
+
+    if (!pick) return null;
 
     pick.inflight++;
     pick.stats.lastUsedAt = Date.now();
@@ -565,8 +576,8 @@ export class AccountPool {
   }
 
   setStrategy(s) {
-    if (!['round-robin', 'least-loaded'].includes(s)) {
-      throw Object.assign(new Error('strategy must be round-robin | least-loaded'), { status: 400 });
+    if (!['round-robin', 'least-loaded', 'optimal'].includes(s)) {
+      throw Object.assign(new Error('strategy must be round-robin | least-loaded | optimal'), { status: 400 });
     }
     this.data.strategy = s;
     this.save();

@@ -65,6 +65,9 @@ import { createConfigStore } from './config.mjs';
 import { probeQuota } from './quota-probe.mjs';
 import { checkKyc } from './kyc.mjs';
 import { createUsageLog, prefixOf } from './usage-log.mjs';
+import { fetch as undiciFetch } from 'undici';
+import { pruneMessageImages, pruneToolOutputs, optimizeContext } from './context-optimizer.mjs';
+import { getSharedDispatcher } from './network-optimizer.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = fs.existsSync(path.join(HERE, '..', 'start.cmd')) || fs.existsSync(path.join(HERE, '..', 'LICENSE'))
@@ -317,9 +320,10 @@ function clientGoneError() {
  * 单独归类成 transient，避免被当成 400 类"不可重试"错误直接打挂整个请求。
  * 客户端断连触发的 AbortError 单独上抛（绝不能按 transient 冷却账号）。
  */
-async function upstreamFetch(url, init) {
+async function upstreamFetch(url, init = {}) {
   try {
-    return await fetch(url, init);
+    const dispatcher = getSharedDispatcher();
+    return await undiciFetch(url, { ...init, dispatcher });
   } catch (e) {
     if (e?.name === 'AbortError' || init?.signal?.aborted) throw clientGoneError();
     const inner = e?.cause ? `: ${e.cause.code || e.cause.message || e.cause}` : '';
@@ -420,9 +424,11 @@ async function resolveImage(ref, signal) {
     if (signal) sigs.push(signal);
     let r;
     try {
-      r = await fetch(s, {
+      const dispatcher = getSharedDispatcher();
+      r = await undiciFetch(s, {
         redirect: 'follow', signal: AbortSignal.any(sigs),
         headers: { accept: 'image/*,*/*;q=0.8', 'user-agent': DEFAULT_UA },
+        dispatcher,
       });
     } catch (e) {
       // 下载失败与账号无关，换账号也没用 -> 不可重试，由调用方记进失败说明
@@ -1142,15 +1148,20 @@ async function collect(stream, acct, ctx, body = null) {
 /** 流式：把上游事件逐个转成 OpenAI chunk 写出去 */
 async function streamToClient(res, stream, model, chatId, acct, ctx, body = null) {
   const created = Math.floor(Date.now() / 1000);
-  const send = o => res.write(`data: ${JSON.stringify(o)}\n\n`);
+  try { res.on('error', () => {}); } catch {}
+  const send = o => {
+    if (!res.writableEnded && !res.destroyed) {
+      try { res.write(`data: ${JSON.stringify(o)}\n\n`); } catch {}
+    }
+  };
   const chunk = (delta, finish = null) =>
     send({ id: chatId, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta, finish_reason: finish }] });
 
   // 定期发送 SSE 心跳保活，防止客户端或网关因空闲超时掐断连接（如 pi-ai stream idle timeout）
   const keepAliveTimer = setInterval(() => {
-    try {
-      res.write(': keep-alive\n\n');
-    } catch {
+    if (!res.writableEnded && !res.destroyed) {
+      try { res.write(': keep-alive\n\n'); } catch { clearInterval(keepAliveTimer); }
+    } else {
       clearInterval(keepAliveTimer);
     }
   }, 10000);
@@ -1286,10 +1297,12 @@ async function streamToClient(res, stream, model, chatId, acct, ctx, body = null
       chunk({}, sawTool ? 'tool_calls' : mapStopReason(stop));
     }
     if (!started) chunk({ role: 'assistant', content: '' });
-    res.write('data: [DONE]\n\n');
+    if (!res.writableEnded && !res.destroyed) {
+      try { res.write('data: [DONE]\n\n'); } catch {}
+    }
   } finally {
     clearInterval(keepAliveTimer);
-    res.end();
+    try { if (!res.writableEnded) res.end(); } catch {}
   }
 }
 
@@ -1859,6 +1872,22 @@ setInterval(cleanupConvRouting, 60 * 1000);
 async function runCompletion(body, model, signal, apiKey, req) {
   const convKey = getConversationKey(body, req);
   let preferredId = convKey ? CONV_ROUTING.get(convKey)?.accountId : null;
+
+  // ── 上下文优化：修剪历史旧图片与冗长工具输出，大幅减小 prompt 体积 ──
+  // 仅当池配置启用 pruneContext 时生效（默认 true）
+  if (POOL?.data?.pruneContext !== false && Array.isArray(body.messages)) {
+    const maxToolChars = +(POOL?.data?.pruneMaxToolChars || 8000);
+    const keepRecentTools = +(POOL?.data?.pruneKeepRecentTools || 4);
+    body = {
+      ...body,
+      messages: optimizeContext(body.messages, {
+        keepRecentTurns: Math.max(2, +(POOL?.data?.pruneKeepRecentTools || 4)),
+        maxImages: 3,
+        maxChars: maxToolChars,
+      }),
+    };
+  }
+
   const upBody = buildUpstreamBody(body, model);
   const images = collectImages(body);          // 本轮要上传的图片（与 prompt 里 [image] 占位同序同集合）
   const tried = new Set();
@@ -2590,9 +2619,11 @@ const server = http.createServer(async (req, res) => {
         try {
           return await streamToClient(res, run.stream, model, chatId, run.account, run.ctx, body);
         } catch (streamErr) {
-          try { res.write(`data: ${JSON.stringify({ error: { message: streamErr.message, type: 'proxy_error' } })}\n\n`); } catch {}
-          try { res.write('data: [DONE]\n\n'); } catch {}
-          try { res.end(); } catch {}
+          if (!res.writableEnded && !res.destroyed) {
+            try { res.write(`data: ${JSON.stringify({ error: { message: streamErr.message, type: 'proxy_error' } })}\n\n`); } catch {}
+            try { res.write('data: [DONE]\n\n'); } catch {}
+            try { res.end(); } catch {}
+          }
           throw streamErr;
         } finally {
           run.release();
