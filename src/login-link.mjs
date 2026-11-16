@@ -222,13 +222,46 @@ function claudeCookies(cookies) {
 /** 取回/复用「页面级」CDP 连接（DOM 检测与跳转都用它） */
 async function ensurePageCdp(flow) {
   if (flow.pageCdp && flow.pageCdp.ws.readyState === 1) return flow.pageCdp;
-  const list = await (await fetch(`http://127.0.0.1:${flow.port}/json/list`, {
-    signal: AbortSignal.timeout(3000),
-  })).json();
-  const page = list.find(t => t.type === 'page' && /claude\.ai/.test(t.url))
-    || list.find(t => t.type === 'page');
-  if (!page) throw new Error('找不到浏览器页面 target');
+  let page = null;
+  // 多次轮询探测可用 page target
+  for (let i = 0; i < 6; i++) {
+    try {
+      const list = await (await fetch(`http://127.0.0.1:${flow.port}/json/list`, {
+        signal: AbortSignal.timeout(2000),
+      })).json();
+      page = list.find(t => t.type === 'page' && /claude\.ai/.test(t.url))
+        || list.find(t => t.type === 'page');
+      if (page?.webSocketDebuggerUrl) break;
+    } catch {}
+
+    // 如果没有 page target（如 Linux Chromium 冷启动时默认未创建），显式触发 /json/new
+    if (!page) {
+      try {
+        const created = await (await fetch(`http://127.0.0.1:${flow.port}/json/new`, {
+          method: 'PUT',
+          signal: AbortSignal.timeout(2000),
+        })).json();
+        if (created?.webSocketDebuggerUrl && (created.type === 'page' || !created.type)) {
+          page = created;
+          break;
+        }
+      } catch {}
+    }
+    await sleep(400);
+  }
+
+  if (!page?.webSocketDebuggerUrl) throw new Error('找不到浏览器页面 target');
   flow.pageCdp = await CDP.connect(page.webSocketDebuggerUrl);
+
+  // 必须显式激活并导航到登录页，确保 0 秒直达，不卡在 about:blank
+  try {
+    await flow.pageCdp.call('Page.enable');
+    const u = String(page.url || '');
+    if (!u || u === 'about:blank' || !/claude\.ai/i.test(u)) {
+      await flow.pageCdp.call('Page.navigate', { url: loginUrl });
+    }
+  } catch {}
+
   return flow.pageCdp;
 }
 
@@ -359,12 +392,15 @@ export function createLoginManager(opts) {
   async function submitEmailToClaude(flow, email) {
     const cdp = await ensurePageCdp(flow);
     const start = Date.now();
-    while (Date.now() - start < 20000) {
+    while (Date.now() - start < 25000) {
       if (!LIVE.has(flow.state)) return false;
       try {
         const r = await cdp.call('Runtime.evaluate', {
           expression: `(() => {
-            const input = document.querySelector('input[type="email"], input[name="email"], input#email');
+            const inputs = Array.from(document.querySelectorAll('input'));
+            const input = document.querySelector('input[type="email"], input[name="email"], input#email')
+              || inputs.find(i => /email|mail|メール/i.test([i.placeholder, i.name, i.id, i.getAttribute('aria-label')].join(' ')))
+              || (inputs.length === 1 ? inputs[0] : null);
             if (!input) return false;
             input.focus();
             const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
@@ -375,8 +411,13 @@ export function createLoginManager(opts) {
             }
             input.dispatchEvent(new Event('input', { bubbles: true }));
             input.dispatchEvent(new Event('change', { bubbles: true }));
+
+            // 支持 中文(继续/登录)、英文(continue/login/submit)、日文(メールで続ける/続ける) 等多语言按钮
+            const buttons = Array.from(document.querySelectorAll('button'));
             const btn = document.querySelector('button[type="submit"]')
-              || [...document.querySelectorAll('button')].find(b => /continue|继续|login|登录/i.test(b.innerText || ''));
+              || buttons.find(b => /continue|继续|login|登录|続ける|メールで/i.test((b.innerText || '').trim()))
+              || buttons.find(b => /submit/i.test(b.type || ''));
+
             if (btn && !btn.disabled) {
               btn.click();
               return true;
@@ -657,7 +698,10 @@ export function createLoginManager(opts) {
         f.message = `正在向 Claude.ai 自动填入邮箱 ${f.autoEmail}…`;
         submitEmailToClaude(f, f.autoEmail).then(async ok => {
           console.log(`[login] ${f.id} 自动提交邮箱 ${f.autoEmail} 结果: ${ok}`);
-          if (!ok) return;
+          if (!ok) {
+            if (LIVE.has(f.state)) f.message = `未能自动填入邮箱（页面可能需要人工验证或加载较慢），可在浏览器窗口直接操作`;
+            return;
+          }
           f.message = `已提交邮箱 ${f.autoEmail}，正在等待 Claude 验证邮件…`;
           if (typeof verificationProvider === 'function') {
             try {
@@ -681,6 +725,7 @@ export function createLoginManager(opts) {
           }
         }).catch(e => {
           console.warn(`[login] ${f.id} 自动提交邮箱异常: ${e.message}`);
+          if (LIVE.has(f.state)) f.message = `自动填入邮箱异常: ${e.message}`;
         });
       }
 
