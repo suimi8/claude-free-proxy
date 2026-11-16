@@ -669,6 +669,17 @@ function renderPrompt(body) {
     }
   }
 
+  // 避免模型在长上下文中受历史 [TOOL_CALL] 纯文本影响产生模仿幻觉
+  const hasTools = (Array.isArray(body?.tools) && body.tools.length > 0) ||
+                   (Array.isArray(body?.functions) && body.functions.length > 0);
+  if (hasTools) {
+    systems.push(
+      '[TOOL INSTRUCTION]\n' +
+      'You are equipped with real tools via native tool_use. The tags "[TOOL_CALL ...]" in previous messages are historical transcription markers only.\n' +
+      'CRITICAL: When you want to call tools, you MUST invoke native tool calls (tool_use). NEVER output literal "[TOOL_CALL ...]" text in your response content.'
+    );
+  }
+
   let prompt = '';
   if (systems.length) prompt += `[SYSTEM]\n${systems.join('\n\n')}\n\n`;
   prompt += parts.join('\n\n');
@@ -727,6 +738,102 @@ function mapTools(tools) {
     out.push({ name: n.name, description: n.description, input_schema: n.parameters });
   }
   return out.length ? out : undefined;
+}
+
+/**
+ * 伪工具调用提取器 (Fallback Tool Call Extractor):
+ * 在多轮 Agent 长会话中，Claude 模型若产生幻觉直接在正文输出了
+ * `[TOOL_CALL <func_name>] <json_arguments>`，本函数将其自动解析并剔除，
+ * 转换为 OpenAI 标准的 tool_calls 列表，避免客户端卡死或断连。
+ */
+function extractPseudoToolCalls(fullText) {
+  if (!fullText || typeof fullText !== 'string') return { cleanText: fullText || '', toolCalls: [] };
+  
+  const markerRegex = /\[TOOL_CALL(?::|\s+)?([a-zA-Z0-9_\-\.]+)\s*\]/g;
+  let match;
+  const matches = [];
+  while ((match = markerRegex.exec(fullText)) !== null) {
+    matches.push({
+      name: match[1],
+      startIndex: match.index,
+      argsStart: match.index + match[0].length,
+    });
+  }
+
+  if (matches.length === 0) {
+    return { cleanText: fullText, toolCalls: [] };
+  }
+
+  const toolCalls = [];
+  let firstCallIdx = fullText.length;
+
+  for (let i = 0; i < matches.length; i++) {
+    const cur = matches[i];
+    const nextStart = (i + 1 < matches.length) ? matches[i + 1].startIndex : fullText.length;
+    let candidate = fullText.slice(cur.argsStart, nextStart).trim();
+
+    let parsedArgs = null;
+    let jsonStr = candidate;
+
+    const braceStart = candidate.indexOf('{');
+    if (braceStart !== -1) {
+      let depth = 0;
+      let inString = false;
+      let escape = false;
+      let braceEnd = -1;
+      for (let pos = braceStart; pos < candidate.length; pos++) {
+        const ch = candidate[pos];
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (ch === '\\') {
+          escape = true;
+          continue;
+        }
+        if (ch === '"') {
+          inString = !inString;
+          continue;
+        }
+        if (!inString) {
+          if (ch === '{') depth++;
+          else if (ch === '}') {
+            depth--;
+            if (depth === 0) {
+              braceEnd = pos;
+              break;
+            }
+          }
+        }
+      }
+      if (braceEnd !== -1) {
+        jsonStr = candidate.slice(braceStart, braceEnd + 1);
+      }
+    }
+
+    try {
+      JSON.parse(jsonStr);
+      parsedArgs = jsonStr;
+    } catch {
+      parsedArgs = JSON.stringify({ input: jsonStr });
+    }
+
+    toolCalls.push({
+      id: 'call_' + randomUUID().replace(/-/g, '').slice(0, 9),
+      type: 'function',
+      function: {
+        name: cur.name,
+        arguments: parsedArgs,
+      },
+    });
+
+    if (cur.startIndex < firstCallIdx) {
+      firstCallIdx = cur.startIndex;
+    }
+  }
+
+  const cleanText = fullText.slice(0, firstCallIdx).trimEnd();
+  return { cleanText, toolCalls };
 }
 
 function buildUpstreamBody(body, model) {
@@ -1002,6 +1109,22 @@ async function collect(stream, acct, ctx) {
       default: break;
     }
   }
+
+  // 兜底补救：如果模型在正文中输出了伪工具指令且上游没出原生 tool_use，自动转换
+  if (toolCalls.length === 0 && text) {
+    const extracted = extractPseudoToolCalls(text);
+    if (extracted.toolCalls.length > 0) {
+      console.log(`[tool_fallback] (非流式) 检测到模型在正文中输出了伪工具指令，已自动转换为 ${extracted.toolCalls.length} 个原生 tool_calls`);
+      return {
+        text: extracted.cleanText,
+        toolCalls: extracted.toolCalls,
+        stop: 'tool_use',
+        model, id, limit,
+        reasoning: thinkParts.join('\n')
+      };
+    }
+  }
+
   return { text, toolCalls, stop, model, id, limit, reasoning: thinkParts.join('\n') };
 }
 
@@ -1017,6 +1140,42 @@ async function streamToClient(res, stream, model, chatId, acct, ctx) {
   let stop = null;
   let sawTool = false;
   let reasoning = '';   // 累积思考（用于段间补换行，最终与非流式拼接结果一致）
+  let accumulatedText = '';
+  let sentTextLength = 0;
+  let pseudoToolMode = false;
+  let finishedSent = false;
+
+  const flushToolFallbackIfNeeded = () => {
+    if (sawTool) return;
+    if (pseudoToolMode || accumulatedText.includes('[TOOL_CALL')) {
+      const extracted = extractPseudoToolCalls(accumulatedText);
+      if (extracted.toolCalls.length > 0) {
+        console.log(`[tool_fallback] (流式) 拦截到模型输出伪工具指令，已自动下发 ${extracted.toolCalls.length} 个原生 tool_calls 给客户端`);
+        for (let i = 0; i < extracted.toolCalls.length; i++) {
+          const tc = extracted.toolCalls[i];
+          chunk({
+            tool_calls: [{
+              index: i,
+              id: tc.id,
+              type: 'function',
+              function: {
+                name: tc.function.name,
+                arguments: tc.function.arguments,
+              }
+            }]
+          });
+        }
+        sawTool = true;
+        stop = 'tool_use';
+        return;
+      }
+    }
+    // 未命中伪工具，把缓冲区剩余的文字发完
+    if (accumulatedText.length > sentTextLength) {
+      chunk({ content: accumulatedText.slice(sentTextLength) });
+      sentTextLength = accumulatedText.length;
+    }
+  };
 
   for await (const ev of normalizeSse(stream, acct, ctx)) {
     switch (ev.type) {
@@ -1035,7 +1194,32 @@ async function streamToClient(res, stream, model, chatId, acct, ctx) {
       }
       case 'content_block_delta': {
         const d = ev.delta || {};
-        if (d.type === 'text_delta') chunk({ content: d.text });
+        if (d.type === 'text_delta') {
+          accumulatedText += d.text;
+          if (!sawTool) {
+            if (pseudoToolMode) {
+              // 处于拦截状态，静默累积，不向客户端发 content
+            } else {
+              const toolIdx = accumulatedText.indexOf('[TOOL_CALL');
+              if (toolIdx !== -1) {
+                pseudoToolMode = true;
+                if (toolIdx > sentTextLength) {
+                  chunk({ content: accumulatedText.slice(sentTextLength, toolIdx) });
+                  sentTextLength = toolIdx;
+                }
+              } else {
+                // 安全窗口：暂存最后 15 字符防止 [TOOL_CALL 被断词
+                const safeLen = Math.max(0, accumulatedText.length - 15);
+                if (safeLen > sentTextLength) {
+                  chunk({ content: accumulatedText.slice(sentTextLength, safeLen) });
+                  sentTextLength = safeLen;
+                }
+              }
+            }
+          } else {
+            chunk({ content: d.text });
+          }
+        }
         else if (d.type === 'thinking_summary_delta' || d.type === 'thinking_delta') {
           // 思考过程：上游只回摘要（thinking_summary_delta），转成 OpenAI 生态通用的
           // reasoning_content 增量下发（DeepSeek/Qwen 系客户端都认这个字段）
@@ -1053,10 +1237,11 @@ async function streamToClient(res, stream, model, chatId, acct, ctx) {
         break;
       }
       case 'message_delta':
+        flushToolFallbackIfNeeded();
         if (ev.delta?.stop_reason) {
-          stop = ev.delta.stop_reason;
-          // 有 tool_calls 时强制 finish_reason=tool_calls（上游可能报 end_turn）
+          stop = sawTool ? 'tool_use' : ev.delta.stop_reason;
           chunk({}, sawTool ? 'tool_calls' : mapStopReason(stop));
+          finishedSent = true;
         }
         break;
       case 'error':
@@ -1064,6 +1249,11 @@ async function streamToClient(res, stream, model, chatId, acct, ctx) {
         break;
       default: break;
     }
+  }
+
+  flushToolFallbackIfNeeded();
+  if (!finishedSent) {
+    chunk({}, sawTool ? 'tool_calls' : mapStopReason(stop));
   }
   if (!started) chunk({ role: 'assistant', content: '' });
   res.write('data: [DONE]\n\n');
