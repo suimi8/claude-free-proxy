@@ -1,0 +1,20 @@
+{
+  "name": "claude-desktop-proxy",
+  "version": "1.0.0",
+  "description": "Claude Desktop (free) reverse proxy to OpenAI compatible API",
+  "main": "src/openai-proxy.mjs",
+  "type": "module",
+  "scripts": {
+    "start": "node start.mjs",
+    "start:lan": "node start.mjs lan",
+    "test": "node tests/test_accounts.mjs"
+  },
+  "keywords": [
+    "claude",
+    "claude-desktop",
+    "openai-proxy",
+    "reverse-proxy",
+    "anthropic"
+  ],
+  "license": "MIT"
+}

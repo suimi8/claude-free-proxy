@@ -1,6 +1,6 @@
-# Claude Free Proxy
+# Claude Desktop (free) → OpenAI 兼容反代
 
-> 将 Claude 网页版 (free) 转换为标准 OpenAI 格式 API，支持多账号池轮询、并发限流、429 智能故障转移与开箱即用的 WebUI 控制台。
+> **基于 Claude 官方桌面端（Claude Desktop）本地会话解密与逆向反代**，将桌面端免费会话转化为标准 OpenAI 格式 API，支持多账号池轮询、并发限流、429 智能故障转移与开箱即用的 WebUI 控制台。
 
 [![Node.js](https://img.shields.io/badge/Node.js-22+-green.svg)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -8,20 +8,46 @@
 
 ---
 
+## 💡 为什么是 Claude Desktop（桌面端）逆向？
+
+如果你尝试过官方 API 路线，就会发现免费账号是无法直接获取商业 API 权限的：
+
+| 探索路径 | 实际结果 |
+|---|---|
+| 官方商业 API (`api.anthropic.com/v1/messages`) | `403 oauth_not_allowed_for_organization`（仅限付费套餐） |
+| `claude auth login`（Claude Code 授权） | 提示「连接 Claude Code 需要 Max、Ultra 或 Pro 套餐」 |
+| **Claude Desktop（桌面端）本地解密** | **✅ 成功获取完整合法会话与 Cookie** |
+
+### 桌面端逆向与解密链
+
+Claude 官方桌面端（Windows）基于 Electron 架构，用户的登录凭据被高强度加密保存在本地数据目录：`%LOCALAPPDATA%\Claude-Data\claude_pzs8sxrjxfjjc`。
+
+本项目内置了自动化解密工具（[tools/desktop_session.py](tools/desktop_session.py)），解密链如下：
+```text
+Local State (os_crypt.encrypted_key) 
+    └──> Windows DPAPI (CryptUnprotectData) 
+          └──> AES-256-GCM Key 
+                └──> 解密 Cookies.sqlite (encrypted_value) 
+                      └──> 提取 sessionKey、cf_clearance 与配套 Electron UA
+```
+**桌面客户端在后台正是使用这套凭证与上游保持长连接并调用 completion 接口进行对话。本代理通过自动化提取 Claude 桌面端凭据，彻底打通免费会话向通用 OpenAI 接口的转换！**
+
+---
+
 ## 🌟 核心特性
 
-- **零 API Key 依赖**：直接复用 Claude Free 网页端会话，免去官方商业 API 门槛。
-- **OpenAI 协议全兼容**：无缝接入 Cherry Studio、NextChat、Cursor、Chatbox 等第三方客户端及各类生态 SDK。
+- **Claude Desktop 原生会话复用**：自动化解密本地已安装的 Claude 桌面端凭据，免复制 Cookie、免抓包、开箱即用。
+- **OpenAI 协议全兼容**：无缝对接 Cherry Studio、NextChat、Cursor、Chatbox、沉浸式翻译等第三方客户端及各类 LangChain/LlamaIndex 应用。
 - **多账号智能调度池**：
-  - 支持 **轮询 (`round-robin`)** 与 **最闲优先 (`least-loaded`)** 调度策略。
-  - 每账号独立并发控制，超出自动排队。
-  - **429 区分处理**：区分「额度耗尽」与「瞬时并发满（1.5s 快速释放）」。
-  - **自动 Failover 与熔断自愈**：单一账号异常秒级无感切换，额度耗尽自动冷却并在窗口刷新时自愈回池。
-  - **低额度避让**：5h/7d 窗口剩余额度 `< 20%` 时自动切走，保障服务连续性。
+  - 支持 **轮询 (`round-robin`)** 与 **最闲优先 (`least-loaded`)** 调度。
+  - 每账号独立并发控制，超额自动排队。
+  - **精细区分两类 429**：区分「额度耗尽（等待窗口刷新）」与「瞬时并发满（1.5s 极速自愈）」。
+  - **自动 Failover 与熔断自愈**：单一账号异常秒级无感切换，额度耗尽自动冷却并在窗口刷新时重新入池。
+  - **低额度避让**：5h/7d 窗口剩余额度 `< 20%` 时自动切走，保障主力请求稳定。
 - **现代化 WebUI 控制台**：
   - 反代进程内置托管，访问 `http://127.0.0.1:8787` 即可实时查看账号状态、TPS 速度、用量日志与系统配置。
   - **🔗 自动化链接登录**：一键调起隔离浏览器完成 Claude 登录，CDP 自动捕获 Cookie/UA/组织信息入池。
-  - **肥猫猫临时邮箱集成**：支持配置临时邮箱 API，实现全自动接收验证邮件与 Magic Link 自动加号。
+  - **肥猫猫临时邮箱集成**：支持配置临时邮箱 API，实现全自动接收验证邮件与 Magic Link 批量加号。
 - **深度工程优化**：
   - **多模态图文对齐**：支持历史多轮对话中的图片准确关联与有序传递。
   - **真实 TPS 测速纠偏**：精准识别上游 Keep-Alive 挂起与正文输出，还原真实吐字速度。
@@ -50,7 +76,7 @@ claude-free-proxy/
 │
 ├── tools/                        # 实用工具与辅助脚本
 │   ├── accounts.ps1              # PowerShell 命令行账号快捷管理工具
-│   ├── desktop_session.py        # 从 Claude Desktop 本地配置提取 Session 工具
+│   ├── desktop_session.py        # Claude Desktop 本地会话解密与提取工具 (DPAPI+AES)
 │   ├── probe_upstream_timing.mjs # 上游连接与网络延迟分析工具
 │   └── record_har.mjs            # 浏览器网络交互录制抓包工具
 │
@@ -58,10 +84,10 @@ claude-free-proxy/
 │   ├── mock_claude.mjs           # Claude 官方交互仿真 Mock 服务
 │   ├── mock_upstream.mjs         # 上游反代模拟器
 │   ├── smoke.mjs                 # 快速冒烟测试
-│   ├── test_accounts.mjs         # 账号池冷却与轮询调度测试
+│   ├── test_accounts.mjs         # 账号池冷却与轮询调度测试 (24/24 passed)
 │   ├── test_e2e.mjs              # 端到端请求链路测试
 │   ├── test_image_collect.mjs    # 多图混排与上下文对齐测试
-│   ├── test_multi.mjs            # 多账号并发与故障转移集成测试
+│   ├── test_multi.mjs            # 多账号并发与故障转移集成测试 (29/29 passed)
 │   ├── test_pool_429.mjs         # 429 自动冷却熔断与恢复测试
 │   ├── test_responses.mjs        # 协议流式输出与格式测试
 │   ├── test_tps_record.mjs       # 出字速度 (TPS) 统计精准度验证
@@ -72,7 +98,8 @@ claude-free-proxy/
 │   ├── config.example.json       # 主系统配置模版
 │   └── upstream.example.json     # 单上游配置模版
 │
-├── start.cmd                     # Windows 一键无痛启动入口脚本
+├── package.json                  # Node.js 项目清单
+├── start.cmd                     # Windows 一键无痛启动入口脚本 (双击运行)
 ├── start.mjs                     # 跨平台启动协调器与端口占用检测
 ├── LICENSE                       # MIT 开源许可证
 └── README.md                     # 本文档
@@ -83,10 +110,10 @@ claude-free-proxy/
 ## 🚀 快速上手
 
 ### 环境需求
-- **Node.js**: `v22.0.0` 或更高版本（原生支持 fetch、WebSocket 与 ESM）
-- **操作系统**: Windows / macOS / Linux
+- **Node.js**: `v22.0.0` 或更高版本（原生支持 fetch、WebSocket 与 ESM，**全项目零第三方 npm 依赖**）
+- **Python 3**: Windows 环境运行 `tools/desktop_session.py` 解密桌面端时需要（使用内置 ctypes / sqlite3 模块，零 pip 依赖）
 
-### 1. 克隆与启动
+### 1. 启动服务
 
 ```bash
 git clone https://github.com/suimi8/claude-free-proxy.git
@@ -112,21 +139,26 @@ node start.mjs lan
 
 ---
 
-### 2. 添加 Claude 账号
+### 2. 账号接入模式
 
-服务启动后，浏览器打开管理控制台：
+服务启动后，打开浏览器访问管理控制台：
 👉 **http://127.0.0.1:8787**
 
-有两种添加账号的方式：
+#### 模式一：直接提取本机 Claude Desktop（推荐）
+如果你本机已经安装并登录了 Claude 官方桌面端，运行：
+```powershell
+python tools/desktop_session.py
+```
+脚本会自动解密当前桌面端的登录凭据并生成 `upstream.json`，代理启动时会自动加载作为基础账号。
 
-#### 方案 A：一键链接登录（强烈推荐 ⭐）
+#### 模式二：WebUI 自动化链接登录（扩充多账号池 ⭐）
 1. 在 WebUI 页面点击 **「🔗 链接登录」**。
 2. 系统会自动启动一个独立的 Chrome/Edge 浏览器并进入 Claude 登录页面。
 3. 在弹出的窗口中正常登录你的 Claude 账号。
-4. 登录完成后，后台会自动截获 `sessionKey`、`cf_clearance` 与配套精确 UA，自动完成组织探测并加入账号池。
+4. 登录完成后，后台自动捕获 `sessionKey`、`cf_clearance` 与配套 UA 并加入账号池。
 
-#### 方案 B：手动录入
-在控制台的账号管理中，填入你的账号备注和 `sessionKey`（从浏览器控制台 Application -> Cookies 中获取 `sessionKey=sk-ant-sid02-...`）。
+#### 模式三：手动添加 sessionKey
+在控制台的账号管理中，直接填入账号备注与 `sessionKey=sk-ant-sid02-...`。
 
 ---
 
@@ -157,15 +189,12 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 ## ⚙️ 核心架构与调度机制
 
-### 1. 为什么走 Web Completion 而不是官方 API？
-Claude Free 账号无法直接访问官方付费商用 API（`api.anthropic.com` 会返回 `403 oauth_not_allowed_for_organization`）。本项目通过逆向 Claude Desktop / 网页版的 Web 通道，利用 `sessionKey` 维护合法会话链路，实现免费账号能力的充分发挥。
-
-### 2. 账号池调度与容灾矩阵
+### 账号池调度与容灾矩阵
 
 | 机制 | 工作细节 |
 | :--- | :--- |
 | **多策略调度** | 支持 `round-robin`（严格轮询）与 `least-loaded`（基于 5 小时窗口占用率的动态权重分配）。 |
-| **智能并发控制** | 每账号支持独立设置并发槽位（默认 `3`），防止单个账号因高并发直接触发 Claude 官方风控。 |
+| **智能并发控制** | 每账号支持独立设置并发槽位（默认 `3`），防止单个账号因高并发直接触发官方风控。 |
 | **两级 429 区分** | <ul><li>**并发型 429**（`representativeClaim: concurrents`）：立即进入 1.5 秒短暂冷却后迅速重试，不污染主错误计数器。</li><li>**配额型 429**（`rate_limit_error`）：自动计算上游 `resets_at` 到期时刻并暂时移出活动池，等待到期自愈。</li></ul> |
 | **客户端中断感知** | 当客户端提前取消或断连时，立即中止上游 Fetch 请求并释放连接池，避免无效占用后续请求的配额。 |
 | **配置热重载** | `config.json` 与 `accounts.json` 的修改会被实时监听，无需重启服务即可即时生效。 |
