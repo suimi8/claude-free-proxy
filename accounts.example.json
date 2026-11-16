@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "strategy": "round-robin",
+  "perAccountConcurrency": 1,
+  "minQuotaRemaining": 0,
+  "maxFailover": 3,
+  "waitTimeoutMs": 120000,
+  "sessionAffinity": true,
+  "pruneContext": true,
+  "pruneMaxToolChars": 8000,
+  "pruneKeepRecentTools": 3,
+  "defaultEffort": "medium",
+  "accounts": [
+    {
+      "id": "acc-example-1",
+      "label": "Demo Account 1",
+      "sessionKey": "sk-ant-sid02-your-session-key-placeholder",
+      "org": "your-org-uuid-placeholder",
+      "base": "https://claude.ai",
+      "enabled": true
+    }
+  ]
+}

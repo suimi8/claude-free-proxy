@@ -1,0 +1,2081 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Proxy 控制台</title>
+<style>
+  :root {
+    --bg: #f2f5fa; --card: #ffffff; --ink: #1b2430; --sub: #64748b;
+    --line: #e6ebf3; --blue: #2563eb; --blue2: #1d4ed8; --blue-soft: #eaf1ff;
+    --green: #16a34a; --green-soft: #e8f7ee; --amber: #d97706; --amber-soft: #fdf3e3;
+    --red: #dc2626; --red-soft: #fdecec; --violet: #7c3aed;
+    --shadow: 0 1px 2px rgba(16,24,40,.05), 0 8px 24px -12px rgba(16,24,40,.12);
+    --r: 14px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+  button { font: inherit; cursor: pointer; border: 0; background: none; color: inherit; }
+  input, select, textarea { font: inherit; color: inherit; }
+  ::placeholder { color: #9aa7b8; }
+
+  /* ---------- 顶栏 ---------- */
+  header { position: sticky; top: 0; z-index: 30; background: rgba(255,255,255,.92);
+    backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+  .hwrap { max-width: 1280px; margin: 0 auto; padding: 12px 20px;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .logo { width: 30px; height: 30px; border-radius: 9px; flex: 0 0 auto;
+    background: linear-gradient(135deg, #f97316, #ef4444);
+    display: grid; place-items: center; color: #fff; font-size: 16px; }
+  .htitle { font-size: 16px; font-weight: 700; letter-spacing: .2px; }
+  .hsub { color: var(--sub); font-size: 12px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
+    border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; flex: 0 0 auto; }
+  #upstream { max-width: 46vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #cookieAge { white-space: nowrap; }
+  .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .pill.ok { color: var(--green); background: var(--green-soft); }
+  .pill.bad { color: var(--red); background: var(--red-soft); }
+  .pill.info { color: var(--blue); background: var(--blue-soft); }
+  .pill.mute { color: var(--sub); background: #eef2f7; }
+  .hspacer { flex: 1; }
+
+  /* ---------- 布局 ---------- */
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 18px 20px 60px; }
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 14px; }
+  .tile { background: var(--card); border: 1px solid var(--line); border-radius: var(--r);
+    padding: 12px 16px; box-shadow: var(--shadow); }
+  .tile .k { color: var(--sub); font-size: 12px; }
+  .tile .v { font-size: 22px; font-weight: 700; margin-top: 2px; }
+  .tile .v small { font-size: 12px; color: var(--sub); font-weight: 500; }
+
+  .strip { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+    background: var(--blue-soft); border: 1px solid #d7e4ff; color: #29437a;
+    border-radius: var(--r); padding: 10px 14px; margin-bottom: 14px; font-size: 13px; }
+  .strip code { background: rgba(255,255,255,.75); border: 1px solid #d7e4ff;
+    border-radius: 8px; padding: 2px 8px; font-size: 12.5px; }
+  .mini { border: 1px solid #c9d9ff; background: #fff; color: var(--blue2);
+    border-radius: 8px; padding: 2px 9px; font-size: 12px; font-weight: 600; }
+  .mini:hover { background: var(--blue-soft); }
+
+  /* ---------- 工具条 ---------- */
+  .bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
+  .search { flex: 1 1 220px; max-width: 340px; position: relative; }
+  .search input { width: 100%; padding: 9px 12px 9px 34px; border: 1px solid var(--line);
+    border-radius: 11px; background: #fff; outline: none; }
+  .search input:focus { border-color: #b7ccff; box-shadow: 0 0 0 3px #e2ebff; }
+  .search::before { content: "⌕"; position: absolute; left: 11px; top: 50%;
+    transform: translateY(-52%); color: var(--sub); font-size: 16px; }
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 9px 14px;
+    border-radius: 11px; background: #fff; border: 1px solid var(--line);
+    font-weight: 600; color: #334155; }
+  .btn:hover { border-color: #cdd8ea; background: #f8fafc; }
+  .btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+  .btn.primary:hover { background: var(--blue2); }
+  .btn.danger { color: var(--red); border-color: #f3c6c6; background: var(--red-soft); }
+  .btn.sm { padding: 6px 10px; font-size: 12.5px; border-radius: 9px; }
+  .btn:disabled { opacity: .55; cursor: default; }
+  .grow { flex: 1; }
+  .cfg { display: flex; gap: 8px; align-items: center; background: #fff;
+    border: 1px solid var(--line); border-radius: 11px; padding: 6px 10px; }
+  .cfg label { font-size: 12px; color: var(--sub); }
+  .cfg select, .cfg input { border: 1px solid var(--line); border-radius: 8px;
+    padding: 5px 7px; background: #f8fafc; outline: none; }
+  .cfg input[type=number] { width: 58px; }
+
+  .selectbar { display: flex; align-items: center; gap: 10px; background: #fff;
+    border: 1px solid var(--line); border-radius: 11px; padding: 8px 14px; margin-bottom: 12px; }
+  .selectbar label { display: flex; gap: 8px; align-items: center; color: var(--sub); font-size: 13px; }
+
+  /* ---------- 账号卡片 ---------- */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
+  .acc { background: var(--card); border: 1px solid var(--line); border-radius: var(--r);
+    box-shadow: var(--shadow); padding: 14px 16px 12px; display: flex; flex-direction: column; gap: 9px;
+    transition: box-shadow .15s, border-color .15s; }
+  .acc:hover { border-color: #d4deee; }
+  .acc.low { border-color: #f3b5b5; background: linear-gradient(#fff, #fffaf9); }
+  .acc.exhausted { border-color: #f0c2c2; background: linear-gradient(#fff, #fff7f7); opacity: .78; }
+  .acc.off { opacity: .62; }
+  .acc-top { display: flex; align-items: center; gap: 8px; }
+  .acc-name { font-weight: 700; font-size: 14.5px; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; max-width: 46%; }
+  .badge { font-size: 10.5px; font-weight: 800; letter-spacing: .4px; padding: 2px 8px;
+    border-radius: 999px; background: #eef2f7; color: var(--sub); }
+  .badge.free { background: #e8f7ee; color: var(--green); }
+  .badge.lowq { background: var(--red-soft); color: var(--red); }
+  .switch { margin-left: auto; position: relative; width: 36px; height: 20px; flex: 0 0 auto; }
+  .switch input { display: none; }
+  .switch i { position: absolute; inset: 0; border-radius: 999px; background: #cbd5e1; transition: .15s; }
+  .switch i::after { content: ""; position: absolute; width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; top: 2px; left: 2px; transition: .15s; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+  .switch input:checked + i { background: var(--blue); }
+  .switch input:checked + i::after { left: 18px; }
+  .meta { color: var(--sub); font-size: 12px; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+  .meta b { color: #475569; font-weight: 600; }
+
+  .qline { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+  .qline .qlabel { width: 92px; color: #475569; flex: 0 0 auto; display: flex; gap: 5px; align-items: center; }
+  .qline .pct { width: 58px; text-align: right; font-weight: 700; flex: 0 0 auto; }
+  .qline .rem { color: var(--sub); font-size: 11.5px; }
+  .qline .bar { flex: 1; min-width: 60px; height: 8px; border-radius: 999px; background: #edf1f7; overflow: hidden; }
+  .qline .bar > span { display: block; height: 100%; border-radius: 999px; background: var(--green);
+    transition: width .4s; }
+  .qline .bar.w > span { background: var(--amber); }
+  .qline .bar.d > span { background: var(--red); }
+  .qline .bar.n > span { background: #cbd5e1; }
+
+  .statsline { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; color: var(--sub); }
+  .chip { background: #f4f7fb; border: 1px solid var(--line); border-radius: 8px; padding: 2px 8px; }
+  .chip.cooldown { background: var(--amber-soft); border-color: #f6dfb8; color: var(--amber); font-weight: 700; }
+  .chip.err { background: var(--red-soft); border-color: #f5cccc; color: var(--red); }
+  .chip.k-ok { background: var(--green-soft); border-color: #c9ead6; color: var(--green); font-weight: 700; }
+  .chip.k-warn { background: var(--amber-soft); border-color: #f6dfb8; color: var(--amber); font-weight: 700; }
+  .chip.k-danger { background: var(--red-soft); border-color: #f5cccc; color: var(--red); font-weight: 700; }
+  .chip.k-neutral { background: #eef2f7; color: var(--sub); }
+  .errline { font-size: 11.5px; color: var(--red); white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; }
+  .actions { display: flex; gap: 6px; margin-top: 2px; }
+  .actions .btn.sm { flex: 1; justify-content: center; }
+  .foot { display: flex; justify-content: space-between; color: #94a3b8; font-size: 11px; }
+
+  .empty { grid-column: 1/-1; text-align: center; color: var(--sub); padding: 46px 0;
+    background: #fff; border: 1px dashed #d4deee; border-radius: var(--r); }
+
+  /* ---------- 弹层 ---------- */
+  .mask { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none;
+    z-index: 50; place-items: center; }
+  .mask.on { display: grid; }
+  .modal { width: min(480px, 92vw); background: #fff; border-radius: 16px; padding: 20px;
+    box-shadow: 0 24px 64px rgba(2,6,23,.3); }
+  .modal h3 { margin: 0 0 4px; font-size: 16px; }
+  .modal p.hint { margin: 0 0 14px; color: var(--sub); font-size: 12.5px; }
+  .field { margin-bottom: 12px; }
+  .field label { display: block; font-size: 12.5px; color: #475569; font-weight: 600; margin-bottom: 5px; }
+  .field input, .field textarea { width: 100%; padding: 9px 11px; border: 1px solid var(--line);
+    border-radius: 10px; outline: none; background: #f8fafc; }
+  .field textarea { min-height: 74px; resize: vertical; font-family: Consolas, monospace; font-size: 12.5px; }
+  .field input:focus, .field textarea:focus { border-color: #b7ccff; box-shadow: 0 0 0 3px #e2ebff; background: #fff; }
+  .mrow { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  /* 链接登录 */
+  .loginbox { border: 1px solid var(--line); border-radius: 12px; padding: 14px; background: #f8fafc; }
+  .loginbox.done { background: var(--green-soft); border-color: #b7e4c7; }
+  .loginbox.bad { background: var(--red-soft); border-color: #f3c6c6; }
+  .loginbox.verify { background: #fffbe6; border-color: #ffe58f; animation: loginvp 1.6s infinite; }
+  @keyframes loginvp { 50% { border-color: #faad14; } }
+  .loginst { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; min-height: 40px; }
+  .loginst .spin { width: 9px; height: 9px; border-radius: 50%; background: var(--blue);
+    flex: 0 0 auto; margin-top: 6px; animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .2; } }
+  .loginlink { display: flex; gap: 6px; margin-top: 10px; }
+  .loginlink input { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--line);
+    border-radius: 9px; font-size: 12px; background: #fff; }
+  .collapse { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 10px; }
+  .collapse summary { cursor: pointer; color: var(--sub); font-size: 12.5px; }
+  .qdetail { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 8px 0 2px; font-size: 11.5px;
+    color: var(--sub); }
+  .qdetail b { color: #334155; font-weight: 600; }
+
+  /* 用量统计看板 */
+  .tabs { display: flex; gap: 4px; margin: 0 0 16px; border-bottom: 1px solid var(--line); }
+  .tabs button { padding: 10px 18px; font-size: 13.5px; font-weight: 600; color: var(--sub);
+    border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tabs button:hover { color: var(--ink); }
+  .tabs button.on { color: var(--blue); border-bottom-color: var(--blue); }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .metric { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px;
+    box-shadow: var(--shadow); }
+  .metric .k { color: var(--sub); font-size: 12px; }
+  .metric .v { font-size: 26px; font-weight: 700; margin-top: 8px; letter-spacing: -.5px; }
+  .metric .sub { color: var(--sub); font-size: 11.5px; margin-top: 4px; }
+  .panel { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 18px;
+    margin-top: 14px; box-shadow: var(--shadow); }
+  .panel h3 { margin: 0 0 12px; font-size: 14px; }
+  .panel .hint { color: var(--sub); font-size: 11.5px; margin: -6px 0 12px; }
+  .chart { width: 100%; height: 170px; display: block; }
+  table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.tbl th { text-align: left; color: var(--sub); font-weight: 600; padding: 9px 10px;
+    border-bottom: 1px solid var(--line); white-space: nowrap; }
+  table.tbl td { padding: 9px 10px; border-bottom: 1px solid #f1f5f9; white-space: nowrap; }
+  table.tbl tr:last-child td { border-bottom: 0; }
+  table.tbl .empty { text-align: center; color: var(--sub); padding: 26px; }
+  .tblwrap { overflow-x: auto; max-width: 100%; }
+  table.tbl td.errcell { max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+  table.tbl td.namecell { max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
+  table.tbl td.errcell span { color: #dc2626; }
+  table.tbl td.errcell.ok { color: #16a34a; }
+  .panel { overflow: hidden; }
+  .ufilters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+  .ufilters select, .ufilters input { padding: 7px 10px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+  .legend { display: flex; gap: 14px; font-size: 11.5px; color: var(--sub); margin-top: 6px; }
+  .legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+  @media (max-width: 900px) { .metrics { grid-template-columns: repeat(2, 1fr); } }
+
+  #toasts { position: fixed; right: 18px; bottom: 18px; z-index: 90; display: flex;
+    flex-direction: column; gap: 8px; }
+  .toast { background: #0f172a; color: #f1f5f9; border-radius: 11px; padding: 10px 14px;
+    font-size: 13px; box-shadow: 0 12px 32px rgba(2,6,23,.35); max-width: 380px;
+    animation: pop .18s ease; }
+  .toast.err { background: #7f1d1d; }
+  @keyframes pop { from { transform: translateY(8px); opacity: 0; } }
+  /* 系统设置面板 */
+  .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; margin-bottom: 20px; }
+  .scard { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 20px; box-shadow: var(--shadow); }
+  .scard h3 { margin: 0 0 4px; font-size: 15px; display: flex; align-items: center; gap: 8px; color: #1e293b; }
+  .scard .sdesc { color: var(--sub); font-size: 12px; margin: 0 0 16px; line-height: 1.45; }
+  .sitem { margin-bottom: 16px; }
+  .sitem:last-child { margin-bottom: 0; }
+  .sitem label { display: block; font-size: 13px; font-weight: 600; color: #334155; margin-bottom: 6px; }
+  .sitem input[type="text"], .sitem input[type="number"], .sitem select {
+    width: 100%; padding: 9px 12px; border: 1px solid var(--line); border-radius: 9px;
+    font-size: 13px; background: #f8fafc; outline: none; transition: border-color .15s, box-shadow .15s;
+  }
+  .sitem input:focus, .sitem select:focus { border-color: var(--blue); background: #fff; box-shadow: 0 0 0 3px rgba(37,99,235,.12); }
+  .sitem .tip { font-size: 12px; color: var(--sub); margin-top: 5px; line-height: 1.45; }
+  .stoggle-row { display: flex; align-items: center; justify-content: space-between; background: #f8fafc; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .stoggle-title { font-size: 13px; font-weight: 600; color: #1e293b; }
+  .stoggle-sub { font-size: 12px; color: var(--sub); margin-top: 2px; line-height: 1.4; }
+  .sactions { display: flex; gap: 12px; align-items: center; justify-content: flex-end; padding: 16px 20px;
+    background: #fff; border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); margin-top: 10px; }
+  .sinfo-box { background: #f8fafc; border: 1px dashed var(--line); border-radius: 10px; padding: 12px 14px; font-size: 12.5px; color: var(--sub); line-height: 1.6; }
+  .sinfo-box b { color: #334155; }
+  @media (max-width: 760px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="hwrap">
+    <div class="logo">✳</div>
+    <div>
+      <div class="htitle">Claude Proxy 控制台 <span class="hsub">multi-account relay</span></div>
+      <div class="hsub" id="upstream">上游连接中…</div>
+    </div>
+    <span class="pill ok" id="pillHealth"><span class="dot"></span>检测中</span>
+    <span class="pill mute" id="pillPlan">—</span>
+    <span class="pill info" id="pillStrategy">—</span>
+    <div class="hspacer"></div>
+    <span class="hsub" id="cookieAge"></span>
+    <button class="btn sm" id="btnKey">🔑 Key</button>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="tabs">
+    <button id="tabPool" class="on">👥 账号池</button>
+    <button id="tabUsage">📊 用量统计 / Tokens</button>
+    <button id="tabKeys">🔑 API Keys</button>
+    <button id="tabSettings">⚙️ 系统设置</button>
+  </div>
+
+  <div id="viewPool">
+  <div class="tiles">
+    <div class="tile"><div class="k">账号总数</div><div class="v" id="tTotal">–</div></div>
+    <div class="tile"><div class="k">当前可用</div><div class="v" id="tEligible">–</div></div>
+    <div class="tile"><div class="k">429 额度耗尽池</div><div class="v" id="tExhausted">–</div></div>
+    <div class="tile"><div class="k">冷却 / 停用</div><div class="v" id="tCool">–</div></div>
+    <div class="tile"><div class="k">在途请求</div><div class="v" id="tFly">–</div></div>
+  </div>
+
+  <div class="strip">
+    <b>接入地址（反代直出）：</b>
+    <code id="baseURL">–</code><button class="mini" data-copy="#baseURL">复制</button>
+    <code id="keyView">–</code><button class="mini" data-copy="#keyView">复制</button>
+    <span class="grow"></span>
+    <span id="quotaRule">额度剩余 &lt; 20% 自动切换账号</span>
+  </div>
+
+  <div class="bar">
+    <div class="search"><input id="search" placeholder="搜索备注 / org / sessionKey"></div>
+    <button class="btn primary" id="btnLogin">🔗 链接登录（推荐）</button>
+    <button class="btn" id="btnAdd">✎ 手动输入</button>
+    <button class="btn" id="btnImport">🖥️ 导入 Desktop 登录态</button>
+    <button class="btn" id="btnRefresh">⟳ 刷新</button>
+    <button class="btn" id="btnQuotaAll" title="对所有账号主动查一次额度（每个账号消耗 1 条最小消息）">📊 刷新全部额度</button>
+    <button class="btn" id="btnKycAll" title="查询所有账号各组织的 KYC 状态（只读接口，不消耗额度，结果缓存 5 分钟）">🪪 查全部 KYC</button>
+    <div class="grow"></div>
+    <div class="cfg">
+      <label>轮询</label>
+      <select id="cfgStrategy">
+        <option value="round-robin">round-robin（严格轮询）</option>
+        <option value="least-loaded">least-loaded（最闲优先）</option>
+      </select>
+      <label>并发/账号</label><input type="number" id="cfgConc" min="1" max="32">
+      <label>额度阈值</label><input type="number" id="cfgThr" min="0" max="99" step="1">%
+      <button class="btn sm primary" id="btnCfg">保存</button>
+      <button class="btn sm" id="btnMoreCfg" title="进入完整的系统参数与防爆炸设置面板">⚙️ 更多设置</button>
+    </div>
+  </div>
+
+  <div class="selectbar">
+    <label><input type="checkbox" id="selAll"> 全选</label>
+    <span id="selInfo" class="hsub"></span>
+    <div class="grow"></div>
+    <button class="btn sm danger" id="btnDelSel" style="display:none">🗑 删除所选</button>
+  </div>
+
+  <div class="grid" id="grid"></div>
+  </div><!-- /viewPool -->
+
+  <div id="viewUsage" style="display:none">
+    <div class="ufilters">
+      <select id="uRange">
+        <option value="today">当天</option>
+        <option value="yesterday">昨天</option>
+        <option value="7d">近 7 天</option>
+        <option value="all">全部</option>
+      </select>
+      <select id="uAccount"><option value="">全部账号</option></select>
+      <button class="btn sm" id="uRefresh">⟳ 刷新</button>
+      <span class="grow"></span>
+      <span class="hsub" id="uNote"></span>
+    </div>
+
+    <div class="metrics">
+      <div class="metric"><div class="k">总成本</div><div class="v" id="mCost">—</div>
+        <div class="sub">上游无计费数据，不编造</div></div>
+      <div class="metric"><div class="k">总请求数</div><div class="v" id="mReq">0</div>
+        <div class="sub" id="mReqSub">成功 0</div></div>
+      <div class="metric"><div class="k">真实消耗 Tokens</div><div class="v" id="mTokens">0</div>
+        <div class="sub" id="mTokensSub">输入 0 · 输出 0</div></div>
+      <div class="metric"><div class="k">缓存命中率</div><div class="v" id="mCache">0%</div>
+        <div class="sub" id="mCacheSub">命中 0 / 0 次请求</div></div>
+      <div class="metric"><div class="k">真实出字速度</div><div class="v" id="mTps">—</div>
+        <div class="sub" id="mTpsSub">正文 token ÷ 书写时间</div></div>
+    </div>
+
+    <div class="panel">
+      <h3>Tokens · 按小时</h3>
+      <div class="hint">本地按中英文分开估算 token（中文 1 字 1 token，其余 4 字符 1 token）；缓存命中部分不计入「新增输入」</div>
+      <svg class="chart" id="uChart" viewBox="0 0 900 170" preserveAspectRatio="none"></svg>
+      <div class="legend"><span><i style="background:#2563eb"></i>输入</span>
+        <span><i style="background:#f97316"></i>输出</span>
+        <span><i style="background:#16a34a"></i>缓存命中</span></div>
+    </div>
+
+    <div class="panel">
+      <h3>按账号 · 已使用 Tokens</h3>
+      <div class="hint">账号池中所有账号都会记录；已停用 / 无请求也显示（计 0）</div>
+      <div class="tblwrap"><table class="tbl"><thead><tr>
+        <th>账号</th><th>状态</th><th>请求数</th><th>新增输入</th><th>输出</th>
+        <th>合计已用</th><th>缓存命中率</th><th>额度剩余</th>
+      </tr></thead><tbody id="uAccounts"></tbody></table></div>
+    </div>
+
+    <div class="panel">
+      <h3>请求日志</h3>
+      <div class="hint">「缓存命中」按稳定前缀（system + tools + 历史消息）最长公共前缀判定，TTL 5 分钟。
+        「速度」= <b>真实出字速度</b>：可见正文 token ÷ 真正在写正文的那段时间（不含思考期、不含上游吊连接的空闲）；
+        悬停可看时间轴拆分。「思考」是模型思考耗时，「首字」是首个增量延迟。</div>
+      <div class="tblwrap"><table class="tbl"><thead><tr>
+        <th>时间</th><th>账号</th><th>模型</th><th>新增输入</th><th>输出</th>
+        <th>缓存命中</th><th>速度</th><th>思考</th><th>首字</th><th>耗时</th><th>状态</th>
+      </tr></thead><tbody id="uLogs"></tbody></table></div>
+    </div>
+  </div><!-- /viewUsage -->
+
+  <div id="viewKeys" style="display:none">
+    <div class="panel">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+        <h2 style="margin:0;font-size:15px;font-weight:700">🔑 API Keys</h2>
+        <span class="hsub" id="kNote"></span>
+        <span class="grow"></span>
+        <button class="btn primary" id="btnKeyNew">＋ 新建 Key</button>
+        <button class="btn" id="btnKeyRefresh">⟳ 刷新</button>
+      </div>
+      <div class="tblwrap">
+        <table class="tbl"><thead><tr>
+          <th>名称</th><th>Key</th><th>状态</th><th>额度 / 已用</th><th>到期</th>
+          <th>模型范围</th><th>RPM / TPM</th><th>IP 白名单</th><th>操作</th>
+        </tr></thead><tbody id="kRows"></tbody></table>
+      </div>
+      <p class="hint" style="margin-top:10px">
+        额度口径与账号用量一致：输入（含缓存命中）+ 输出。0 表示不限制。所有配置存在
+        <code>config.json</code>，改完自动热加载，不用重启。
+      </p>
+    </div>
+  </div><!-- /viewKeys -->
+
+  <div id="viewSettings" style="display:none">
+    <div class="settings-grid">
+      <!-- 账号池与调度并发 -->
+      <div class="scard">
+        <h3>🔀 账号调度与并发策略</h3>
+        <div class="sdesc">配置多账号分配算法、单号并发上限及智能换号规则。</div>
+
+        <div class="sitem">
+          <label>轮询策略 (Strategy)</label>
+          <select id="cfgFullStrategy">
+            <option value="least-loaded">least-loaded（最闲优先 - 推荐，按 5h 用量自动均衡）</option>
+            <option value="round-robin">round-robin（严格轮询 - 账号依次平均分配）</option>
+          </select>
+          <div class="tip">优先推荐 <b>least-loaded</b>，将新请求分给当前 5 小时窗口用量最低的账号，最大化利用多账号额度。</div>
+        </div>
+
+        <div class="sitem">
+          <div class="stoggle-row">
+            <div>
+              <div class="stoggle-title">智能会话粘性 (Session Affinity / 前缀缓存保活)</div>
+              <div class="stoggle-sub">同一会话优先锁定同一账号，吃满 Anthropic 官方前缀缓存 (85%+)，避免 100 万 Tokens 爆炸与 429</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="cfgFullAffinity"><i></i></label>
+          </div>
+          <div class="tip" style="margin-top:8px">
+            开启后，同一会话的多轮对话优先路由至同一账号，充分命中 Claude 上游 Prompt Cache（高达 90% 缓存命中率），大幅节省输入 Tokens 并加快响应；仅当账号额度不足、满并发或冷却时才平滑故障转移。
+          </div>
+        </div>
+
+        <div class="sitem">
+          <label>单账号最大并发数 (Per-Account Concurrency)</label>
+          <input type="number" id="cfgFullConc" min="1" max="32" step="1">
+          <div class="tip"><b>严格限制 3</b>。Claude 官方免费账号上游限制并发为 3。一旦在途请求达到该值，反代自动切换至其他账号，绝不向同号硬塞。</div>
+        </div>
+
+        <div class="sitem">
+          <label>额度切换阈值 (Min Quota Remaining)</label>
+          <div style="display:flex;align-items:center;gap:8px">
+            <input type="number" id="cfgFullThr" min="0" max="99" step="1">
+            <span style="font-weight:600;color:var(--sub)">%</span>
+          </div>
+          <div class="tip">当账号 5h 或 7d 窗口剩余额度低于该百分比时（默认 20%），新对话自动切到其他充足账号。</div>
+        </div>
+
+        <div class="sitem">
+          <label>失败自动换号次数 (Max Failover)</label>
+          <input type="number" id="cfgFullFailover" min="1" max="10" step="1">
+          <div class="tip">当选中账号触发 429、凭据失效或异常时，自动换下一个可用账号尝试的最大次数（默认 3 次）。</div>
+        </div>
+
+        <div class="sitem">
+          <label>全忙排队超时时间 (Wait Timeout)</label>
+          <div style="display:flex;align-items:center;gap:8px">
+            <input type="number" id="cfgFullWaitTimeout" min="1" max="300" step="1">
+            <span style="font-weight:600;color:var(--sub)">秒</span>
+          </div>
+          <div class="tip">当所有账号都在冷却或并发满载时，请求在反代内部排队等待账号释放的最大时长（默认 30 秒）。</div>
+        </div>
+      </div>
+
+      <!-- 上下文智能防爆炸 -->
+      <div class="scard">
+        <h3>🧠 上下文智能瘦身 / 防爆炸</h3>
+        <div class="sdesc">针对编程 Agent (Codex/Cline/Claude Code 等) 历史长日志进行智能折叠，彻底防止百万 Tokens 爆炸。</div>
+
+        <div class="sitem">
+          <div class="stoggle-row">
+            <div>
+              <div class="stoggle-title">启用上下文智能瘦身 (Context Pruner)</div>
+              <div class="stoggle-sub">自动折叠更早轮次的超长工具输出，首尾关键代码与结构 100% 保留</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="cfgFullPrune"><i></i></label>
+          </div>
+          <div class="tip" style="margin-top:8px">
+            多轮对话中 Agent 频繁读取长文件或终端构建日志会迅速将单次请求膨胀到十几万甚至上百万 Tokens。开启后中间冗余被优雅折叠，首尾保留率 90%，大幅度减小单次请求体。
+          </div>
+        </div>
+
+        <div class="sitem">
+          <label>历史工具折叠阈值 (Max Tool Output Chars)</label>
+          <div style="display:flex;align-items:center;gap:8px">
+            <input type="number" id="cfgFullPruneChars" min="200" max="100000" step="100">
+            <span style="font-weight:600;color:var(--sub)">字符</span>
+          </div>
+          <div class="tip">超过此长度的历史工具输出才会被折叠（推荐 8000 字符，约 2000 Tokens，可完整容纳 200~250 行代码）。保留头部 60%（导入/声明）与尾部 30%（返回值/报错摘要）。</div>
+        </div>
+
+        <div class="sitem">
+          <label>保留最近完整工具数 (Keep Recent Tools)</label>
+          <div style="display:flex;align-items:center;gap:8px">
+            <input type="number" id="cfgFullPruneKeep" min="0" max="10" step="1">
+            <span style="font-weight:600;color:var(--sub)">轮</span>
+          </div>
+          <div class="tip">倒数最近的 N 个工具结果 <b>100% 完整保留、绝不折叠</b>（推荐 4 轮），确保模型对当前及上一轮的所有关键输出拥有完全精度。</div>
+        </div>
+      </div>
+
+      <!-- 思考档位与模型能力 -->
+      <div class="scard">
+        <h3>⚡ 思考与推理档位 (Thinking Effort)</h3>
+        <div class="sdesc">配置 Claude Extended Thinking 思考深度与上游映射。</div>
+
+        <div class="sitem">
+          <label>默认思考深度 (Default Effort)</label>
+          <select id="cfgFullEffort">
+            <option value="max">max（最高深度 - 默认推荐，最强编程逻辑与分析能力）</option>
+            <option value="xhigh">xhigh（超高深度 - 强化复杂任务推理）</option>
+            <option value="high">high（高深度 - 开启完整思考链，出思考块）</option>
+            <option value="medium">medium（中等推理 - 不出思考块，响应更快）</option>
+            <option value="low">low（关闭思考 - 最快响应，最省额度）</option>
+          </select>
+          <div class="tip">当客户端或 SDK 未显式传 reasoning_effort 或 thinking 字段时使用。high 起开启官方 Extended Thinking 摘要回传。</div>
+        </div>
+
+        <div class="sitem" style="margin-top:20px">
+          <label>计费单价估算 (¥/M Tokens)</label>
+          <div style="display:flex;align-items:center;gap:8px">
+            <input type="number" id="cfgFullPrice" min="0" max="1000" step="0.1">
+            <span style="font-weight:600;color:var(--sub)">元/百万 Tokens</span>
+          </div>
+          <div class="tip">仅用于「用量统计」面板中展示“约合 ¥”估算值。设为 0 表示不计算展示金额。</div>
+        </div>
+      </div>
+
+      <!-- 肥猫猫临时邮箱配置 -->
+      <div class="scard">
+        <h3>🐱 肥猫猫临时邮箱 · 一键自动登录配置</h3>
+        <div class="sdesc">配置肥猫猫临时邮箱服务（zjkdongao.cn）的 API 鉴权 Token。配置后支持在添加账号时一键全自动接收验证邮件/Magic Link 并完成登录。</div>
+
+        <div class="sitem">
+          <label>肥猫猫服务接口地址 (Base URL)</label>
+          <input type="text" id="cfgMaoMailBaseUrl" placeholder="https://zjkdongao.cn">
+          <div class="tip">默认端点 <code>https://zjkdongao.cn</code>。</div>
+        </div>
+
+        <div class="sitem">
+          <label>Authorization Token (JWT Bearer)</label>
+          <input type="password" id="cfgMaoMailToken" placeholder="Bearer your-jwt-token-here...">
+          <div class="tip">肥猫猫登录后的 Bearer Token（网页版登录后在请求头或 localStorage 中获取）。支持带或不带 "Bearer " 前缀。</div>
+        </div>
+
+        <div class="sitem">
+          <div style="display:flex;align-items:center;gap:10px">
+            <button class="btn sm" id="btnTestMaoMail" type="button">🔍 测试邮箱连接与邮箱列表</button>
+            <span id="maomailStatusTip" style="font-size:12px;color:var(--sub)"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 服务状态与存储说明 -->
+      <div class="scard">
+        <h3>ℹ️ 反代服务信息与即时生效</h3>
+        <div class="sdesc">配置存储在 accounts.json 与 config.json，保存后实时生效，无需重启进程。</div>
+
+        <div class="sitem">
+          <div class="sinfo-box">
+            <div><b>服务接入地址：</b> <span id="srvAddr">http://127.0.0.1:8787/v1</span></div>
+            <div><b>当前账号状态：</b> <span id="srvAccCount">–</span></div>
+            <div><b>配置文件位置：</b> <code>accounts.json</code> / <code>config.json</code></div>
+            <div style="margin-top:6px;color:#16a34a">✓ 支持热更新：保存配置后服务端内存与磁盘同步更新，下一个请求立即按新策略执行。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 底部保存条 -->
+    <div class="sactions">
+      <button class="btn" id="btnResetSettings">↺ 恢复推荐默认值</button>
+      <button class="btn primary" id="btnSaveSettings" style="min-width:140px">💾 保存全部设置</button>
+    </div>
+  </div><!-- /viewSettings -->
+</div>
+
+<!-- 链接登录（主入口） -->
+<div class="mask" id="maskLogin">
+  <div class="modal" style="width:min(760px,95vw);max-height:92vh;overflow-y:auto">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      <h3 style="margin:0">🐱 Claude 自动登录 · 凭据捕获</h3>
+      <div style="display:flex;gap:6px">
+        <button class="btn sm on" id="tabLoginBatch" type="button" style="font-weight:600">🚀 多邮箱并发批量登录</button>
+        <button class="btn sm" id="tabLoginSingle" type="button">⚡ 单邮箱登录</button>
+      </div>
+    </div>
+    <p class="hint" style="margin-bottom:10px">自动驱动 Edge 独立浏览器打开 Claude、自动填入邮箱、从肥猫猫 API 实时接收 Magic Link 并自动跳转登录写入账号池。</p>
+
+    <!-- 批量并发登录面板 -->
+    <div id="boxLoginBatch">
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:12px 14px;margin-bottom:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+          <div style="display:flex;align-items:center;gap:6px">
+            <span style="font-size:12.5px;font-weight:700;color:#334155">肥猫猫邮箱选择</span>
+            <span id="batchMailCount" style="font-size:12px;color:var(--sub)">(加载中…)</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <button class="btn sm" id="btnBatchSelectUnadded" type="button" style="padding:2px 8px;font-size:11.5px;background:#e0f2fe;color:#0369a1;border-color:#bae6fd">✨ 一键勾选未入池</button>
+            <button class="btn sm" id="btnBatchSelectAll" type="button" style="padding:2px 8px;font-size:11.5px">全选</button>
+            <button class="btn sm" id="btnBatchSelectNone" type="button" style="padding:2px 8px;font-size:11.5px">清空</button>
+            <button class="btn sm" id="btnBatchRefresh" type="button" style="padding:2px 8px;font-size:11.5px">↺ 刷新</button>
+          </div>
+        </div>
+
+        <!-- 邮箱多选滚动容器 -->
+        <div id="batchMailList" style="max-height:160px;overflow-y:auto;background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px;font-size:12px;display:grid;grid-template-columns:repeat(auto-fill, minmax(215px, 1fr));gap:6px">
+          <div style="color:var(--sub);padding:8px">正在加载邮箱…</div>
+        </div>
+
+        <!-- 自定义追加邮箱折叠 -->
+        <details style="margin-top:8px;font-size:12px">
+          <summary style="cursor:pointer;color:var(--blue);font-weight:600">+ 手动追加其它邮箱（每行一个）</summary>
+          <textarea id="batchCustomArea" placeholder="每行填入一个邮箱，如：&#10;user1@example.com&#10;user2@example.com" style="width:100%;height:60px;margin-top:6px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;font-size:12px;font-family:monospace"></textarea>
+        </details>
+      </div>
+
+      <!-- 控制参数与操作栏 -->
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <label style="font-size:12.5px;font-weight:600;color:#334155">并发独立窗口数：</label>
+          <select id="batchConcurrency" style="padding:4px 8px;border:1px solid var(--line);border-radius:6px;font-size:12px;background:#fff">
+            <option value="1">1（单线程排队）</option>
+            <option value="2" selected>2（推荐，平稳高效）</option>
+            <option value="3">3（快速，配置较高）</option>
+            <option value="4">4（极速）</option>
+          </select>
+          <span style="font-size:11.5px;color:var(--sub)">每个窗口独立隔离 Profile</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button class="btn danger" id="btnBatchCancel" type="button" style="display:none">⏹ 终止批量任务</button>
+          <button class="btn primary" id="btnBatchStart" type="button" style="background:linear-gradient(135deg,#6366f1,#8b5cf6);border-color:#6366f1;color:#fff;font-weight:600;padding:6px 18px">
+            🚀 开始并发批量登录 (<span id="batchCountBadge">0</span>)
+          </button>
+        </div>
+      </div>
+
+      <!-- 实时任务监控看板 -->
+      <div id="batchProgressCard" style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#f8fafc">
+        <div style="display:flex;align-items:center;justify-content:space-between;font-size:12.5px;margin-bottom:6px">
+          <div style="font-weight:700;color:#1e293b" id="batchProgressSummary">批量任务就绪</div>
+          <div style="font-size:12px;color:var(--sub)" id="batchProgressStat">未开始</div>
+        </div>
+        <div style="width:100%;height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden;margin-bottom:8px">
+          <div id="batchProgressBar" style="width:0%;height:100%;background:linear-gradient(90deg,#6366f1,#10b981);transition:width .3s"></div>
+        </div>
+        <div style="max-height:170px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;background:#fff">
+          <table style="width:100%;border-collapse:collapse;font-size:11.5px;text-align:left">
+            <thead style="background:#f1f5f9;position:sticky;top:0;color:#475569">
+              <tr>
+                <th style="padding:5px 8px;width:36px">#</th>
+                <th style="padding:5px 8px;width:170px">邮箱</th>
+                <th style="padding:5px 8px;width:80px">状态</th>
+                <th style="padding:5px 8px">实时进展与凭据</th>
+              </tr>
+            </thead>
+            <tbody id="batchTableBody">
+              <tr><td colspan="4" style="text-align:center;padding:14px;color:var(--sub)">暂无运行中的批量任务，请勾选邮箱后点击上方「开始并发批量登录」</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- 单邮箱登录面板 -->
+    <div id="boxLoginSingle" style="display:none">
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:12px 14px;margin-bottom:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <label style="font-size:12.5px;font-weight:700;color:#334155;display:flex;align-items:center;gap:6px">
+            ⚡ 肥猫猫临时邮箱一键自动登录
+          </label>
+          <button class="btn sm" id="btnRefreshMaoMail" type="button" style="padding:2px 8px;font-size:11.5px">↺ 刷新邮箱</button>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <select id="selMaoMail" style="flex:1;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:12.5px;background:#fff">
+            <option value="">正在加载邮箱列表...</option>
+          </select>
+          <button class="btn primary" id="btnAutoLogin" type="button" style="background:linear-gradient(135deg,#6366f1,#8b5cf6);border-color:#6366f1;color:#fff;white-space:nowrap;padding:8px 16px;font-weight:600">
+            ⚡ 一键自动登录
+          </button>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <input id="inputCustomEmail" placeholder="或手动输入任意邮箱（若在肥猫猫中亦可自动收信）" style="flex:1;padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-size:12px;background:#fff">
+        </div>
+        <div style="font-size:11.5px;color:var(--sub);margin-top:6px">
+          流程：Edge 后台自动填邮箱 ➔ 自动获取肥猫猫 Magic Link / 验证码 ➔ 自动跳转登录 ➔ 写入账号池。
+        </div>
+      </div>
+
+      <div class="loginbox" id="loginBox">
+        <div class="loginst" id="loginSt"><span id="loginDot" class="spin" style="display:none"></span>
+          <span id="loginMsg">尚未开始。选择上方邮箱点「一键自动登录」，或点「手动打开浏览器」。</span></div>
+        <div class="loginlink" id="loginLinkRow" style="display:none">
+          <input id="loginLink" readonly><button class="btn sm" id="btnLoginCopy">复制</button>
+          <button class="btn sm" id="btnLoginOpen">新标签打开</button>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">
+        <button class="btn danger" id="btnLoginCancel" style="display:none">取消登录</button>
+        <button class="btn" id="btnLoginStart" title="不自动填邮箱，仅打开浏览器手工操作">手动打开浏览器</button>
+      </div>
+    </div>
+
+    <div class="mrow" style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
+      <button class="btn" onclick="closeLogin()">关闭弹窗</button>
+    </div>
+  </div>
+</div>
+
+<!-- 新建/编辑 API Key -->
+<div class="mask" id="maskKeyEdit">
+  <div class="modal" style="width:min(560px,94vw)">
+    <h3 id="keyTitle">新建 Key</h3>
+    <p class="hint">额度按 tokens 统计（输入含缓存命中 + 输出）。0 表示不限制，留空等同 0。</p>
+
+    <div class="field"><label>名称</label><input id="kName" placeholder="如：我的笔记本 / 给同事的测试 Key"></div>
+
+    <div style="display:flex;gap:12px">
+      <div class="field" style="flex:1"><label>额度上限（tokens，0=不限）</label><input id="kLimitTokens" placeholder="0"></div>
+      <div class="field" style="flex:1"><label>请求数上限（0=不限）</label><input id="kLimitRequests" placeholder="0"></div>
+    </div>
+
+    <div style="display:flex;gap:12px">
+      <div class="field" style="flex:1"><label>到期时间（留空=永不过期）</label><input id="kExpires" type="date"></div>
+      <div class="field" style="flex:1"><label>RPM 上限（0=不限）</label><input id="kRpm" placeholder="0"></div>
+    </div>
+
+    <div style="display:flex;gap:12px">
+      <div class="field" style="flex:1"><label>TPM 上限（0=不限，每分钟 tokens）</label><input id="kTpm" placeholder="0"></div>
+      <div class="field" style="flex:1"><label>模型范围（逗号分隔，空=全部）</label><input id="kModels" placeholder="claude-sonnet-5-5,claude-haiku-5-5"></div>
+    </div>
+
+    <div class="field"><label>IP 白名单（逗号分隔，空=不限）</label><input id="kIps" placeholder="192.168.1.10, 10.0.0.5"></div>
+
+    <div class="field" id="kEnabledRow" style="display:none">
+      <label style="display:flex;align-items:center;gap:8px;font-weight:600">
+        <input type="checkbox" id="kEnabled" style="width:auto"> 启用这个 Key
+      </label>
+    </div>
+
+    <div class="mrow">
+      <button class="btn" onclick="closeKey()">取消</button>
+      <button class="btn primary" id="btnKeyEditSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 添加/编辑账号（高级：手动输入） -->
+<div class="mask" id="maskAcc">
+  <div class="modal">
+    <h3 id="accTitle">添加账号</h3>
+    <p class="hint">高级选项：仅当链接登录不可用时才需要手动粘贴。推荐
+      <a href="#" id="toLogin" style="color:var(--blue)">改用「🔗 链接登录」自动捕获</a>。</p>
+    <div class="field"><label>备注名（显示用）</label><input id="fLabel" placeholder="如：小号 B"></div>
+    <div class="field"><label>sessionKey（添加必填；编辑时留空=不修改）</label>
+      <textarea id="fKey" placeholder="sk-ant-sid01-……"></textarea></div>
+    <div class="field"><label>org（留空自动发现）</label><input id="fOrg" placeholder="uuid-xxxx-…"></div>
+    <div class="mrow">
+      <button class="btn" onclick="closeAcc()">取消</button>
+      <button class="btn primary" id="btnAccSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- API Key -->
+<div class="mask" id="maskKey" style="z-index:70">
+  <div class="modal">
+    <h3>本地 API Key</h3>
+    <p class="hint" id="keyHint">填 config.json 里 keys[].key 的值（首次启动时控制台也打印过一次）。本机打开本页会自动带上，正常情况下无需手填。</p>
+    <div class="field"><input id="fApi" placeholder="sk-…………" autocomplete="off"></div>
+    <div class="mrow">
+      <button class="btn" id="btnKeySkip">清空并退出</button>
+      <button class="btn primary" id="btnKeySave">保存并进入</button>
+    </div>
+  </div>
+</div>
+
+<div id="toasts"></div>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+
+/* ---------------- 状态 ---------------- */
+let S = { status: null, health: null, search: "", sel: new Set(), editId: null, cd: new Map(),
+  usage: null, tab: "pool", usageRange: "today", usageAccount: "", kyc: {} };
+let pollTimer = null, tickTimer = null;
+
+// 本机打开时服务端会注入 config.json 里的可用 key（window.__BOOT_KEY__）。
+// 直接以它覆盖 localStorage：避免浏览器里残留旧 key（改过 config.json 后
+// 会一直 401，表现为"点什么都没反应 / 保存失败"）。
+if (window.__BOOT_KEY__) {
+  localStorage.setItem("pxf_key", window.__BOOT_KEY__);
+}
+function key() { return localStorage.getItem("pxf_key") || window.__BOOT_KEY__ || ""; }
+// 支持用 ?k=<LOCAL_API_KEY> 打开：方便把链接直接发到手机 / 另一台电脑，省得手输。
+// 读进 localStorage 后立刻从地址栏抹掉，避免留在浏览器历史里。
+(() => {
+  const uk = new URLSearchParams(location.search).get("k");
+  if (uk) {
+    localStorage.setItem("pxf_key", uk);
+    history.replaceState(null, "", location.pathname + location.hash);
+  }
+})();
+function toast(msg, err) {
+  const d = document.createElement("div");
+  d.className = "toast" + (err ? " err" : "");
+  d.textContent = msg;
+  $("#toasts").appendChild(d);
+  setTimeout(() => d.remove(), err ? 5200 : 2600);
+}
+
+async function api(path, opts = {}) {
+  const k = key();
+  // 一个 key 都没有：别再发注定 401 的请求，直接引导用户填
+  if (!k) {
+    showKey(true, "还没有填写 API Key");
+    throw new Error("请先在右上角「🔑 Key」填入 API Key");
+  }
+  const r = await fetch(path, {
+    ...opts,
+    headers: { "content-type": "application/json",
+      ...(opts.headers || {}), ...(k ? { authorization: "Bearer " + k } : {}) },
+  });
+  let j = null;
+  try { j = await r.json(); } catch { /* noop */ }
+  if (r.status === 401) {
+    showKey(true, "这个 Key 服务端不认（可能改过 config.json）");
+    throw new Error("API Key 无效，请重新输入");
+  }
+  if (!r.ok) throw new Error((j && j.error && j.error.message) || ("HTTP " + r.status));
+  return j;
+}
+
+/**
+ * 显示「输入 API Key」弹窗。
+ * 只把它提到最上层（z-index 70），刻意不动下面已打开的弹窗——
+ * 这样用户填完 key 关闭后，之前「新建 Key」填的表单还完整保留，可以直接再点保存。
+ */
+function showKey(on, hint) {
+  if (on) {
+    const h = document.getElementById("keyHint");
+    if (h && hint) h.textContent = hint;
+  }
+  $("#maskKey").classList.toggle("on", on);
+  if (on) { $("#fApi").value = key(); $("#fApi").focus(); $("#fApi").select(); }
+}
+
+/* ---------------- 渲染 ---------------- */
+const pctText = v => (v == null ? "—" : Math.round(v * 100) + "%");
+function usedPct(w) {
+  if (!w) return null;
+  const u = w.utilization ?? w.utilised ?? w.used;
+  if (typeof u !== "number") return null;
+  return u > 1 ? Math.min(100, u) : Math.round(u * 100);
+}
+function barCls(p) { return p == null ? "n" : p >= 80 ? "d" : p >= 60 ? "w" : ""; }
+function fmtReset(ms) {
+  if (!ms) return "";
+  let t = typeof ms === "string" ? Date.parse(ms) : ms;
+  if (t < 1e12) t *= 1000;                       // 秒级时间戳
+  if (!Number.isFinite(t) || t <= 0) return "";
+  return "重置于 " + new Date(t).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+}
+const esc = s => String(s ?? "").replace(/[&<>"']/g,
+  c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const dt = ms => ms ? new Date(ms).toLocaleString("zh-CN", { hour12: false }) : "—";
+
+function matches(a) {
+  const q = S.search.trim().toLowerCase();
+  if (!q) return true;
+  return [a.label, a.org, a.session_key, a.source].some(v => String(v || "").toLowerCase().includes(q));
+}
+
+function renderStats() {
+  const st = S.status; if (!st) return;
+  const accs = st.accounts;
+  const cool = accs.filter(a => a.cooldown_remaining_s > 0 && !a.exhausted).length;
+  const off = accs.filter(a => !a.enabled).length;
+  const exh = accs.filter(a => a.exhausted);
+  const fly = accs.reduce((s, a) => s + a.inflight, 0);
+  $("#tTotal").textContent = st.total;
+  $("#tEligible").innerHTML = st.eligible_now + ' <small>/ ' + st.enabled + " 启用</small>";
+  // 429 耗尽池：配额窗口没过之前不进有效池，到点自动回池
+  const nextAt = st.next_restore_at;
+  $("#tExhausted").innerHTML = exh.length
+    ? exh.length + ' <small>' + (nextAt ? '最早 ' + new Date(nextAt).toLocaleString("zh-CN", { hour12: false }) + ' 恢复' : '等待恢复') + '</small>'
+    : '0 <small>（无）</small>';
+  $("#tCool").innerHTML = (cool + off) + ' <small>（冷却 ' + cool + " · 停用 " + off + "）</small>";
+  $("#tFly").innerHTML = fly + ' <small>/ 上限 ' + accs.reduce((s, a) => s + a.capacity, 0) + "</small>";
+  $("#pillStrategy").textContent = st.strategy + " · 阈值 " + Math.round((st.min_quota_remaining ?? .2) * 100) + "%";
+  $("#quotaRule").innerHTML =
+    "额度剩余 &lt; <b>" + Math.round((st.min_quota_remaining ?? .2) * 100) + "%</b> 自动切换账号（" +
+    ({ "round-robin": "严格轮询", "least-loaded": "最闲优先" }[st.strategy] || st.strategy) + "）";
+  if (document.activeElement !== $("#cfgStrategy")) $("#cfgStrategy").value = st.strategy || "least-loaded";
+  if (document.activeElement !== $("#cfgConc")) $("#cfgConc").value = st.per_account_concurrency || 3;
+  if (document.activeElement !== $("#cfgThr")) $("#cfgThr").value = Math.round((st.min_quota_remaining ?? .2) * 100);
+}
+
+function renderHeader() {
+  const h = S.health;
+  const ok = h && h.ok;
+  $("#pillHealth").className = "pill " + (ok ? "ok" : "bad");
+  $("#pillHealth").innerHTML = '<span class="dot"></span>' + (ok ? "反代运行中" : "无可用账号");
+  $("#pillPlan").textContent = h ? String(h.plan || "unknown").toUpperCase() : "—";
+  $("#upstream").textContent = h ? h.upstream : "—";
+  $("#cookieAge").textContent = h && h.cookie_age_seconds != null
+    ? "cookie " + Math.round(h.cookie_age_seconds / 60) + " 分钟前刷新" : "";
+  $("#baseURL").textContent = location.origin + "/v1";
+  $("#keyView").textContent = key() || "（未启用鉴权）";
+}
+
+/* KYC 徽章：来自 /v1/kyc 的缓存结果（S.kyc[accountId]），没查过就不显示 */
+function kycChip(id) {
+  const k = S.kyc[id];
+  if (!k) return "";
+  if (!k.ok) {
+    const auth = k.error && k.error.code === "auth";
+    return `<span class="chip k-neutral" title="${esc((k.error && k.error.message) || "查询失败")}">🪪 KYC ${auth ? "登录失效" : "查询失败"}</span>`;
+  }
+  const orgs = k.orgs || [];
+  if (!orgs.length) return `<span class="chip k-neutral" title="已登录但没有查到任何组织">🪪 无组织</span>`;
+  const good = orgs.filter(o => o && o.status);
+  const bad = orgs.filter(o => !o || !o.status);   // 单个组织查询失败（如 kyc_status 403）的条目只有 error
+  if (!good.length) {
+    const tip = bad.map(o => `${o.name || "?"}: ${(o.error && o.error.message) || "查询失败"}`).join("\n");
+    return `<span class="chip k-neutral" title="${esc(tip)}">🪪 KYC 查询失败</span>`;
+  }
+  const rank = { danger: 3, warn: 2, ok: 1, neutral: 0 };
+  let worst = good[0];
+  for (const o of good) {
+    if (((rank[o.status.tone] ?? 0)) > ((rank[worst.status.tone] ?? 0))) worst = o;
+  }
+  const portal = good.find(o => o.link && o.link.kind === "portal");
+  const tip = orgs.map(o =>
+    `${o.name}: ${o.status ? o.status.label + " — " + o.status.explanation : "查询失败：" + ((o.error && o.error.message) || "?")}` +
+    (o.link && o.link.url ? `\n验证链接（${o.link.label}）：${o.link.url}` : "")).join("\n");
+  let html = `<span class="chip k-${esc(worst.status.tone || "neutral")}" title="${esc(tip)}">🪪 ${esc(worst.status.label)}</span>`;
+  if (portal) html += `<span class="chip k-danger" title="${esc(portal.link.explanation)}">⚠ 门户KYC</span>`;
+  if (bad.length) {
+    // permission_denied 是上游对该组织的正常拒绝（如 api_individual 组织），不算查询故障
+    const permOnly = bad.every(o => o.error && o.error.code === "permission");
+    html += `<span class="chip k-neutral" title="${esc(bad.map(o => o.name + ": " + ((o.error && o.error.message) || "查询失败")).join("\n"))}">⚠ ${bad.length} 组织${permOnly ? "无权限" : "失败"}</span>`;
+  }
+  return html;
+}
+
+function card(a) {
+  const cdEnd = S.cd.get(a.id);
+  const cdSec = cdEnd ? Math.max(0, Math.ceil((cdEnd - Date.now()) / 1000)) : a.cooldown_remaining_s;
+  const exhSec = a.exhausted ? Math.max(0, Math.ceil((a.exhausted_until - Date.now()) / 1000)) : 0;
+  const p5 = a.exhausted ? 100 : usedPct(a.quota_5h);
+  const p7 = usedPct(a.quota_7d);
+  const rem = a.exhausted ? 0 : a.quota_remaining;
+  const low = a.low_quota;
+  const plan = (S.health && S.health.plan) || "";
+  const isFree = /free|default/i.test(plan) || !plan;
+  const name = a.label || a.session_key || a.id;
+
+  return `<div class="acc ${low ? "low" : ""} ${a.enabled ? "" : "off"} ${a.exhausted ? "exhausted" : ""}" data-id="${esc(a.id)}">
+    <div class="acc-top">
+      <input type="checkbox" class="ck" ${S.sel.has(a.id) ? "checked" : ""}>
+      <span class="acc-name" title="${esc(a.session_key)}">${esc(name)}</span>
+      ${a.exhausted ? '<span class="badge err">429 耗尽</span>' : (low ? '<span class="badge lowq">LOW QUOTA</span>' : "")}
+      ${isFree ? '<span class="badge free">FREE</span>' : '<span class="badge">' + esc(plan) + "</span>"}
+      <label class="switch" title="启用/停用"><input type="checkbox" class="en" ${a.enabled ? "checked" : ""}><i></i></label>
+    </div>
+    <div class="meta">
+      <span>来源 <b>${esc(a.source || "manual")}</b></span>
+      <span>org <b>${esc((a.org || "").slice(0, 14) || "—")}</b></span>
+      <span title="sessionKey">${esc(a.session_key || "—")}</span>
+    </div>
+    <div class="qline" title="5h 当前会话窗口 · 上游只在响应 SSE 里上报利用率">
+      <span class="qlabel">🕐 当前会话</span>
+      <span class="bar ${barCls(p5)}"><span style="width:${p5 ?? 0}%"></span></span>
+      <span class="pct">${p5 == null ? "—" : "已用 " + p5 + "%"}</span>
+      <span class="rem">${a.exhausted ? "🚫 429 耗尽" : (rem != null ? "剩 " + Math.round(rem * 100) + "%" : (a.quota_detail?.probed ? "待上报" : "未上报 · 点📊查额度"))}</span>
+    </div>
+    <div class="qline" title="7d 本周窗口">
+      <span class="qlabel">📅 本周</span>
+      <span class="bar ${barCls(p7)}"><span style="width:${p7 ?? 0}%"></span></span>
+      <span class="pct">${p7 == null ? "—" : "已用 " + p7 + "%"}</span>
+      <span class="rem">${a.exhausted && a.exhausted_until ? fmtReset(a.exhausted_until) : (a.quota_7d ? fmtReset(a.quota_7d.resets_at) : (a.quota_5h ? fmtReset(a.quota_5h.resets_at) : ""))}</span>
+    </div>
+    <div class="qdetail" title="free 档按滚动 5h/7d 窗口的消息使用强度限额，上游不返回 token 或消息条数配额">
+      ${a.quota_detail ? `<span>档位 <b>${esc(a.quota_detail.rate_limits?.tier || "default_claude_ai")}</b></span>
+        <span>并发 <b>${a.quota_detail.rate_limits ? (a.quota_detail.rate_limits.concurrents?.claude_haiku_5_5 ?? Object.values(a.quota_detail.rate_limits.concurrents || {})[0] ?? "—") : "—"}</b>/模型</span>
+        <span>限流窗口 <b>${esc(a.quota_detail.representative_claim || "five_hour")}</b></span>`
+        : `<span>额度未上报</span>`}
+      <span title="完整输入（含缓存命中）+ 输出。缓存命中的 token 同样占用上游上下文与额度，所以计入总量；数据来自请求级用量日志（含失败请求）">已用 <b>${(a.tokens_total ?? ((a.tokens_in_est || 0) + (a.tokens_out_est || 0))).toLocaleString()}</b> tokens${a.tokens_cached ? ` <span style="color:var(--sub)">｜其中缓存 ${(a.tokens_cached).toLocaleString()}</span>` : ""}</span>
+    </div>
+    ${low && !a.exhausted ? `<div class="warnline">⚠️ 剩余 ${rem != null ? Math.round(rem * 100) + "%" : "--"} &lt; ${Math.round((S.status.min_quota_remaining ?? .2) * 100)}%，轮询已自动切走该账号</div>` : ""}
+    <div class="statsline">
+      ${kycChip(a.id)}
+      <span class="chip">在途 ${a.inflight}/${a.capacity}</span>
+      <span class="chip">✔ ${a.ok} / ✖ ${a.fail}</span>
+      ${a.exhausted ? `<span class="chip err" title="配额窗口耗尽（${esc(a.exhausted_reason || "quota")}），${a.exhausted_until ? new Date(a.exhausted_until).toLocaleString("zh-CN", { hour12: false }) + " 自动恢复到有效池" : "等待恢复"}；恢复前不参与调度">🚫 429 耗尽${exhSec ? " · " + Math.ceil(exhSec / 60) + " 分钟" : ""}</span>` : ""}
+      ${low && !a.exhausted ? `<span class="chip" style="background:#fef3c7;color:#92400e;border-color:#fcd34d" title="剩余额度低于设定的阈值，调度器已自动切走避让此账号">⚠️ 阈值避让(${rem != null ? Math.round(rem * 100) + "%" : "--"})</span>` : ""}
+      ${cdSec > 0 && !a.exhausted ? `<span class="chip cooldown">⏳ 冷却 ${cdSec}s</span>` : ""}
+      ${a.fail_streak > 0 && !cdSec && !a.exhausted ? `<span class="chip">连败 ${a.fail_streak}</span>` : ""}
+      ${a.enabled ? "" : '<span class="chip err">已停用</span>'}
+    </div>
+    ${a.last_error ? `<div class="errline" title="${esc(a.last_error)}">✖ ${esc(a.last_error)}</div>` : ""}
+    <div class="actions">
+      <button class="btn sm" data-act="quota" title="主动查额度：发 1 条最小消息取回上游利用率（会消耗一次极小的消息）">📊 查额度</button>
+      <button class="btn sm" data-act="kyc" title="查询该账号各组织的 KYC 状态（只读接口，不消耗额度）">🪪 KYC</button>
+      <button class="btn sm" data-act="test">🧪 测试</button>
+      <button class="btn sm" data-act="edit">✏️ 备注</button>
+      <button class="btn sm" data-act="uncd" ${cdSec > 0 ? "" : "disabled"}>⏱ 清冷却</button>
+      <button class="btn sm danger" data-act="del">🗑</button>
+    </div>
+    <div class="foot"><span>创建 ${dt(a.created_at)}</span><span>最近使用 ${dt(a.last_used_at)}</span></div>
+  </div>`;
+}
+
+function renderCards() {
+  const st = S.status; if (!st) return;
+  const list = st.accounts.filter(matches);
+  $("#grid").innerHTML = list.length
+    ? list.map(card).join("")
+    : `<div class="empty">${st.total ? "没有匹配的账号" : "还没有账号 —— 点「添加账号」或「导入 Desktop 登录态」"} </div>`;
+  const selN = S.sel.size;
+  $("#selInfo").textContent = selN ? "已选 " + selN + " 个" : "";
+  $("#btnDelSel").style.display = selN ? "" : "none";
+  const visIds = list.map(a => a.id);
+  $("#selAll").checked = visIds.length > 0 && visIds.every(id => S.sel.has(id));
+}
+
+function renderSettings() {
+  const st = S.status; if (!st) return;
+  if (document.activeElement !== $("#cfgFullStrategy")) $("#cfgFullStrategy").value = st.strategy || "least-loaded";
+  if (document.activeElement !== $("#cfgFullAffinity")) $("#cfgFullAffinity").checked = st.session_affinity !== false;
+  if (document.activeElement !== $("#cfgFullConc")) $("#cfgFullConc").value = st.per_account_concurrency || 3;
+  if (document.activeElement !== $("#cfgFullThr")) $("#cfgFullThr").value = Math.round((st.min_quota_remaining ?? 0.2) * 100);
+  if (document.activeElement !== $("#cfgFullFailover")) $("#cfgFullFailover").value = st.max_failover || 3;
+  if (document.activeElement !== $("#cfgFullWaitTimeout")) $("#cfgFullWaitTimeout").value = Math.round((st.wait_timeout_ms || 30000) / 1000);
+  if (document.activeElement !== $("#cfgFullPrune")) $("#cfgFullPrune").checked = st.prune_context !== false;
+  if (document.activeElement !== $("#cfgFullPruneChars")) $("#cfgFullPruneChars").value = st.prune_max_tool_chars || 8000;
+  if (document.activeElement !== $("#cfgFullPruneKeep")) $("#cfgFullPruneKeep").value = st.prune_keep_recent_tools ?? 4;
+  if (document.activeElement !== $("#cfgFullEffort")) $("#cfgFullEffort").value = st.default_effort || "max";
+  if (document.activeElement !== $("#cfgFullPrice")) $("#cfgFullPrice").value = st.price_per_million_tokens || 0;
+  if ($("#cfgMaoMailToken") && document.activeElement !== $("#cfgMaoMailToken")) $("#cfgMaoMailToken").value = st.maomail_token || "";
+  if ($("#cfgMaoMailBaseUrl") && document.activeElement !== $("#cfgMaoMailBaseUrl")) $("#cfgMaoMailBaseUrl").value = st.maomail_base_url || "https://zjkdongao.cn";
+  if ($("#srvAddr")) $("#srvAddr").textContent = location.origin + "/v1";
+  if ($("#srvAccCount")) $("#srvAccCount").textContent = `${st.total} 个账号 (${st.eligible_now} 可用 / ${st.enabled} 启用)`;
+}
+
+function render() { renderHeader(); renderStats(); renderCards(); renderSettings(); }
+
+/* ---------------- 用量统计看板 ---------------- */
+const nfmt = n => (n || 0).toLocaleString("zh-CN");
+const pct = v => Math.round((v || 0) * 100) + "%";
+function switchTab(t) {
+  S.tab = t;
+  $("#tabPool").classList.toggle("on", t === "pool");
+  $("#tabUsage").classList.toggle("on", t === "usage");
+  $("#tabKeys").classList.toggle("on", t === "keys");
+  $("#tabSettings").classList.toggle("on", t === "settings");
+  $("#viewPool").style.display = t === "pool" ? "" : "none";
+  $("#viewUsage").style.display = t === "usage" ? "" : "none";
+  $("#viewKeys").style.display = t === "keys" ? "" : "none";
+  $("#viewSettings").style.display = t === "settings" ? "" : "none";
+  if (t === "usage") loadUsage();
+  if (t === "keys") loadKeys();
+  if (t === "settings") renderSettings();
+}
+async function loadUsage() {
+  try {
+    const q = new URLSearchParams({ range: S.usageRange });
+    if (S.usageAccount) q.set("accountId", S.usageAccount);
+    S.usage = await api("/v1/usage?" + q.toString());
+    renderUsage();
+  } catch (e) { if (S.tab === "usage") toast(e.message, true); }
+}
+function drawChart(rows) {
+  const svg = $("#uChart");
+  if (!rows.length) {
+    svg.innerHTML = `<text x="450" y="88" text-anchor="middle" fill="#94a3b8" font-size="13">暂无数据</text>`;
+    return;
+  }
+  const W = 900, H = 170, padL = 46, padR = 12, padT = 12, padB = 26;
+  const max = Math.max(1, ...rows.map(r => Math.max(r.input_tokens, r.output_tokens, r.cached_tokens)));
+  const step = rows.length > 1 ? (W - padL - padR) / (rows.length - 1) : 0;
+  const X = i => padL + i * step;
+  const Y = v => H - padB - (v / max) * (H - padT - padB);
+  const line = (key, color) => `<polyline fill="none" stroke="${color}" stroke-width="2"
+    stroke-linejoin="round" stroke-linecap="round" points="${rows.map((r, i) => X(i) + "," + Y(r[key] || 0)).join(" ")}"/>`;
+  let grid = "";
+  for (let i = 0; i <= 3; i++) {
+    const v = Math.round(max * i / 3), y = Y(v);
+    grid += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="#eef2f7"/>
+      <text x="${padL - 8}" y="${y + 4}" text-anchor="end" fill="#94a3b8" font-size="10">${nfmt(v)}</text>`;
+  }
+  const labels = rows.filter((_, i) => rows.length <= 12 || i % Math.ceil(rows.length / 12) === 0)
+    .map((r, _, arr) => {
+      const i = rows.indexOf(r);
+      return `<text x="${X(i)}" y="${H - 6}" text-anchor="middle" fill="#94a3b8" font-size="10">${esc(r.hour.slice(-5))}</text>`;
+    }).join("");
+  svg.innerHTML = grid + line("input_tokens", "#2563eb") + line("output_tokens", "#f97316") +
+    line("cached_tokens", "#16a34a") + labels;
+}
+function renderUsage() {
+  const u = S.usage; if (!u) return;
+  $("#mCost").textContent = u.cost == null ? "—" : u.cost;
+  $("#mReq").textContent = nfmt(u.total_requests);
+  $("#mReqSub").textContent = "成功 " + nfmt(u.ok_requests);
+  $("#mTokens").textContent = nfmt(u.total_tokens);
+  $("#mTokensSub").textContent = "输入 " + nfmt(u.total_input_tokens) + "（含缓存 " + nfmt(u.cached_tokens) +
+    "）· 输出 " + nfmt(u.total_output_tokens);
+  $("#mCache").textContent = pct(u.cache_hit_rate);
+  $("#mCacheSub").textContent = "命中 " + u.cache_hit_requests + " / " + u.total_requests + " 次请求 · 模式 " + u.cache_mode;
+  $("#mTps").textContent = u.avg_tps_weighted ? u.avg_tps_weighted.toFixed(1) + " tok/s" : "—";
+  $("#mTpsSub").textContent = "加权 " + (u.avg_tps_weighted ? u.avg_tps_weighted.toFixed(1) : "—") +
+    " · 单请求均值 " + (u.avg_tps ? u.avg_tps.toFixed(1) : "—") +
+    " · 平均思考 " + (u.avg_think_ms ? (u.avg_think_ms / 1000).toFixed(1) + "s" : "—") +
+    " · 平均空闲 " + (u.avg_idle_ms ? (u.avg_idle_ms / 1000).toFixed(1) + "s" : "—");
+  $("#uNote").textContent = "Token 为本地估算（中文 1 字 1 token，其余 4 字符 1 token）· 「真实出字速度」= 正文 token ÷ 真正在写正文的时间（不含思考期、不含上游吊连接的空闲）· 缓存命中的 token 同样占用上下文与额度，已计入「已用」总量 · 缓存 TTL " + Math.round(u.cache_ttl_ms / 60000) + " 分钟";
+
+  // 账号下拉（仅在账号列表变化时重建，避免 3s 轮询打断选择）
+  const sel = $("#uAccount"), cur = S.usageAccount;
+  const sig = (u.accounts_all || []).map(a => a.id + "|" + a.label).join(";");
+  if (sel.dataset.sig !== sig) {
+    sel.innerHTML = `<option value="">全部账号</option>` +
+      (u.accounts_all || []).map(a => `<option value="${esc(a.id)}" ${a.id === cur ? "selected" : ""}>${esc(a.label)}</option>`).join("");
+    sel.dataset.sig = sig;
+  } else if (cur) sel.value = cur;
+
+  // 分账号表：把账号池所有账号都列出来（含无请求的）
+  const byId = new Map((u.by_account || []).map(a => [a.account_id, a]));
+  const all = (u.accounts_all || []);
+  const accRows = all.length ? all.map(a => {
+    const r = byId.get(a.id) || {};
+    return `<tr><td class="namecell" title="${esc(a.label)}">${esc(a.label.slice(0, 22))}</td><td>${a.enabled ? "启用" : "停用"}</td>
+      <td>${nfmt(r.requests)}</td><td>${nfmt(r.new_input_tokens)}</td><td>${nfmt(r.output_tokens)}</td>
+      <td><b>${nfmt(r.total_tokens ?? a.total_tokens_est)}</b></td><td>${pct(r.cache_hit_rate)}</td>
+      <td>${a.quota_remaining == null ? "—" : pct(a.quota_remaining)}</td></tr>`;
+  }).join("") : `<tr><td colspan="8" class="empty">暂无账号</td></tr>`;
+  $("#uAccounts").innerHTML = accRows;
+
+  const logs = u.logs || [];
+  $("#uLogs").innerHTML = logs.length ? logs.map(e => {
+    // 真实出字速度：正文 token ÷ 书写时间（不含思考期、不含收尾空闲）
+    const speed = e.tps ? e.tps.toFixed(1) + " tok/s" : "—";
+    const secs = ms => ms ? (ms / 1000).toFixed(1) + "s" : "—";
+    const speedTip = [
+      `真实出字速度 ${speed}`,
+      `正文 ${e.text_tokens ?? 0} tok / 思考 ${e.think_tokens ?? 0} tok`,
+      `首字 ${secs(e.ttfb_ms)}`,
+      `思考 ${secs(e.think_ms)}`,
+      `书写 ${secs(e.write_ms)}`,
+      `吐字窗口 ${secs(e.gen_ms)}`,
+      `收尾空闲 ${secs(e.idle_ms)}`,
+      `端到端 ${e.tps_e2e ? e.tps_e2e.toFixed(1) + " tok/s" : "—"}`,
+      `旧口径 ${e.tps_legacy ? e.tps_legacy.toFixed(1) + " tok/s" : "—"}`,
+      e.effort ? `思考档位 ${e.effort}` : "",
+    ].filter(Boolean).join("\n");
+    const outTip = `正文 ${e.text_tokens ?? 0} tok｜思考摘要 ${e.think_tokens ?? 0} tok｜合计 ${e.output_tokens ?? 0} tok`;
+    const full = String(e.error || e.status || "");
+    let short = "err";
+    if (e.ok) short = "✓";
+    else {
+      const m = /(?:completion|create_conversation|HTTP)\s*(\d{3})/.exec(full);
+      const code = m ? m[1] : (e.status || "err");
+      const kind = /concurrents/i.test(full) ? "concurrents"
+        : /rate_limit|exceeded_limit/i.test(full) ? "rate_limit"
+        : /cloudflare|challenge/i.test(full) ? "CF"
+        : /permission_error|403/i.test(full) ? "auth" : "upstream";
+      short = "✖ " + code + " · " + kind;
+    }
+    return `<tr><td>${dt(e.ts)}</td><td class="namecell" title="${esc(e.account_label || "")}">${esc((e.account_label || e.account_id || "—").slice(0, 22))}</td>
+      <td>${esc(e.model || "—")}</td><td>${nfmt(e.new_input_tokens)}</td><td title="${esc(outTip)}">${nfmt(e.text_tokens ?? e.output_tokens)}</td>
+      <td>${e.cache_hit ? '<b style="color:#16a34a">' + nfmt(e.cached_tokens) + " ✓</b>" : "—"}</td>
+      <td title="${esc(speedTip)}">${speed}</td><td>${secs(e.think_ms)}</td>
+      <td>${e.ttfb_ms == null ? "—" : e.ttfb_ms + "ms"}</td>
+      <td>${e.latency_ms || 0}ms</td><td class="errcell ${e.ok ? "ok" : ""}" title="${esc(full)}">${esc(short)}</td></tr>`;
+  }).join("") : `<tr><td colspan="11" class="empty">暂无数据</td></tr>`;
+  drawChart(u.hourly || []);
+}
+
+/* ---------------- 数据轮询 ---------------- */
+async function load(silent) {
+  try {
+    const [st, h] = await Promise.all([api("/v1/accounts"), api("/healthz").catch(() => null)]);
+    S.status = st; S.health = h;
+    st.accounts.forEach(a => S.cd.set(a.id, a.cooldown_remaining_s > 0
+      ? Date.now() + a.cooldown_remaining_s * 1000 : 0));
+    render();
+    if (S.tab === "usage") await loadUsage();
+  } catch (e) {
+    if (!silent) toast(e.message, true);
+  }
+}
+function startPoll() { stopPoll(); pollTimer = setInterval(() => load(true), 3000); }
+function stopPoll() { clearInterval(pollTimer); }
+document.addEventListener("visibilitychange", () => (document.hidden ? stopPoll() : (load(true), startPoll())));
+
+/* 每秒只刷冷却倒计时（避免打断输入焦点） */
+setInterval(() => {
+  if (!S.status) return;
+  let dirty = false;
+  S.status.accounts.forEach(a => {
+    const end = S.cd.get(a.id) || 0;
+    if (end && Date.now() > end) { S.cd.set(a.id, 0); a.cooldown_remaining_s = 0; dirty = true; }
+  });
+  if (dirty || !document.hidden) {
+    $$(".acc").forEach(el => {
+      const a = S.status.accounts.find(x => x.id === el.dataset.id); if (!a) return;
+      const end = S.cd.get(a.id) || 0;
+      const sec = end ? Math.max(0, Math.ceil((end - Date.now()) / 1000)) : a.cooldown_remaining_s;
+      const chip = el.querySelector(".chip.cooldown");
+      if (sec > 0 && !chip) renderCards();
+      else if (sec > 0 && chip) chip.textContent = "⏳ 冷却 " + sec + "s";
+      else if (!sec && chip) renderCards();
+    });
+  }
+}, 1000);
+
+/* ---------------- 操作 ---------------- */
+$("#search").addEventListener("input", e => { S.search = e.target.value; renderCards(); });
+
+$("#btnRefresh").onclick = () => load(false).then(() => toast("已刷新"));
+$("#tabPool").onclick = () => switchTab("pool");
+$("#tabUsage").onclick = () => switchTab("usage");
+$("#tabKeys").onclick = () => switchTab("keys");
+$("#tabSettings").onclick = () => switchTab("settings");
+$("#btnMoreCfg").onclick = () => switchTab("settings");
+$("#uRange").onchange = e => { S.usageRange = e.target.value; loadUsage(); };
+$("#uAccount").onchange = e => { S.usageAccount = e.target.value; loadUsage(); };
+$("#uRefresh").onclick = () => loadUsage().then(() => toast("已刷新"));
+$("#btnQuotaAll").onclick = async e => {
+  const b = e.currentTarget, ids = (S.status?.accounts || []).filter(x => x.enabled).map(x => x.id);
+  if (!ids.length) return toast("没有启用的账号", true);
+  if (!confirm("将对 " + ids.length + " 个账号各发 1 条最小消息以取回额度（消耗极小）。继续？")) return;
+  b.disabled = true; b.textContent = "查询中…";
+  let okN = 0, errs = [];
+  for (const id of ids) {
+    try { const r = await api("/v1/accounts/" + encodeURIComponent(id) + "/quota", { method: "POST", body: "{}" }); if (r.ok) okN++; }
+    catch (ex) { errs.push(ex.message); }
+  }
+  toast("额度刷新完成：" + okN + "/" + ids.length + " 成功" + (errs.length ? "（" + errs[0].slice(0, 60) + "）" : ""), !!errs.length);
+  await load(true);
+  b.disabled = false; b.textContent = "📊 刷新全部额度";
+};
+$("#btnKycAll").onclick = async e => {
+  const b = e.currentTarget;
+  b.disabled = true; b.textContent = "查询中…";
+  try {
+    const r = await api("/v1/kyc");                 // 服务端缓存 5 分钟，重复点不打上游
+    Object.assign(S.kyc, r.results || {});
+    const vals = Object.values(r.results || {});
+    const stat = {}; let failN = 0;
+    for (const v of vals) {
+      if (!v.ok) { failN++; continue; }
+      for (const o of (v.orgs || [])) {
+        const lb = (o.status && o.status.label) || "未知";
+        stat[lb] = (stat[lb] || 0) + 1;
+      }
+      if ((v.orgs || []).some(o => o.link && o.link.kind === "portal")) stat["⚠门户KYC"] = (stat["⚠门户KYC"] || 0) + 1;
+    }
+    const sum = Object.entries(stat).map(([k, n]) => k + " " + n).join(" · ");
+    toast("🪪 KYC 完成：" + (vals.length - failN) + "/" + vals.length + " 账号成功" + (sum ? "｜" + sum : "") +
+      (failN ? "｜失败 " + failN : ""), failN > 0);
+    renderCards();
+  } catch (ex) { toast("🪪 " + ex.message, true); }
+  finally { b.disabled = false; b.textContent = "🪪 查全部 KYC"; }
+};
+$("#btnKey").onclick = () => showKey(true);
+$("#btnKeySave").onclick = async () => {
+  const v = $("#fApi").value.trim();
+  if (!v) { toast("请先填入 API Key", true); $("#fApi").focus(); return; }
+  localStorage.setItem("pxf_key", v);
+  window.__BOOT_KEY__ = "";          // 手填值优先，本次会话内不再被注入值覆盖
+  showKey(false);
+  await load(false);
+  if (S.status) { toast("Key 已保存"); startPoll(); }
+};
+$("#btnKeySkip").onclick = () => showKey(false);
+
+/* ---------------- 链接登录（主入口，自动捕获 sessionKey） ---------------- */
+let LOGIN_ID = null, LOGIN_TIMER = null, lastVerifyKind = null;
+const LOGIN_TERMINAL = new Set(["done", "error", "timeout", "cancelled", "closed"]);
+
+function setLoginUI(msg, cls, spinning) {
+  $("#loginMsg").textContent = msg;
+  $("#loginBox").className = "loginbox" + (cls ? " " + cls : "");
+  $("#loginDot").style.display = spinning ? "inline-block" : "none";
+}
+function resetLoginUIButtons(done = false) {
+  const bAuto = $("#btnAutoLogin");
+  if (bAuto) {
+    bAuto.disabled = false;
+    bAuto.textContent = "⚡ 一键自动登录";
+  }
+  const bStart = $("#btnLoginStart");
+  if (bStart) {
+    bStart.disabled = false;
+    bStart.textContent = done ? "再登录一个账号" : "手动打开浏览器";
+  }
+  if ($("#btnLoginCancel")) $("#btnLoginCancel").style.display = "none";
+}
+
+function openLogin() {
+  $("#maskLogin").classList.add("on");
+  switchLoginTab(LOGIN_TAB || "batch");
+  loadMaoMailboxes();
+  api("/v1/login/batch").then(res => {
+    if (res.ok && res.batch && res.batch.status === "running") {
+      if ($("#btnBatchCancel")) $("#btnBatchCancel").style.display = "inline-flex";
+      if ($("#btnBatchStart")) {
+        $("#btnBatchStart").disabled = true;
+        $("#btnBatchStart").textContent = "🚀 批量登录运行中…";
+      }
+      renderBatchDashboard(res.batch);
+      pollBatchStatus();
+    }
+  }).catch(() => {});
+
+  if (LOGIN_ID) {
+    api("/v1/login/" + encodeURIComponent(LOGIN_ID)).then(s => {
+      if (LOGIN_TERMINAL.has(s.state)) {
+        LOGIN_ID = null;
+        setLoginUI(s.message, s.state === "done" ? "done" : "bad", false);
+        $("#loginLinkRow").style.display = "none";
+        resetLoginUIButtons(s.state === "done");
+      } else {
+        $("#btnLoginStart").textContent = "登录进行中…";
+        $("#btnLoginCancel").style.display = "inline-flex";
+        if ($("#btnAutoLogin")) $("#btnAutoLogin").textContent = "⚡ 自动登录中…";
+        pollLogin();
+      }
+    }).catch(() => {
+      LOGIN_ID = null;
+      setLoginUI("尚未开始。选择上方邮箱点「一键自动登录」，或点「手动打开浏览器」。", "", false);
+      $("#loginLinkRow").style.display = "none";
+      resetLoginUIButtons(false);
+    });
+  } else {
+    setLoginUI("尚未开始。选择上方邮箱点「一键自动登录」，或点「手动打开浏览器」。", "", false);
+    $("#loginLinkRow").style.display = "none";
+    resetLoginUIButtons(false);
+  }
+}
+window.closeLogin = () => {
+  $("#maskLogin").classList.remove("on");
+  if (LOGIN_TIMER) { clearInterval(LOGIN_TIMER); LOGIN_TIMER = null; }
+};
+function pollLogin() {
+  if (!LOGIN_ID || LOGIN_TIMER) return;
+  LOGIN_TIMER = setInterval(async () => {
+    if (!LOGIN_ID) { clearInterval(LOGIN_TIMER); LOGIN_TIMER = null; return; }
+    try {
+      const s = await api("/v1/login/" + encodeURIComponent(LOGIN_ID));
+      if (LOGIN_TERMINAL.has(s.state)) {
+        setLoginUI(s.message + (s.state === "done" && s.account ? "（" + s.account.label + "）" : ""),
+          s.state === "done" ? "done" : "bad", false);
+        clearInterval(LOGIN_TIMER); LOGIN_TIMER = null; LOGIN_ID = null;
+        resetLoginUIButtons(s.state === "done");
+        if (s.state === "done") { toast("登录成功，账号已自动加入账号池！"); await load(true); }
+      } else {
+        // 人工验证检测：需要用户介入时高亮提示，验证完成后自动继续（无需刷新）
+        if (s.need_verify) {
+          if (lastVerifyKind !== s.verify) {
+            toast("⚠️ " + (s.verify_label || "需要人工验证") + "：请到登录窗口完成后自动继续");
+            lastVerifyKind = s.verify;
+          }
+          setLoginUI(s.message, "verify", true);
+        } else {
+          if (lastVerifyKind) {
+            toast("✅ 验证已通过，正在自动继续捕获登录态");
+            lastVerifyKind = null;
+          }
+          setLoginUI(s.message, "", true);
+        }
+      }
+    } catch (e) { /* 单次状态请求失败不中断轮询 */ }
+  }, 1500);
+}
+$("#btnLogin").onclick = openLogin;
+$("#toLogin").onclick = e => { e.preventDefault(); closeAcc(); openLogin(); };
+
+$("#btnLoginStart").onclick = async e => {
+  const b = e.currentTarget; b.disabled = true; b.textContent = "正在启动…";
+  setLoginUI("正在启动登录浏览器…", "", true);
+  if (LOGIN_TIMER) { clearInterval(LOGIN_TIMER); LOGIN_TIMER = null; }
+  LOGIN_ID = null;
+  try {
+    const s = await api("/v1/login", { method: "POST", body: JSON.stringify({ force: true }) });
+    LOGIN_ID = s.id;
+    $("#loginLink").value = s.link;
+    $("#loginLinkRow").style.display = "flex";
+    $("#btnLoginCancel").style.display = "inline-flex";
+    setLoginUI(s.reused ? "已复用正在进行的登录流程，等待登录完成…" : s.message, "", true);
+    b.textContent = "登录进行中…";
+    pollLogin();
+  } catch (ex) { setLoginUI(ex.message, "bad", false); resetLoginUIButtons(false); }
+};
+$("#btnLoginCancel").onclick = async () => {
+  if (!LOGIN_ID) { resetLoginUIButtons(false); return; }
+  const cancelId = LOGIN_ID;
+  LOGIN_ID = null;
+  if (LOGIN_TIMER) { clearInterval(LOGIN_TIMER); LOGIN_TIMER = null; }
+  setLoginUI("已取消登录。可选择邮箱重新发起「一键自动登录」。", "", false);
+  resetLoginUIButtons(false);
+  try { await api("/v1/login/" + encodeURIComponent(cancelId) + "/cancel", { method: "POST", body: "{}" }); }
+  catch (e) { /* noop */ }
+  toast("已取消登录");
+};
+$("#btnLoginCopy").onclick = async () => {
+  const v = $("#loginLink").value;
+  try { await navigator.clipboard.writeText(v); toast("登录链接已复制"); }
+  catch (e) { $("#loginLink").select(); document.execCommand("copy"); toast("登录链接已复制"); }
+};
+$("#btnLoginOpen").onclick = () => { if ($("#loginLink").value) window.open($("#loginLink").value, "_blank"); };
+
+/* ---------------- 批量登录与选项卡交互 ---------------- */
+let LOGIN_TAB = "batch";
+function switchLoginTab(t) {
+  LOGIN_TAB = t;
+  const bBatch = $("#tabLoginBatch");
+  const bSingle = $("#tabLoginSingle");
+  if (bBatch) bBatch.classList.toggle("on", t === "batch");
+  if (bSingle) bSingle.classList.toggle("on", t === "single");
+  if ($("#boxLoginBatch")) $("#boxLoginBatch").style.display = t === "batch" ? "" : "none";
+  if ($("#boxLoginSingle")) $("#boxLoginSingle").style.display = t === "single" ? "" : "none";
+}
+if ($("#tabLoginBatch")) $("#tabLoginBatch").onclick = () => switchLoginTab("batch");
+if ($("#tabLoginSingle")) $("#tabLoginSingle").onclick = () => switchLoginTab("single");
+
+let MAOMAIL_ITEMS = [];
+let BATCH_POLL_TIMER = null;
+
+function updateBatchSelectionCount() {
+  const cks = Array.from(document.querySelectorAll(".batch-ck:checked"));
+  const count = cks.length;
+  if ($("#batchCountBadge")) $("#batchCountBadge").textContent = String(count);
+}
+
+function renderBatchMailboxes() {
+  const listEl = $("#batchMailList");
+  if (!listEl) return;
+  if (!MAOMAIL_ITEMS.length) {
+    listEl.innerHTML = `<div style="color:var(--sub);padding:8px">肥猫猫中没有查询到可用邮箱</div>`;
+    return;
+  }
+  const poolAccs = (S.status?.accounts || []);
+  const inPoolSet = new Set();
+  for (const a of poolAccs) {
+    for (const m of MAOMAIL_ITEMS) {
+      const email = m.email || m.address || m.name || "";
+      const prefix = email.split("@")[0];
+      if (a.label && (a.label.includes(email) || a.label.includes(prefix))) {
+        inPoolSet.add(email);
+      }
+    }
+  }
+
+  const unaddedCount = MAOMAIL_ITEMS.filter(m => !inPoolSet.has(m.email)).length;
+  if ($("#batchMailCount")) {
+    $("#batchMailCount").textContent = `(共 ${MAOMAIL_ITEMS.length} 个邮箱，其中 ${unaddedCount} 个未入池)`;
+  }
+
+  listEl.innerHTML = MAOMAIL_ITEMS.map((m, idx) => {
+    const email = m.email || m.address || m.name || "";
+    const inPool = inPoolSet.has(email);
+    const badge = inPool
+      ? `<span style="font-size:10px;color:#16a34a;background:#dcfce7;padding:1px 5px;border-radius:4px;white-space:nowrap">已在池中</span>`
+      : `<span style="font-size:10px;color:#2563eb;background:#eff6ff;padding:1px 5px;border-radius:4px;white-space:nowrap">未入池</span>`;
+    return `<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:4px 6px;border-radius:6px;border:1px solid #f1f5f9;background:#fafafa;user-select:none" class="batch-mail-item ${inPool ? 'in-pool' : 'unadded'}">
+      <input type="checkbox" class="batch-ck" data-email="${esc(email)}" style="width:auto" ${inPool ? '' : 'checked'}>
+      <span style="font-family:monospace;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1" title="${esc(email)}">${esc(email)}</span>
+      ${badge}
+    </label>`;
+  }).join("");
+
+  listEl.onchange = e => {
+    if (e.target.classList.contains("batch-ck")) updateBatchSelectionCount();
+  };
+
+  updateBatchSelectionCount();
+}
+
+if ($("#btnBatchSelectAll")) {
+  $("#btnBatchSelectAll").onclick = () => {
+    document.querySelectorAll(".batch-ck").forEach(c => c.checked = true);
+    updateBatchSelectionCount();
+  };
+}
+if ($("#btnBatchSelectNone")) {
+  $("#btnBatchSelectNone").onclick = () => {
+    document.querySelectorAll(".batch-ck").forEach(c => c.checked = false);
+    updateBatchSelectionCount();
+  };
+}
+if ($("#btnBatchSelectUnadded")) {
+  $("#btnBatchSelectUnadded").onclick = () => {
+    document.querySelectorAll(".batch-mail-item").forEach(el => {
+      const ck = el.querySelector(".batch-ck");
+      if (ck) ck.checked = el.classList.contains("unadded");
+    });
+    updateBatchSelectionCount();
+  };
+}
+if ($("#btnBatchRefresh")) {
+  $("#btnBatchRefresh").onclick = async () => {
+    const b = $("#btnBatchRefresh");
+    b.disabled = true; b.textContent = "刷新中…";
+    await loadMaoMailboxes();
+    b.disabled = false; b.textContent = "↺ 刷新";
+    toast("邮箱列表已刷新");
+  };
+}
+
+async function pollBatchStatus() {
+  if (BATCH_POLL_TIMER) return;
+  BATCH_POLL_TIMER = setInterval(async () => {
+    try {
+      const res = await api("/v1/login/batch");
+      const b = res.batch;
+      if (!b) {
+        clearInterval(BATCH_POLL_TIMER);
+        BATCH_POLL_TIMER = null;
+        return;
+      }
+      renderBatchDashboard(b);
+      if (b.status !== "running") {
+        clearInterval(BATCH_POLL_TIMER);
+        BATCH_POLL_TIMER = null;
+        if ($("#btnBatchCancel")) $("#btnBatchCancel").style.display = "none";
+        if ($("#btnBatchStart")) {
+          $("#btnBatchStart").disabled = false;
+          $("#btnBatchStart").textContent = `🚀 开始并发批量登录 (${document.querySelectorAll(".batch-ck:checked").length})`;
+        }
+        toast(`批量登录任务${b.status === "completed" ? "完成" : "已终止"}：成功 ${b.done} 个，失败 ${b.failed} 个`);
+        await load(true);
+      } else {
+        if (b.done > 0) load(true);
+      }
+    } catch {}
+  }, 1000);
+}
+
+function renderBatchDashboard(b) {
+  if (!b) return;
+  const pct = b.total ? Math.round(((b.done + b.failed) / b.total) * 100) : 0;
+  if ($("#batchProgressBar")) $("#batchProgressBar").style.width = pct + "%";
+  if ($("#batchProgressSummary")) {
+    const stText = b.status === "running" ? "🚀 批量登录进行中…" : (b.status === "completed" ? "✅ 批量登录已完成" : "⏹ 任务已终止");
+    $("#batchProgressSummary").textContent = `${stText} (进度 ${b.done + b.failed}/${b.total} · ${pct}%)`;
+  }
+  if ($("#batchProgressStat")) {
+    $("#batchProgressStat").textContent = `成功 ${b.done} | 失败 ${b.failed} | 进行中 ${b.running} | 排队中 ${b.pending}`;
+  }
+
+  const tbody = $("#batchTableBody");
+  if (!tbody || !b.items) return;
+  tbody.innerHTML = b.items.map(it => {
+    let stTag = "";
+    if (it.state === "pending") stTag = `<span style="color:#64748b;background:#f1f5f9;padding:1px 6px;border-radius:4px">排队中</span>`;
+    else if (it.state === "starting" || it.state === "waiting") stTag = `<span style="color:#2563eb;background:#eff6ff;padding:1px 6px;border-radius:4px">浏览器中</span>`;
+    else if (it.state === "capturing") stTag = `<span style="color:#d97706;background:#fef3c7;padding:1px 6px;border-radius:4px">捕获凭据</span>`;
+    else if (it.state === "done") stTag = `<span style="color:#16a34a;background:#dcfce7;padding:1px 6px;border-radius:4px;font-weight:600">✓ 成功</span>`;
+    else stTag = `<span style="color:#dc2626;background:#fee2e2;padding:1px 6px;border-radius:4px">✗ ${esc(it.state)}</span>`;
+
+    const sec = it.endedAt ? Math.round((it.endedAt - it.startedAt) / 1000) + "s"
+      : (it.startedAt ? Math.round((Date.now() - it.startedAt) / 1000) + "s" : "—");
+
+    const detail = it.account ? `已入池: org ${esc(it.account.org ? it.account.org.slice(0, 8) : '✓')}` : esc(it.message || '—');
+
+    return `<tr style="border-bottom:1px solid #f1f5f9">
+      <td style="padding:4px 8px;color:var(--sub)">${it.index}</td>
+      <td style="padding:4px 8px;font-family:monospace;font-weight:600">${esc(it.email)}</td>
+      <td style="padding:4px 8px">${stTag}</td>
+      <td style="padding:4px 8px" title="${esc(it.message || '')}">
+        <span style="color:#334155">${detail}</span>
+        <span style="font-size:10.5px;color:var(--sub);margin-left:6px">${sec}</span>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+if ($("#btnBatchStart")) {
+  $("#btnBatchStart").onclick = async () => {
+    const cks = Array.from(document.querySelectorAll(".batch-ck:checked")).map(c => c.dataset.email);
+    const customText = $("#batchCustomArea") ? $("#batchCustomArea").value.trim() : "";
+    const customList = customText.split(/[\r\n,;]+/).map(s => s.trim()).filter(Boolean);
+    const allEmails = [...new Set([...cks, ...customList])];
+
+    if (!allEmails.length) {
+      return toast("请先勾选或在输入框填入至少一个邮箱", true);
+    }
+
+    const concurrency = +$("#batchConcurrency").value || 2;
+    const btn = $("#btnBatchStart");
+    btn.disabled = true;
+    btn.textContent = `启动批量任务中…`;
+    if ($("#btnBatchCancel")) $("#btnBatchCancel").style.display = "inline-flex";
+
+    try {
+      const res = await api("/v1/login/batch", {
+        method: "POST",
+        body: JSON.stringify({ emails: allEmails, concurrency })
+      });
+      if (res.ok) {
+        toast(`已启动 ${allEmails.length} 个邮箱批量自动登录 (并发数: ${concurrency})`);
+        renderBatchDashboard(res.batch);
+        pollBatchStatus();
+      } else {
+        toast("启动失败: " + (res.message || "未知错误"), true);
+        btn.disabled = false;
+        if ($("#btnBatchCancel")) $("#btnBatchCancel").style.display = "none";
+      }
+    } catch (err) {
+      toast("启动失败: " + err.message, true);
+      btn.disabled = false;
+      if ($("#btnBatchCancel")) $("#btnBatchCancel").style.display = "none";
+    }
+  };
+}
+
+if ($("#btnBatchCancel")) {
+  $("#btnBatchCancel").onclick = async () => {
+    if (!confirm("确定终止当前的批量登录任务？正在执行的浏览器窗口将被关闭。")) return;
+    try {
+      const res = await api("/v1/login/batch/cancel", { method: "POST", body: "{}" });
+      toast("批量任务已申请终止");
+      renderBatchDashboard(res.batch);
+    } catch (e) {
+      toast("终止失败: " + e.message, true);
+    }
+  };
+}
+
+/* 肥猫猫临时邮箱一键全自动登录 */
+async function loadMaoMailboxes() {
+  const sel = $("#selMaoMail");
+  try {
+    const res = await api("/v1/maomail/mailboxes");
+    if (!res.ok) {
+      if (sel) sel.innerHTML = `<option value="">加载失败：${esc(res.error || "未配置 Token")}</option>`;
+      return;
+    }
+    const items = res.mailboxes || [];
+    MAOMAIL_ITEMS = items;
+    renderBatchMailboxes();
+
+    if (sel) {
+      if (!items.length) {
+        sel.innerHTML = `<option value="">肥猫猫无可用邮箱（请在肥猫猫先生成或导入邮箱）</option>`;
+        return;
+      }
+      const prev = sel.value;
+      sel.innerHTML = items.map(m => {
+        const email = m.email || m.address || m.name || "";
+        const unread = m.unread_count ? ` (${m.unread_count}封未读)` : "";
+        return `<option value="${esc(email)}">${esc(email)}${unread}</option>`;
+      }).join("");
+      if (prev && items.some(m => (m.email || m.address || m.name) === prev)) {
+        sel.value = prev;
+      }
+    }
+  } catch (err) {
+    if (sel) sel.innerHTML = `<option value="">无法获取肥猫猫邮箱: ${esc(err.message)}</option>`;
+  }
+}
+
+if ($("#btnRefreshMaoMail")) {
+  $("#btnRefreshMaoMail").onclick = async () => {
+    const b = $("#btnRefreshMaoMail");
+    b.disabled = true; b.textContent = "刷新中…";
+    await loadMaoMailboxes();
+    b.disabled = false; b.textContent = "↺ 刷新邮箱";
+    toast("邮箱列表已刷新");
+  };
+}
+
+if ($("#btnAutoLogin")) {
+  $("#btnAutoLogin").onclick = async e => {
+    const b = e.currentTarget;
+    const custom = $("#inputCustomEmail") ? $("#inputCustomEmail").value.trim() : "";
+    const selected = $("#selMaoMail") ? $("#selMaoMail").value.trim() : "";
+    const email = custom || selected;
+    if (!email) return toast("请选择或输入邮箱地址", true);
+
+    b.disabled = true; b.textContent = "启动中…";
+    setLoginUI(`正在启动 Edge 并准备自动登录 [${email}]…`, "", true);
+    if (LOGIN_TIMER) { clearInterval(LOGIN_TIMER); LOGIN_TIMER = null; }
+    LOGIN_ID = null;
+    try {
+      const s = await api("/v1/login", {
+        method: "POST",
+        body: JSON.stringify({ email, autoLogin: true, force: true })
+      });
+      LOGIN_ID = s.id;
+      $("#loginLink").value = s.link;
+      $("#loginLinkRow").style.display = "flex";
+      $("#btnLoginCancel").style.display = "inline-flex";
+      setLoginUI(s.reused ? "已复用正在进行的登录流程…" : s.message, "", true);
+      b.textContent = "⚡ 自动登录中…";
+      pollLogin();
+    } catch (ex) {
+      setLoginUI("自动登录启动失败: " + ex.message, "bad", false);
+      resetLoginUIButtons(false);
+    }
+  };
+}
+
+if ($("#btnTestMaoMail")) {
+  $("#btnTestMaoMail").onclick = async () => {
+    const b = $("#btnTestMaoMail");
+    const tip = $("#maomailStatusTip");
+    b.disabled = true; b.textContent = "测试中…";
+    if (tip) tip.textContent = "正在测试与肥猫猫 API 的连通性…";
+    try {
+      const res = await api("/v1/maomail/mailboxes");
+      if (res.ok) {
+        if (tip) {
+          tip.style.color = "#16a34a";
+          tip.textContent = `✓ 连通成功！检测到 ${(res.mailboxes || []).length} 个可用邮箱`;
+        }
+        toast(`肥猫猫连接正常，共 ${(res.mailboxes || []).length} 个邮箱`);
+      } else {
+        if (tip) {
+          tip.style.color = "#dc2626";
+          tip.textContent = `✗ 测试失败: ${res.error || "未知错误"}`;
+        }
+        toast("肥猫猫连接失败: " + (res.error || "未知错误"), true);
+      }
+    } catch (e) {
+      if (tip) {
+        tip.style.color = "#dc2626";
+        tip.textContent = `✗ 测试失败: ${e.message}`;
+      }
+      toast("肥猫猫测试失败: " + e.message, true);
+    } finally {
+      b.disabled = false; b.textContent = "🔍 测试邮箱连接与邮箱列表";
+    }
+  };
+}
+
+$("#btnAdd").onclick = () => { S.editId = null; $("#accTitle").textContent = "手动添加账号（高级）";
+  $("#fLabel").value = ""; $("#fKey").value = ""; $("#fOrg").value = "";
+  $("#fKey").placeholder = "sk-ant-sid01-……（推荐改用链接登录自动捕获）";
+  $("#maskAcc").classList.add("on"); $("#fLabel").focus(); };
+window.closeAcc = () => $("#maskAcc").classList.remove("on");
+
+$("#btnAccSave").onclick = async () => {
+  const typedKey = $("#fKey").value.trim();
+  const body = { label: $("#fLabel").value.trim() || undefined,
+    org: $("#fOrg").value.trim() || undefined };
+  // 编辑模式：sessionKey 留空表示不修改（卡片里显示的是打码值，不能回存）
+  if (S.editId) { if (typedKey) body.sessionKey = typedKey; }
+  else body.sessionKey = typedKey;
+  if (!S.editId && !body.sessionKey) return toast("sessionKey 不能为空", true);
+  const btn = $("#btnAccSave"); btn.disabled = true; btn.textContent = "保存中…（org 自动发现约 1s）";
+  try {
+    if (S.editId) {
+      await api("/v1/accounts/" + encodeURIComponent(S.editId), { method: "PATCH",
+        body: JSON.stringify({ label: body.label, sessionKey: body.sessionKey, org: body.org }) });
+      toast("已更新");
+    } else {
+      await api("/v1/accounts", { method: "POST", body: JSON.stringify(body) });
+      toast("账号已添加" + (body.org ? "" : "（org 自动发现完成）"));
+    }
+    closeAcc(); await load(true);
+  } catch (e) { toast(e.message, true); }
+  finally { btn.disabled = false; btn.textContent = "保存"; }
+};
+
+$("#btnImport").onclick = async e => {
+  const b = e.currentTarget; b.disabled = true; b.textContent = "导入中…";
+  try { const r = await api("/v1/accounts/refresh", { method: "POST", body: "{}" });
+    toast("Desktop 登录态已导入（" + r.accounts.length + " 个账号）"); await load(true);
+  } catch (ex) { toast(ex.message, true); }
+  finally { b.disabled = false; b.textContent = "🖥️ 导入 Desktop 登录态"; }
+};
+
+$("#btnCfg").onclick = async e => {
+  const b = e.currentTarget; b.disabled = true;
+  try {
+    await api("/v1/pool", { method: "POST", body: JSON.stringify({
+      strategy: $("#cfgStrategy").value,
+      perAccountConcurrency: +$("#cfgConc").value,
+      minQuotaRemaining: (+$("#cfgThr").value) / 100,
+    }) });
+    toast("池调度配置已保存"); await load(true);
+  } catch (ex) { toast(ex.message, true); }
+  finally { b.disabled = false; }
+};
+
+$("#btnSaveSettings").onclick = async e => {
+  const b = e.currentTarget; b.disabled = true; b.textContent = "保存中…";
+  try {
+    const payload = {
+      strategy: $("#cfgFullStrategy").value,
+      sessionAffinity: $("#cfgFullAffinity").checked,
+      perAccountConcurrency: +$("#cfgFullConc").value,
+      minQuotaRemaining: (+$("#cfgFullThr").value) / 100,
+      maxFailover: +$("#cfgFullFailover").value,
+      waitTimeoutMs: (+$("#cfgFullWaitTimeout").value) * 1000,
+      pruneContext: $("#cfgFullPrune").checked,
+      pruneMaxToolChars: +$("#cfgFullPruneChars").value,
+      pruneKeepRecentTools: +$("#cfgFullPruneKeep").value,
+      defaultEffort: $("#cfgFullEffort").value,
+      pricePerMillionTokens: +$("#cfgFullPrice").value,
+      maomailToken: $("#cfgMaoMailToken") ? $("#cfgMaoMailToken").value.trim() : undefined,
+      maomailBaseUrl: $("#cfgMaoMailBaseUrl") ? $("#cfgMaoMailBaseUrl").value.trim() : undefined,
+    };
+    await api("/v1/pool", { method: "POST", body: JSON.stringify(payload) });
+    toast("所有系统配置已成功保存，即时生效！");
+    await load(true);
+  } catch (ex) { toast(ex.message, true); }
+  finally { b.disabled = false; b.textContent = "💾 保存全部设置"; }
+};
+
+$("#btnResetSettings").onclick = () => {
+  if (!confirm("确定将所有设置项重置为系统推荐默认值？")) return;
+  $("#cfgFullStrategy").value = "least-loaded";
+  $("#cfgFullAffinity").checked = true;
+  $("#cfgFullConc").value = 3;
+  $("#cfgFullThr").value = 20;
+  $("#cfgFullFailover").value = 3;
+  $("#cfgFullWaitTimeout").value = 30;
+  $("#cfgFullPrune").checked = true;
+  $("#cfgFullPruneChars").value = 8000;
+  $("#cfgFullPruneKeep").value = 4;
+  $("#cfgFullEffort").value = "max";
+  $("#cfgFullPrice").value = 0;
+  if ($("#cfgMaoMailBaseUrl")) $("#cfgMaoMailBaseUrl").value = "https://zjkdongao.cn";
+  toast("已填入推荐值，点「保存全部设置」后生效");
+};
+
+$("#selAll").onchange = e => {
+  const st = S.status; if (!st) return;
+  st.accounts.filter(matches).forEach(a => e.target.checked ? S.sel.add(a.id) : S.sel.delete(a.id));
+  renderCards();
+};
+$("#btnDelSel").onclick = async () => {
+  if (!confirm("删除已选的 " + S.sel.size + " 个账号？")) return;
+  const ids = [...S.sel];
+  const rs = await Promise.allSettled(ids.map(id =>
+    api("/v1/accounts/" + encodeURIComponent(id), { method: "DELETE" })));
+  const bad = rs.filter(r => r.status === "rejected");
+  toast(bad.length ? "删除 " + (ids.length - bad.length) + " 个，失败 " + bad.length + "：" + bad[0].reason.message
+                   : "已删除 " + ids.length + " 个账号", !!bad.length);
+  S.sel.clear(); await load(true);
+};
+
+/* 卡片内事件（事件委托） */
+$("#grid").addEventListener("click", async e => {
+  const cardEl = e.target.closest(".acc"); if (!cardEl) return;
+  const id = cardEl.dataset.id;
+  const st = S.status || {}; const a = (st.accounts || []).find(x => x.id === id);
+  const act = e.target.dataset && e.target.dataset.act;
+
+  if (e.target.classList.contains("ck")) {
+    e.target.checked ? S.sel.add(id) : S.sel.delete(id);
+    $("#selInfo").textContent = S.sel.size ? "已选 " + S.sel.size + " 个" : "";
+    $("#btnDelSel").style.display = S.sel.size ? "" : "none";
+    return;
+  }
+  if (e.target.classList.contains("en")) {
+    try { await api("/v1/accounts/" + encodeURIComponent(id),
+      { method: "PATCH", body: JSON.stringify({ enabled: e.target.checked }) });
+      toast(e.target.checked ? "已启用" : "已停用"); await load(true);
+    } catch (ex) { toast(ex.message, true); }
+    return;
+  }
+  if (!act || !a) return;
+
+  if (act === "quota") {
+    e.target.disabled = true; const old = e.target.textContent; e.target.textContent = "查询中…";
+    try {
+      const r = await api("/v1/accounts/" + encodeURIComponent(id) + "/quota", { method: "POST", body: "{}" });
+      const q = r.quota || {};
+      const u5 = q["5h"]?.utilization, u7 = q["7d"]?.utilization;
+      toast("✅ 额度已上报：5h " + (u5 == null ? "—" : Math.round(u5 * 100) + "%") +
+        " / 7d " + (u7 == null ? "—" : Math.round(u7 * 100) + "%") +
+        (r.rate_limits?.tier ? " · " + r.rate_limits.tier : ""));
+      await load(true);
+    } catch (ex) { toast("❌ " + ex.message, true); }
+    finally { e.target.disabled = false; e.target.textContent = old; }
+  }
+  if (act === "test") {
+    e.target.disabled = true; const old = e.target.textContent; e.target.textContent = "测试中…";
+    try {
+      const r = await api("/v1/accounts/" + encodeURIComponent(id) + "/test");
+      toast("✅ 登录态有效 · org " + String(r.org || "").slice(0, 12) + (r.plan ? " · " + r.plan : ""));
+    } catch (ex) { toast("❌ " + ex.message, true); }
+    finally { e.target.disabled = false; e.target.textContent = old; }
+  }
+  if (act === "kyc") {
+    e.target.disabled = true; const old = e.target.textContent; e.target.textContent = "查询中…";
+    try {
+      const r = await api("/v1/kyc?id=" + encodeURIComponent(id) + "&fresh=1");
+      const k = (r.results || {})[id];
+      if (k) S.kyc[id] = k;
+      if (k && k.ok) {
+        const orgs = k.orgs || [];
+        toast("🪪 " + (orgs.length
+          ? orgs.map(o => o.name + "：" + ((o.status && o.status.label) || (o.error && o.error.message) || "查询失败") +
+              (o.link && o.link.kind === "portal" ? "（⚠门户KYC）" : "")).join("；")
+          : "无组织"));
+      } else {
+        toast("🪪 " + ((k && k.error && k.error.message) || "查询失败"), true);
+      }
+      renderCards();
+    } catch (ex) { toast("🪪 " + ex.message, true); }
+    finally { e.target.disabled = false; e.target.textContent = old; }
+  }
+  if (act === "edit") {
+    S.editId = id;
+    $("#accTitle").textContent = "编辑账号";
+    $("#fLabel").value = a.label || "";
+    $("#fKey").value = "";                        // 不回填打码值；留空 = 不修改 sessionKey
+    $("#fKey").placeholder = "留空则不修改（当前 " + (a.session_key || "—") + "）";
+    $("#fOrg").value = a.org || "";
+    $("#maskAcc").classList.add("on");
+  }
+  if (act === "uncd") {
+    try { await api("/v1/accounts/" + encodeURIComponent(id),
+      { method: "PATCH", body: JSON.stringify({ cooldownUntil: 0 }) });
+      S.cd.set(id, 0); a.cooldown_remaining_s = 0; toast("冷却已清零"); renderCards();
+    } catch (ex) { toast(ex.message, true); }
+  }
+  if (act === "del") {
+    if (!confirm("删除账号「" + (a.label || a.id) + "」？")) return;
+    try { await api("/v1/accounts/" + encodeURIComponent(id), { method: "DELETE" });
+      toast("已删除"); await load(true);
+    } catch (ex) { toast(ex.message, true); }
+  }
+});
+
+/* 复制按钮 */
+document.addEventListener("click", e => {
+  const t = e.target.dataset && e.target.dataset.copy;
+  if (!t) return;
+  const txt = document.querySelector(t).textContent;
+  navigator.clipboard.writeText(txt).then(() => toast("已复制：" + txt)).catch(() => toast(txt));
+});
+
+/* Esc 关闭弹层 */
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") { closeAcc(); if (document.activeElement !== $("#fApi")) showKey(false); }
+});
+$("#maskAcc").addEventListener("click", e => { if (e.target.id === "maskAcc") closeAcc(); });
+
+/* ---------------- API Keys ---------------- */
+let K = { list: [], editId: null };
+
+const fmtDate = ts => {
+  if (!ts) return "永不过期";
+  const d = new Date(ts);
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+};
+
+async function loadKeys() {
+  try {
+    const d = await api("/v1/keys");
+    K.list = d.keys || [];
+    $("#kNote").textContent = K.list.length + " 个 Key · 配置 " + (d.config_file || "config.json");
+    renderKeys();
+  } catch (e) { toast("读取 Key 失败: " + e.message, true); }
+}
+
+function renderKeys() {
+  if (!K.list.length) {
+    $("#kRows").innerHTML = '<tr><td colspan="9" class="empty">还没有 Key，点右上「＋ 新建 Key」</td></tr>';
+    return;
+  }
+  $("#kRows").innerHTML = K.list.map(k => {
+    const q = k.quota || {};
+    let state = "可用", color = "#16a34a";
+    if (k.enabled === false) { state = "已停用"; color = "#94a3b8"; }
+    else if (k.expired) { state = "已过期"; color = "#dc2626"; }
+    else if (k.quota_exhausted) { state = "额度用尽"; color = "#dc2626"; }
+    const quota = q.limitTokens > 0
+      ? nfmt(q.usedTokens) + " / " + nfmt(q.limitTokens)
+      : nfmt(q.usedTokens) + " / 不限";
+    const reqLine = q.limitRequests > 0
+      ? '<br><span class="hsub">请求 ' + q.usedRequests + "/" + q.limitRequests + "</span>" : "";
+    return "<tr>" +
+      '<td class="namecell">' + esc(k.name) + "</td>" +
+      '<td><code style="font-size:11.5px">' + esc(k.key_masked) + "</code></td>" +
+      '<td><b style="color:' + color + '">' + state + "</b></td>" +
+      '<td style="white-space:nowrap">' + quota + reqLine + "</td>" +
+      "<td>" + fmtDate(k.expiresAt) + "</td>" +
+      '<td class="namecell">' + (k.models && k.models.length ? esc(k.models.join(", ")) : "全部") + "</td>" +
+      "<td>" + (k.rpm || "∞") + " / " + (k.tpm || "∞") +
+        '<br><span class="hsub">当前 ' + k.rpm_current + "/" + k.tpm_current + "</span></td>" +
+      '<td class="namecell">' + (k.ipWhitelist && k.ipWhitelist.length ? esc(k.ipWhitelist.join(", ")) : "不限") + "</td>" +
+      '<td style="white-space:nowrap">' +
+        '<button class="btn sm" data-kact="edit" data-id="' + k.id + '">✏️</button> ' +
+        '<button class="btn sm" data-kact="reset" data-id="' + k.id + '" title="清零已用量">↺</button> ' +
+        '<button class="btn sm danger" data-kact="del" data-id="' + k.id + '">🗑</button>' +
+      "</td></tr>";
+  }).join("");
+}
+
+function openKey(id) {
+  K.editId = id || null;
+  const k = id ? K.list.find(x => x.id === id) : null;
+  $("#keyTitle").textContent = k ? "编辑 Key" : "新建 Key";
+  $("#kName").value = k ? k.name : "";
+  $("#kLimitTokens").value = k && k.quota.limitTokens ? k.quota.limitTokens : "";
+  $("#kLimitRequests").value = k && k.quota.limitRequests ? k.quota.limitRequests : "";
+  $("#kExpires").value = k && k.expiresAt ? new Date(k.expiresAt).toISOString().slice(0, 10) : "";
+  $("#kModels").value = k && k.models ? k.models.join(",") : "";
+  $("#kRpm").value = k && k.rpm ? k.rpm : "";
+  $("#kTpm").value = k && k.tpm ? k.tpm : "";
+  $("#kIps").value = k && k.ipWhitelist ? k.ipWhitelist.join(",") : "";
+  $("#kEnabledRow").style.display = k ? "" : "none";
+  if (k) $("#kEnabled").checked = k.enabled !== false;
+  $("#maskKeyEdit").classList.add("on");
+  $("#kName").focus();
+}
+window.closeKey = () => $("#maskKeyEdit").classList.remove("on");
+
+async function saveKey() {
+  // 没有 key 就别发请求了：直接弹输入框，表单内容原地保留
+  if (!key()) { showKey(true, "还没有填写 API Key —— 见 config.json 里 keys[0].key"); return; }
+  const body = {
+    name: $("#kName").value.trim() || "未命名",
+    quota: {
+      limitTokens: +$("#kLimitTokens").value || 0,
+      limitRequests: +$("#kLimitRequests").value || 0,
+    },
+    expiresAt: $("#kExpires").value ? new Date($("#kExpires").value + "T23:59:59").getTime() : null,
+    models: $("#kModels").value.split(",").map(s => s.trim()).filter(Boolean),
+    rpm: +$("#kRpm").value || 0,
+    tpm: +$("#kTpm").value || 0,
+    ipWhitelist: $("#kIps").value.split(",").map(s => s.trim()).filter(Boolean),
+  };
+  if (K.editId) body.enabled = $("#kEnabled").checked;
+  try {
+    if (K.editId) {
+      await api("/v1/keys/" + K.editId, { method: "PATCH", body: JSON.stringify(body) });
+      toast("已保存");
+    } else {
+      const d = await api("/v1/keys", { method: "POST", body: JSON.stringify(body) });
+      const secret = d && d.secret;
+      if (secret) alert("新 Key 已创建 —— 只显示这一次，请立即保存：\n\n" + secret);
+      toast("已创建");
+    }
+    closeKey();
+    loadKeys();
+  } catch (e) { toast("保存失败: " + e.message, true); }
+}
+
+$("#btnKeyNew").onclick = () => openKey(null);
+$("#btnKeyRefresh").onclick = () => loadKeys().then(() => toast("已刷新"));
+$("#btnKeyEditSave").onclick = saveKey;
+$("#maskKeyEdit").addEventListener("click", e => { if (e.target.id === "maskKeyEdit") closeKey(); });
+$("#kRows").addEventListener("click", async e => {
+  const btn = e.target.closest("[data-kact]");
+  if (!btn) return;
+  const { kact, id } = btn.dataset;
+  const k = K.list.find(x => x.id === id);
+  if (kact === "edit") return openKey(id);
+  if (kact === "reset") {
+    if (!confirm("把「" + (k ? k.name : id) + "」的已用额度清零？")) return;
+    try { await api("/v1/keys/" + id + "/reset", { method: "POST" }); toast("已清零"); loadKeys(); }
+    catch (err) { toast("清零失败: " + err.message, true); }
+    return;
+  }
+  if (kact === "del") {
+    if (!confirm("删除「" + (k ? k.name : id) + "」？用这个 Key 的客户端会立即失效。")) return;
+    try { await api("/v1/keys/" + id, { method: "DELETE" }); toast("已删除"); loadKeys(); }
+    catch (err) { toast("删除失败: " + err.message, true); }
+  }
+});
+
+/* ---------------- 启动 ---------------- */
+(async function boot() {
+  $("#cfgConc").value = 3; $("#cfgThr").value = 20;
+  try {
+    await load(false);
+    const st = S.status;
+    if (st) { $("#cfgStrategy").value = st.strategy;
+      $("#cfgConc").value = st.per_account_concurrency;
+      $("#cfgThr").value = Math.round((st.min_quota_remaining ?? .2) * 100); }
+  } catch { showKey(true); }
+  startPoll();
+})();
+</script>
+</body>
+</html>

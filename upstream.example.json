@@ -1,0 +1,22 @@
+{
+  "base_url": "https://api.anthropic.com",
+  "auth_token": "sk-ant-oat01-your-auth-token-placeholder",
+  "version": "2023-06-01",
+  "beta": "",
+  "scopes": null,
+  "expiresAt": null,
+  "source": "claude-desktop profile",
+  "plan": "free",
+  "models": [
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5"
+  ],
+  "web_cookie": "sessionKey=sk-ant-sid02-your-session-key-placeholder;",
+  "web_ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+  "web_org": "your-org-uuid-placeholder",
+  "web_account": "your-account-uuid-placeholder",
+  "web_cookie_at": null,
+  "web_base": "https://claude.ai",
+  "web_session_key": "sk-ant-sid02-your-session-key-placeholder",
+  "web_account_label": "desktop"
+}

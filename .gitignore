@@ -1,0 +1,36 @@
+# 敏感凭据与本地配置文件 (绝对禁止提交，请使用 *.example.json 模版)
+agent.md
+accounts.json
+config.json
+upstream.json
+.env
+.env.*
+!.env.example
+
+# 抓包、会话与调试数据
+download.devtools
+*.devtools
+*.har
+desktop_session_profiles/
+
+# 运行日志与统计数据
+usage/
+*.log
+logs/
+proxy.out.log
+proxy.err.log
+
+# 依赖与临时构建目录
+node_modules/
+__pycache__/
+*.py[cod]
+*$py.class
+.temp/
+tmp/
+*.tmp
+
+# 编辑器与系统文件
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
