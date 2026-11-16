@@ -411,12 +411,13 @@ export function createLoginManager(opts) {
             }
             input.dispatchEvent(new Event('input', { bubbles: true }));
             input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
 
-            // 支持 中文(继续/登录)、英文(continue/login/submit)、日文(メールで続ける/続ける) 等多语言按钮
+            // 优先查找表单提交按钮或 continue 专用按钮，严格排除第三方 Google / Apple 授权按钮
             const buttons = Array.from(document.querySelectorAll('button'));
-            const btn = document.querySelector('button[type="submit"]')
-              || buttons.find(b => /continue|继续|login|登录|続ける|メールで/i.test((b.innerText || '').trim()))
-              || buttons.find(b => /submit/i.test(b.type || ''));
+            const btn = document.querySelector('button[data-testid="continue"]')
+              || document.querySelector('button[type="submit"]')
+              || buttons.find(b => !/google|apple/i.test(b.innerText || '') && /メールで続ける|email|继续|continue|login|登录/i.test((b.innerText || '').trim()));
 
             if (btn && !btn.disabled) {
               btn.click();
@@ -452,13 +453,21 @@ export function createLoginManager(opts) {
             if (btn && !btn.disabled) btn.click();
             return true;
           }
-          const single = document.querySelector('input[name*="code" i], input[id*="code" i]');
+          const single = document.querySelector('input[data-testid="code"], input#code, input[name*="code" i]');
           if (single) {
-            single.value = ${JSON.stringify(code)};
+            single.focus();
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+            if (setter) {
+              setter.call(single, ${JSON.stringify(code)});
+            } else {
+              single.value = ${JSON.stringify(code)};
+            }
             single.dispatchEvent(new Event('input', { bubbles: true }));
             single.dispatchEvent(new Event('change', { bubbles: true }));
-            const btn = document.querySelector('button[type="submit"]')
-              || [...document.querySelectorAll('button')].find(b => /continue|验证|verify/i.test(b.innerText || ''));
+            single.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+            const btn = document.querySelector('button[data-testid="continue"]')
+              || document.querySelector('button[type="submit"]')
+              || [...document.querySelectorAll('button')].find(b => /continue|验证|verify|確認/i.test(b.innerText || ''));
             if (btn && !btn.disabled) btn.click();
             return true;
           }
