@@ -1137,7 +1137,7 @@ async function collect(stream, acct, ctx, body = null) {
 }
 
 /** 流式：把上游事件逐个转成 OpenAI chunk 写出去 */
-async function streamToClient(res, stream, model, chatId, acct, ctx) {
+async function streamToClient(res, stream, model, chatId, acct, ctx, body = null) {
   const created = Math.floor(Date.now() / 1000);
   const send = o => res.write(`data: ${JSON.stringify(o)}\n\n`);
   const chunk = (delta, finish = null) =>
@@ -2572,7 +2572,12 @@ const server = http.createServer(async (req, res) => {
           'access-control-allow-origin': '*',
         });
         try {
-          return await streamToClient(res, run.stream, model, chatId, run.account, run.ctx);
+          return await streamToClient(res, run.stream, model, chatId, run.account, run.ctx, body);
+        } catch (streamErr) {
+          try { res.write(`data: ${JSON.stringify({ error: { message: streamErr.message, type: 'proxy_error' } })}\n\n`); } catch {}
+          try { res.write('data: [DONE]\n\n'); } catch {}
+          try { res.end(); } catch {}
+          throw streamErr;
         } finally {
           run.release();
         }
