@@ -2256,8 +2256,11 @@ const server = http.createServer(async (req, res) => {
     // ---------------------------------------------------------- 账号管理
     if (url.pathname === '/v1/accounts' && req.method === 'GET') {
       const st = POOL.status();
-      Object.assign(st, KEYS.settings() || {});
-      st.price_per_million_tokens = KEYS.settings()?.pricePerMillionTokens || 0;
+      const setts = KEYS.settings() || {};
+      Object.assign(st, setts);
+      st.price_per_million_tokens = setts.pricePerMillionTokens || 0;
+      st.maomail_token = setts.maomailToken || setts.maomail_token || '';
+      st.maomail_base_url = setts.maomailBaseUrl || setts.maomail_base_url || 'https://zjkdongao.cn';
       st.server = KEYS.serverConfig();
       // 用请求级用量日志校准「已用 token」：
       // 账号池的 tokensInEst 只在请求成功时累加——失败的 429 请求同样消耗了输入，
@@ -2437,6 +2440,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/v1/pool') {
       if (req.method === 'GET') {
         const st = POOL.status();
+        const setts = KEYS.settings() || {};
         return json(res, 200, {
           strategy: st.strategy,
           per_account_concurrency: st.per_account_concurrency,
@@ -2448,7 +2452,9 @@ const server = http.createServer(async (req, res) => {
           prune_max_tool_chars: st.prune_max_tool_chars,
           prune_keep_recent_tools: st.prune_keep_recent_tools,
           default_effort: st.default_effort,
-          price_per_million_tokens: KEYS.settings()?.pricePerMillionTokens || 0,
+          price_per_million_tokens: setts.pricePerMillionTokens || 0,
+          maomail_token: setts.maomailToken || setts.maomail_token || '',
+          maomail_base_url: setts.maomailBaseUrl || setts.maomail_base_url || 'https://zjkdongao.cn',
           server: KEYS.serverConfig(),
         });
       }
