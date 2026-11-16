@@ -526,14 +526,13 @@ async function uploadOne(acct, img, signal) {
 
 /**
  * 批量上传图片，返回 { uuids, failed }。
+ * - 全量并发上传，大幅降低多张历史图片和换号 failover 时的等待耗时
  * - 可重试错误（429/401/403/5xx/网络/挑战）上抛 -> runCompletion 换账号或排队
  * - 不可重试（400 不支持、过大、远程下载失败）吞掉 -> 记进 failed，由调用方写进 prompt
  * - 同一张图（同账号）只传一次，结果按 sha256 缓存
  */
 async function uploadImages(acct, images, signal) {
-  const uuids = [];
-  const failed = [];
-  for (const ref of images) {
+  const tasks = images.map(async ref => {
     if (signal?.aborted) throw clientGoneError();
     try {
       const img = await resolveImage(ref, signal);
@@ -545,14 +544,18 @@ async function uploadImages(acct, images, signal) {
         IMAGE_CACHE.set(key, { uuid, at: Date.now() });
         if (IMAGE_CACHE.size > 512) IMAGE_CACHE.delete(IMAGE_CACHE.keys().next().value);
       }
-      uuids.push(uuid);
+      return { ok: true, uuid };
     } catch (e) {
       if (e?.name === 'AbortError' || signal?.aborted) throw clientGoneError();
       if (e?.retryable) throw e;
       console.warn(`[image] 本张跳过: ${String(e.message || e).slice(0, 160)}`);
-      failed.push(String(e.message || e).slice(0, 160));
+      return { ok: false, err: String(e.message || e).slice(0, 160) };
     }
-  }
+  });
+
+  const results = await Promise.all(tasks);
+  const uuids = results.filter(r => r.ok).map(r => r.uuid);
+  const failed = results.filter(r => !r.ok).map(r => r.err);
   return { uuids, failed };
 }
 
