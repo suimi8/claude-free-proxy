@@ -26,6 +26,45 @@ function findBrowser() {
   if (process.env.LOGIN_BROWSER && fs.existsSync(process.env.LOGIN_BROWSER)) {
     return process.env.LOGIN_BROWSER;
   }
+
+  // 1. Linux 平台
+  if (process.platform === 'linux') {
+    const linuxPaths = [
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser',
+      '/snap/bin/chromium',
+      '/usr/bin/microsoft-edge',
+      '/usr/bin/microsoft-edge-stable',
+    ];
+    for (const p of linuxPaths) {
+      try { if (fs.existsSync(p)) return p; } catch {}
+    }
+    try {
+      const found = execSync('which google-chrome chromium chromium-browser microsoft-edge edge 2>/dev/null', {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim().split(/\r?\n/).map(s => s.trim()).filter(Boolean)[0];
+      if (found && fs.existsSync(found)) return found;
+    } catch {}
+    throw new Error('找不到 Chrome/Chromium/Edge，可用 LOGIN_BROWSER 环境变量指定浏览器路径');
+  }
+
+  // 2. macOS 平台
+  if (process.platform === 'darwin') {
+    const macPaths = [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    ];
+    for (const p of macPaths) {
+      try { if (fs.existsSync(p)) return p; } catch {}
+    }
+    throw new Error('找不到 Chrome/Edge，可用 LOGIN_BROWSER 环境变量指定浏览器路径');
+  }
+
+  // 3. Windows 平台
   const edgePaths = [
     'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
     'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
@@ -293,6 +332,8 @@ export function createLoginManager(opts) {
     loginUrl = 'https://claude.ai/login',
   } = opts;
 
+  let verificationProvider = typeof opts.onAutoVerification === 'function' ? opts.onAutoVerification : null;
+
   const flows = new Map();
   let active = null;
   const LIVE = new Set(['starting', 'waiting', 'capturing']);
@@ -547,7 +588,21 @@ export function createLoginManager(opts) {
         '--new-window',
         loginUrl,
       ];
-      f.proc = spawn(exe, args, { stdio: 'ignore', windowsHide: false });
+
+      const env = { ...process.env };
+      if (process.platform === 'linux') {
+        if (!env.DISPLAY) {
+          try {
+            const xFiles = fs.readdirSync('/tmp/.X11-unix');
+            const found = xFiles.find(name => /^X\d+$/.test(name));
+            if (found) env.DISPLAY = ':' + found.slice(1);
+          } catch {}
+          if (!env.DISPLAY) env.DISPLAY = ':77';
+        }
+        args.unshift('--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu');
+      }
+
+      f.proc = spawn(exe, args, { stdio: 'ignore', windowsHide: false, env });
       f.proc.on('error', e => {
         console.warn(`[login] ${f.id} 浏览器启动失败: ${e.message}`);
         f.state = 'error';
@@ -557,8 +612,13 @@ export function createLoginManager(opts) {
       f.proc.on('exit', (code, sig) => {
         console.log(`[login] ${f.id} 浏览器窗口已退出 (code=${code})`);
         if (LIVE.has(f.state)) {
-          f.state = 'closed';
-          f.message = '登录浏览器窗口已被关闭，请点击下方「重新发起登录」重新打开';
+          if (code && code !== 0 && (Date.now() - f.startedAt) < 6000) {
+            f.state = 'error';
+            f.message = `浏览器启动异常退出 (exitCode=${code})，请检查显示环境`;
+          } else {
+            f.state = 'closed';
+            f.message = '登录浏览器窗口已被关闭，请点击下方「重新发起登录」重新打开';
+          }
         }
         if (active === f) active = null;
       });
@@ -595,8 +655,30 @@ export function createLoginManager(opts) {
       // 如果指定了邮箱，后台自动尝试向 Claude 页面填入并提交
       if (f.autoEmail) {
         f.message = `正在向 Claude.ai 自动填入邮箱 ${f.autoEmail}…`;
-        submitEmailToClaude(f, f.autoEmail).then(ok => {
+        submitEmailToClaude(f, f.autoEmail).then(async ok => {
           console.log(`[login] ${f.id} 自动提交邮箱 ${f.autoEmail} 结果: ${ok}`);
+          if (!ok) return;
+          f.message = `已提交邮箱 ${f.autoEmail}，正在等待 Claude 验证邮件…`;
+          if (typeof verificationProvider === 'function') {
+            try {
+              const res = await verificationProvider(f.autoEmail, f, (msg) => {
+                if (LIVE.has(f.state)) f.message = msg;
+              });
+              if (res?.magicLink) {
+                f.message = '收到 Magic Link，正在浏览器中自动跳转登录…';
+                console.log(`[login] ${f.id} 自动跳转 Magic Link: ${res.magicLink.slice(0, 60)}...`);
+                const pageCdp = await ensurePageCdp(f);
+                await pageCdp.call('Page.navigate', { url: res.magicLink });
+              } else if (res?.code) {
+                f.message = `收到验证码 [${res.code}]，正在浏览器中自动输入…`;
+                console.log(`[login] ${f.id} 自动输入验证码: ${res.code}`);
+                await fillCodeInClaude(f, res.code);
+              }
+            } catch (err) {
+              console.warn(`[login] ${f.id} 自动接码提示: ${err.message}`);
+              if (LIVE.has(f.state)) f.message = `等待邮件中 (${err.message})，可在浏览器窗口完成`;
+            }
+          }
         }).catch(e => {
           console.warn(`[login] ${f.id} 自动提交邮箱异常: ${e.message}`);
         });
@@ -891,6 +973,9 @@ export function createLoginManager(opts) {
     },
     cancelBatch() {
       return cancelBatch();
+    },
+    registerVerificationProvider(fn) {
+      verificationProvider = fn;
     },
   };
 }
