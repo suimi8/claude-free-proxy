@@ -5,9 +5,7 @@
     "host": "127.0.0.1"
   },
   "settings": {
-    "pricePerMillionTokens": 0,
-    "maomailToken": "",
-    "maomailBaseUrl": "https://zjkdongao.cn"
+    "pricePerMillionTokens": 0
   },
   "keys": [
     {

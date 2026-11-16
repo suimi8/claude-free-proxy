@@ -3,6 +3,7 @@ agent.md
 accounts.json
 config.json
 upstream.json
+plugins/
 .env
 .env.*
 !.env.example

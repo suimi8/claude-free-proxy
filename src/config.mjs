@@ -331,7 +331,7 @@ export function createConfigStore(file) {
 
   function updateSettings(patch = {}) {
     if (!data) load();
-    for (const f of ['pricePerMillionTokens', 'injectKeyToLocalUI', 'maomailToken', 'maomailBaseUrl']) {
+    for (const f of ['pricePerMillionTokens', 'injectKeyToLocalUI']) {
       if (patch[f] !== undefined) data.settings[f] = patch[f];
     }
     writeNow();

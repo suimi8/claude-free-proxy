@@ -47,7 +47,6 @@ Local State (os_crypt.encrypted_key)
 - **现代化 WebUI 控制台**：
   - 反代进程内置托管，访问 `http://127.0.0.1:8787` 即可实时查看账号状态、TPS 速度、用量日志与系统配置。
   - **🔗 自动化链接登录**：一键调起隔离浏览器完成 Claude 登录，CDP 自动捕获 Cookie/UA/组织信息入池。
-  - **肥猫猫临时邮箱集成**：支持配置临时邮箱 API，实现全自动接收验证邮件与 Magic Link 批量加号。
 - **深度工程优化**：
   - **多模态图文对齐**：支持历史多轮对话中的图片准确关联与有序传递。
   - **真实 TPS 测速纠偏**：精准识别上游 Keep-Alive 挂起与正文输出，还原真实吐字速度。
@@ -66,8 +65,7 @@ claude-free-proxy/
 │   ├── accounts.mjs              # 账号池管理器（负载调度、冷却阶梯、配额监控）
 │   ├── config.mjs                # 配置中心与多 API Key 权限鉴权管理
 │   ├── kyc.mjs                   # 账号 KYC 与风控封禁状态嗅探
-│   ├── login-link.mjs            # 自动化浏览器/魔法链接登录托管模块
-│   ├── maomail.mjs               # 临时邮箱 API 客户端（自动化接码）
+│   ├── login-link.mjs            # 自动化浏览器登录托管模块
 │   ├── quota-probe.mjs           # 官方上游配额主动嗅探
 │   └── usage-log.mjs             # 请求流水与 Token 统计日志
 │

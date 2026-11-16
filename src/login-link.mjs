@@ -18,7 +18,6 @@ import path from 'node:path';
 import net from 'node:net';
 import { spawn, execSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { MaoMailClient } from './maomail.mjs';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
@@ -292,8 +291,6 @@ export function createLoginManager(opts) {
     webBase = 'https://claude.ai',
     timeoutMs = 5 * 60 * 1000,
     loginUrl = 'https://claude.ai/login',
-    getMaoMailToken = () => '',
-    getMaoMailBaseUrl = () => 'https://zjkdongao.cn',
   } = opts;
 
   const flows = new Map();
@@ -388,51 +385,6 @@ export function createLoginManager(opts) {
         returnByValue: true
       });
     } catch {}
-  }
-
-  async function autoHandleMaoMail(f) {
-    if (f._handlingMaoMail) return;
-    f._handlingMaoMail = true;
-    const token = typeof getMaoMailToken === 'function' ? getMaoMailToken() : getMaoMailToken;
-    if (!token) {
-      console.log(`[login] ${f.id} 未配置肥猫猫 Token，跳过自动收信`);
-      return;
-    }
-    const baseUrl = typeof getMaoMailBaseUrl === 'function' ? getMaoMailBaseUrl() : getMaoMailBaseUrl;
-    const client = new MaoMailClient({ token, baseUrl });
-
-    try {
-      f.message = `已提交邮箱 ${f.autoEmail}，正在从肥猫猫自动轮询验证邮件…`;
-      console.log(`[login] ${f.id} 开始轮询肥猫猫邮箱: ${f.autoEmail}`);
-      const detail = await client.waitForVerification({
-        email: f.autoEmail,
-        sinceTimestamp: f.startedAt,
-        timeoutMs: 120000,
-        isAborted: () => !LIVE.has(f.state) || f.state === 'closed' || f.state === 'cancelled',
-        onProgress: msg => {
-          if (LIVE.has(f.state) && f.state !== 'capturing') {
-            f.message = msg;
-          }
-        }
-      });
-
-      if (detail.magicLink) {
-        console.log(`[login] ${f.id} 自动捕获到 Claude 魔法链接: ${detail.magicLink}`);
-        f.message = '已收到 Claude 魔法登录链接，正在自动跳转完成登录…';
-        const cdp = await ensurePageCdp(f);
-        await cdp.call('Page.navigate', { url: detail.magicLink });
-        console.log(`[login] ${f.id} 已执行魔法链接跳转导航`);
-      } else if (detail.code) {
-        console.log(`[login] ${f.id} 自动捕获到 Claude 验证码: ${detail.code}`);
-        f.message = `已收到 Claude 验证码 ${detail.code}，正在自动填入…`;
-        await fillCodeInClaude(f, detail.code);
-      }
-    } catch (err) {
-      console.warn(`[login] ${f.id} 自动收信异常: ${err.message}`);
-      if (LIVE.has(f.state) && f.state !== 'capturing') {
-        f.message = `自动收信提示: ${err.message}。你也可以在浏览器中手动完成。`;
-      }
-    }
   }
 
   function cleanup(f) {
@@ -532,30 +484,6 @@ export function createLoginManager(opts) {
             catch { /* 置顶失败不影响流程 */ }
           }
           f.needVerify = true;
-
-          // 自动肥猫猫收信联动：若是邮件验证，启动自动轮询收信
-          if ((kind === 'email_link' || kind === 'email_code') && f.autoEmail && !f._handlingMaoMail) {
-            autoHandleMaoMail(f);
-          } else if ((kind === 'email_link' || kind === 'email_code') && !f.autoEmail && !f._handlingMaoMail) {
-            // 尝试从页面探测用户手动输入的邮箱
-            try {
-              const cdp = await ensurePageCdp(f);
-              const r = await cdp.call('Runtime.evaluate', {
-                expression: `(() => {
-                  const m = document.body.innerText.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
-                  return m ? m[1] : '';
-                })()`,
-                returnByValue: true
-              });
-              const detected = r?.result?.value;
-              if (detected && typeof detected === 'string' && detected.includes('@')) {
-                f.autoEmail = detected.trim();
-                console.log(`[login] ${f.id} 从页面探测到邮箱: ${f.autoEmail}，启动肥猫猫自动收信`);
-                autoHandleMaoMail(f);
-              }
-            } catch {}
-          }
-
           f.message = VERIFY_HINT[kind] || `需要人工验证（${VERIFY_LABEL[kind] || kind}），到浏览器窗口完成后会自动继续`;
         } else if (f.verify) {
           // 验证消失了 = 用户已完成，自动往下走（无需刷新/重启）
@@ -669,10 +597,8 @@ export function createLoginManager(opts) {
         f.message = `正在向 Claude.ai 自动填入邮箱 ${f.autoEmail}…`;
         submitEmailToClaude(f, f.autoEmail).then(ok => {
           console.log(`[login] ${f.id} 自动提交邮箱 ${f.autoEmail} 结果: ${ok}`);
-          autoHandleMaoMail(f);
         }).catch(e => {
           console.warn(`[login] ${f.id} 自动提交邮箱异常: ${e.message}`);
-          autoHandleMaoMail(f);
         });
       }
 

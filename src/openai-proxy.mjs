@@ -65,7 +65,6 @@ import { createConfigStore } from './config.mjs';
 import { probeQuota } from './quota-probe.mjs';
 import { checkKyc } from './kyc.mjs';
 import { createUsageLog, prefixOf } from './usage-log.mjs';
-import { MaoMailClient } from './maomail.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = fs.existsSync(path.join(HERE, '..', 'start.cmd')) || fs.existsSync(path.join(HERE, '..', 'LICENSE'))
@@ -163,8 +162,6 @@ const LOGIN = createLoginManager({
   baseUrl: `http://127.0.0.1:${PORT}`,
   webBase: () => UP.web_base || 'https://claude.ai',
   timeoutMs: +(process.env.LOGIN_TIMEOUT_MS || 5 * 60 * 1000),
-  getMaoMailToken: () => KEYS.settings()?.maomailToken || '',
-  getMaoMailBaseUrl: () => KEYS.settings()?.maomailBaseUrl || 'https://zjkdongao.cn',
   onCapture: ({ sessionKey, cookie, ua, org, name, plan }) => {
     const label = `${(name || 'claude.ai').slice(0, 28)} · ${new Date().toLocaleDateString('zh-CN')}`;
     const { account, created } = POOL.add({
@@ -2024,8 +2021,6 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/v1/accounts' && req.method === 'GET') {
       const st = POOL.status();
       st.price_per_million_tokens = KEYS.settings()?.pricePerMillionTokens || 0;
-      st.maomail_token = KEYS.settings()?.maomailToken || '';
-      st.maomail_base_url = KEYS.settings()?.maomailBaseUrl || 'https://zjkdongao.cn';
       st.server = KEYS.serverConfig();
       // 用请求级用量日志校准「已用 token」：
       // 账号池的 tokensInEst 只在请求成功时累加——失败的 429 请求同样消耗了输入，
@@ -2217,45 +2212,25 @@ const server = http.createServer(async (req, res) => {
           prune_keep_recent_tools: st.prune_keep_recent_tools,
           default_effort: st.default_effort,
           price_per_million_tokens: KEYS.settings()?.pricePerMillionTokens || 0,
-          maomail_token: KEYS.settings()?.maomailToken || '',
-          maomail_base_url: KEYS.settings()?.maomailBaseUrl || 'https://zjkdongao.cn',
           server: KEYS.serverConfig(),
         });
       }
       if (req.method === 'POST') {
         const b = await readBody(req);
         try {
-          if (b.pricePerMillionTokens !== undefined || b.maomailToken !== undefined || b.maomailBaseUrl !== undefined) {
+          if (b.pricePerMillionTokens !== undefined) {
             KEYS.updateSettings({
               pricePerMillionTokens: b.pricePerMillionTokens !== undefined ? (+b.pricePerMillionTokens || 0) : undefined,
-              maomailToken: b.maomailToken !== undefined ? String(b.maomailToken).trim() : undefined,
-              maomailBaseUrl: b.maomailBaseUrl !== undefined ? String(b.maomailBaseUrl).trim() : undefined,
             });
           }
           const cfg = POOL.configure(b);
           return json(res, 200, {
             ...cfg,
             price_per_million_tokens: KEYS.settings()?.pricePerMillionTokens || 0,
-            maomail_token: KEYS.settings()?.maomailToken || '',
-            maomail_base_url: KEYS.settings()?.maomailBaseUrl || 'https://zjkdongao.cn',
           });
         } catch (e) {
           return json(res, e.status || 400, { error: { message: e.message, type: 'invalid_request_error' } });
         }
-      }
-    }
-
-    // ---------------------------------------------------------- 肥猫猫临时邮箱服务接口
-    if (url.pathname === '/v1/maomail/mailboxes' && req.method === 'GET') {
-      const cfg = KEYS.settings() || {};
-      const token = cfg.maomailToken || '';
-      if (!token) return json(res, 200, { ok: false, error: '未配置肥猫猫 Token (maomailToken)', mailboxes: [] });
-      try {
-        const client = new MaoMailClient({ token, baseUrl: cfg.maomailBaseUrl || 'https://zjkdongao.cn' });
-        const mailboxes = await client.listMailboxes(100);
-        return json(res, 200, { ok: true, mailboxes });
-      } catch (err) {
-        return json(res, 200, { ok: false, error: err.message, mailboxes: [] });
       }
     }
 
