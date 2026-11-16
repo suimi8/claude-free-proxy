@@ -44,18 +44,40 @@ function portInUse(port) {
   });
 }
 
-/** 从 netstat 里取出监听该端口的 PID */
+/** 从系统工具里取出监听该端口的 PID */
 function listenPid(port) {
   try {
-    const txt = execSync('netstat -ano -p tcp', { encoding: 'utf8' });
-    for (const ln of txt.split(/\r?\n/)) {
-      if (ln.includes(':' + port) && ln.includes('LISTENING')) {
-        const cols = ln.trim().split(/\s+/);
-        return cols[cols.length - 1];
+    if (process.platform === 'win32') {
+      const txt = execSync('netstat -ano -p tcp', { encoding: 'utf8' });
+      for (const ln of txt.split(/\r?\n/)) {
+        if (ln.includes(':' + port) && ln.includes('LISTENING')) {
+          const cols = ln.trim().split(/\s+/);
+          return cols[cols.length - 1];
+        }
       }
+    } else {
+      const out = execSync(`fuser ${port}/tcp 2>/dev/null || ss -tulpn 2>/dev/null | grep ':${port} ' | grep -o 'pid=[0-9]*' | head -n 1 | cut -d= -f2 || lsof -ti:${port} 2>/dev/null`, { encoding: 'utf8', shell: '/bin/bash' }).trim();
+      const m = out.match(/\d+/);
+      if (m) return m[0];
     }
-  } catch (e) { /* netstat 不可用就算了 */ }
+  } catch (e) { /* 工具不可用就算了 */ }
   return null;
+}
+
+function stopProcess(pid, port) {
+  if (process.platform === 'win32') {
+    if (pid) {
+      try { execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' }); } catch {}
+    }
+  } else {
+    if (pid) {
+      try { execSync(`kill -15 ${pid} 2>/dev/null`, { stdio: 'ignore' }); } catch {}
+      try { execSync(`kill -9 ${pid} 2>/dev/null`, { stdio: 'ignore' }); } catch {}
+    }
+    if (port) {
+      try { execSync(`fuser -k -9 ${port}/tcp 2>/dev/null`, { stdio: 'ignore' }); } catch {}
+    }
+  }
 }
 
 function ask(question) {
@@ -164,27 +186,32 @@ async function main() {
     out(`   服务已经在运行${pid ? '   PID=' + pid : ''}   端口 ${PORT}`);
     bar();
     out('');
-    out('    [1] 关闭旧服务，启动新服务');
-    out('    [2] 关闭本次运行（保持现在这个服务不动）');
+    out('    [1] 使用已启动的服务（保持现有服务运行并退出）');
+    out('    [2] 关闭已启动服务并重启服务');
+    out('    [3] 取消退出');
     out('');
 
     let ans = '';
-    while (ans !== '1' && ans !== '2') {
-      ans = await ask('   请选择 [1/2]: ');
-      if (ans !== '1' && ans !== '2') out('   请输入 1 或 2。');
+    while (ans !== '1' && ans !== '2' && ans !== '3') {
+      ans = await ask('   请选择 [1-3] (默认 1): ');
+      if (!ans) ans = '1';
+      if (ans !== '1' && ans !== '2' && ans !== '3') out('   请输入 1、2 或 3。');
     }
 
-    if (ans === '2') {
+    if (ans === '1') {
       out('');
-      out('   已取消，现有服务继续运行。');
+      out(`   已选择使用现有服务：http://127.0.0.1:${PORT}`);
+      return;
+    }
+    if (ans === '3') {
+      out('');
+      out('   已取消操作，现有服务继续运行。');
       return;
     }
 
     out('');
-    out(`   正在停止 PID ${pid || '(未识别)'} ...`);
-    if (pid) {
-      try { execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' }); } catch (e) { /* 可能已退出 */ }
-    }
+    out(`   正在停止已运行服务 (PID: ${pid || '(未识别)'}) ...`);
+    stopProcess(pid, PORT);
     for (let i = 0; i < 24; i++) {
       if (!(await portInUse(PORT))) break;
       await sleep(150);
@@ -194,6 +221,7 @@ async function main() {
       process.exitCode = 1;
       return;
     }
+    out(`   旧服务已关闭，端口 ${PORT} 已释放，正在重新启动新服务...`);
   }
 
   // ---------------------------------------------------------- 启动
