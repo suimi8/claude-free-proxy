@@ -201,7 +201,8 @@ function syncDesktopAccount(up) {
  */
 let refreshing = null;   // 去重：同一时刻只跑一个刷新
 function refreshSession(force = false) {
-  if (process.env.DESKTOP_SYNC === '0') return Promise.resolve(false);   // 测试/只用手动账号时跳过
+  // 非 Windows 平台（如 Linux/Docker）或显式关闭时跳过桌面端本地解密
+  if (process.platform !== 'win32' || process.env.DESKTOP_SYNC === '0') return Promise.resolve(false);
   const age = Date.now() - (UP.web_cookie_at || 0);
   if (!force && age < 10 * 60 * 1000) return Promise.resolve(false);
   if (refreshing) return refreshing;                                      // 已有一次在跑，复用

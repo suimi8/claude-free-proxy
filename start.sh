@@ -6,6 +6,9 @@
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
+# Linux 环境跳过 Windows 桌面端 sessionKey 同步
+export DESKTOP_SYNC=0
+
 PID_FILE="$DIR/proxy.pid"
 LOG_FILE="$DIR/proxy.out.log"
 ERR_FILE="$DIR/proxy.err.log"

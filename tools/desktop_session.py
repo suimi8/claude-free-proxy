@@ -25,6 +25,11 @@ from ctypes import wintypes
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..')) if os.path.exists(os.path.join(HERE, '..', 'start.cmd')) else HERE
+
+# 非 Windows 环境没有 Windows DPAPI 解密支持，静默跳过
+if sys.platform != 'win32' or 'LOCALAPPDATA' not in os.environ:
+    sys.exit(0)
+
 PROFILE = os.path.join(os.environ['LOCALAPPDATA'], 'Claude-Data', 'claude_pzs8sxrjxfjjc')
 OUT = os.path.join(ROOT, 'upstream.json')
 
