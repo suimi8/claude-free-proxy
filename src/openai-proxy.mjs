@@ -671,6 +671,8 @@ function renderPrompt(body) {
   }
 
   // 避免模型在长上下文中受历史 [TOOL_CALL] 纯文本影响产生模仿幻觉，同时抑制官方网页端特有的 /mnt/skills 和 view 内部工具
+  const hasTools = (Array.isArray(body?.tools) && body.tools.length > 0) ||
+                   (Array.isArray(body?.functions) && body.functions.length > 0);
   systems.push(
     '[ENVIRONMENT & TOOL CONSTRAINTS]\n' +
     '1. You are running in an external API coding environment. Sandboxed directories like "/mnt/skills" and internal sandbox tools such as "view", "repl", or "artifacts" do NOT exist here.\n' +
