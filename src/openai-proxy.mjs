@@ -670,16 +670,13 @@ function renderPrompt(body) {
     }
   }
 
-  // 避免模型在长上下文中受历史 [TOOL_CALL] 纯文本影响产生模仿幻觉
-  const hasTools = (Array.isArray(body?.tools) && body.tools.length > 0) ||
-                   (Array.isArray(body?.functions) && body.functions.length > 0);
-  if (hasTools) {
-    systems.push(
-      '[TOOL INSTRUCTION]\n' +
-      'You are equipped with real tools via native tool_use. The tags "[TOOL_CALL ...]" in previous messages are historical transcription markers only.\n' +
-      'CRITICAL: When you want to call tools, you MUST invoke native tool calls (tool_use). NEVER output literal "[TOOL_CALL ...]" text in your response content.'
-    );
-  }
+  // 避免模型在长上下文中受历史 [TOOL_CALL] 纯文本影响产生模仿幻觉，同时抑制官方网页端特有的 /mnt/skills 和 view 内部工具
+  systems.push(
+    '[ENVIRONMENT & TOOL CONSTRAINTS]\n' +
+    '1. You are running in an external API coding environment. Sandboxed directories like "/mnt/skills" and internal sandbox tools such as "view", "repl", or "artifacts" do NOT exist here.\n' +
+    '2. NEVER attempt to call "view" or inspect "/mnt/skills/...". Answer or execute directly using available tools.' +
+    (hasTools ? '\n3. You are equipped with real tools via native tool_use. The tags "[TOOL_CALL ...]" in previous messages are historical markers only. Invoke only the tools explicitly declared in the tools list, and NEVER output literal "[TOOL_CALL ...]" markers.' : '')
+  );
 
   let prompt = '';
   if (systems.length) prompt += `[SYSTEM]\n${systems.join('\n\n')}\n\n`;
@@ -1067,11 +1064,13 @@ async function* normalizeSse(stream, acct, ctx) {
 }
 
 /** 非流式：吃完整个 SSE 再组装 */
-async function collect(stream, acct, ctx) {
+async function collect(stream, acct, ctx, body = null) {
   let text = '';
   const thinkParts = [];   // thinking 块内容（上游只给摘要，多段用换行连接）
   const toolCalls = [];
   const slot = new Map();
+  const ignoredToolIndices = new Set();
+  const declaredToolNames = new Set((body?.tools || []).map(t => t.function?.name || t.name).filter(Boolean));
   let stop = null, model = null, id = null, limit = null;
 
   for await (const ev of normalizeSse(stream, acct, ctx)) {
@@ -1081,6 +1080,11 @@ async function collect(stream, acct, ctx) {
       case 'content_block_start': {
         const cb = ev.content_block || {};
         if (cb.type === 'tool_use') {
+          if (declaredToolNames.size > 0 && !declaredToolNames.has(cb.name) && (cb.name === 'view' || cb.name === 'repl' || cb.name === 'artifacts')) {
+            console.warn(`[tool] 拦截未在客户端声明的内部沙盒工具调用: ${cb.name}`);
+            ignoredToolIndices.add(ev.index);
+            break;
+          }
           const idx = slot.size;
           slot.set(ev.index, idx);
           toolCalls.push({ id: cb.id, type: 'function', function: { name: cb.name, arguments: '' } });
@@ -1095,6 +1099,7 @@ async function collect(stream, acct, ctx) {
           if (s) thinkParts.push(s);
         }
         else if (d.type === 'input_json_delta') {
+          if (ignoredToolIndices.has(ev.index)) break;
           const idx = slot.get(ev.index) ?? 0;
           if (toolCalls[idx]) toolCalls[idx].function.arguments += d.partial_json || '';
         }
@@ -1146,6 +1151,9 @@ async function streamToClient(res, stream, model, chatId, acct, ctx) {
   let pseudoToolMode = false;
   let finishedSent = false;
 
+  const declaredToolNames = new Set((body?.tools || []).map(t => t.function?.name || t.name).filter(Boolean));
+  const ignoredToolIndices = new Set();
+
   const flushToolFallbackIfNeeded = () => {
     if (sawTool) return;
     if (pseudoToolMode || accumulatedText.includes('[TOOL_CALL')) {
@@ -1186,6 +1194,11 @@ async function streamToClient(res, stream, model, chatId, acct, ctx) {
       case 'content_block_start': {
         const cb = ev.content_block || {};
         if (cb.type === 'tool_use') {
+          if (declaredToolNames.size > 0 && !declaredToolNames.has(cb.name) && (cb.name === 'view' || cb.name === 'repl' || cb.name === 'artifacts')) {
+            console.warn(`[tool] 拦截未在客户端声明的内部沙盒工具调用: ${cb.name}`);
+            ignoredToolIndices.add(ev.index);
+            break;
+          }
           const idx = slot.size;
           slot.set(ev.index, idx);
           sawTool = true;
@@ -1232,6 +1245,7 @@ async function streamToClient(res, stream, model, chatId, acct, ctx) {
           }
         }
         else if (d.type === 'input_json_delta') {
+          if (ignoredToolIndices.has(ev.index)) break;
           const idx = slot.get(ev.index) ?? 0;
           chunk({ tool_calls: [{ index: idx, function: { arguments: d.partial_json || '' } }] });
         }
@@ -2563,7 +2577,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       try {
-        const result = await collect(run.stream, run.account, run.ctx);
+        const result = await collect(run.stream, run.account, run.ctx, body);
         return json(res, 200, ant2oaiText(result, model, prompt));
       } finally {
         run.release();
@@ -2602,7 +2616,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       try {
-        const result = await collect(run.stream, run.account, run.ctx);
+        const result = await collect(run.stream, run.account, run.ctx, chat);
         const resp = respShell(rb, model, id, Math.floor(Date.now() / 1000), 'completed',
           resultToItems(result), usageOf(prompt, result.text || '', result.reasoning));
         rememberResponse(id, resp, [...chat.messages, resultToAssistantMessage(result)]);
@@ -2706,7 +2720,7 @@ const server = http.createServer(async (req, res) => {
           return res.end();
         }
 
-        const result = await collect(run.stream, run.account, run.ctx);
+        const result = await collect(run.stream, run.account, run.ctx, body);
         const content = [];
         if (result.reasoning) {
           // Anthropic 规范：thinking 块在正文之前（signature 留空——摘要不是可回放的
