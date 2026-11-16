@@ -68,15 +68,21 @@ import { createUsageLog, prefixOf } from './usage-log.mjs';
 import { MaoMailClient } from './maomail.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const UPSTREAM_FILE = process.env.UPSTREAM_FILE || path.join(HERE, 'upstream.json');
-const ACCOUNTS_FILE = process.env.ACCOUNTS_FILE || path.join(HERE, 'accounts.json');
-const SESSION_SCRIPT = path.join(HERE, 'desktop_session.py');
+const ROOT = fs.existsSync(path.join(HERE, '..', 'start.cmd')) || fs.existsSync(path.join(HERE, '..', 'LICENSE'))
+  ? path.resolve(HERE, '..')
+  : HERE;
+
+const UPSTREAM_FILE = process.env.UPSTREAM_FILE || (fs.existsSync(path.join(ROOT, 'upstream.json')) ? path.join(ROOT, 'upstream.json') : path.join(ROOT, 'config', 'upstream.json'));
+const ACCOUNTS_FILE = process.env.ACCOUNTS_FILE || (fs.existsSync(path.join(ROOT, 'accounts.json')) ? path.join(ROOT, 'accounts.json') : path.join(ROOT, 'config', 'accounts.json'));
+const SESSION_SCRIPT = fs.existsSync(path.join(ROOT, 'tools', 'desktop_session.py'))
+  ? path.join(ROOT, 'tools', 'desktop_session.py')
+  : path.join(HERE, 'desktop_session.py');
 
 /**
  * 配置全部来自 config.json（端口 / 监听地址 / 各 API Key）。
  * 环境变量只作为临时覆盖，方便调试；代码里不内置任何密钥。
  */
-const CONFIG_FILE = process.env.CONFIG_FILE || path.join(HERE, 'config.json');
+const CONFIG_FILE = process.env.CONFIG_FILE || (fs.existsSync(path.join(ROOT, 'config.json')) ? path.join(ROOT, 'config.json') : path.join(ROOT, 'config', 'config.json'));
 const KEYS = createConfigStore(CONFIG_FILE);
 KEYS.load();
 const _srv = KEYS.serverConfig();
@@ -131,7 +137,7 @@ const POOL = new AccountPool(ACCOUNTS_FILE, {
 
 /** 请求级用量日志（按账号 / 按小时 / 全局聚合；CACHE_MODE=off|stats|reuse） */
 const USAGE = createUsageLog({
-  dir: process.env.USAGE_DIR || path.join(HERE, 'usage'),
+  dir: process.env.USAGE_DIR || path.join(ROOT, 'usage'),
 });
 
 /**
@@ -1558,7 +1564,11 @@ function authenticate(req) {
   return KEYS.identify(raw, ip);
 }
 
-const UI_FILE = path.join(HERE, 'webui.html');
+const UI_FILE = [
+  path.join(ROOT, 'web', 'webui.html'),
+  path.join(ROOT, 'webui.html'),
+  path.join(HERE, 'webui.html'),
+].find(p => fs.existsSync(p)) || path.join(ROOT, 'web', 'webui.html');
 let uiCache = null;
 /** 读取并缓存 WebUI 页面（文件更新后自动生效，不用重启） */
 function uiHtml() {

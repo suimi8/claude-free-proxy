@@ -35,7 +35,7 @@ function ok(name, pass, detail = '') {
 }
 
 function start(cmd, args, env, tag) {
-  const p = spawn(cmd, args, { cwd: HERE, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const p = spawn(cmd, args, { cwd: path.join(HERE, '..'), env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
   let log = '';
   p.stdout.on('data', d => { log += d; });
   p.stderr.on('data', d => { log += d; });
@@ -96,8 +96,8 @@ async function main() {
     ],
   }, null, 2));
 
-  const mock = start('node', ['mock_claude.mjs'], { PORT: MOCK_PORT, FAKE_LATENCY_MS: '120' }, 'mock');
-  const px = start('node', ['openai-proxy.mjs'], {
+  const mock = start('node', [path.join(HERE, 'mock_claude.mjs')], { PORT: MOCK_PORT, FAKE_LATENCY_MS: '120' }, 'mock');
+  const px = start('node', [path.join(HERE, '..', 'src', 'openai-proxy.mjs')], {
     PORT: PX_PORT,
     LOCAL_API_KEY: 'sk-local',
     ACCOUNTS_FILE: ACCT_FILE,

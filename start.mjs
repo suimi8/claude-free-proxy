@@ -18,7 +18,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { spawn, spawnSync, execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createConfigStore } from './config.mjs';
+import { createConfigStore } from './src/config.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_FILE = path.join(HERE, 'config.json');
@@ -67,7 +67,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /** 前台接管反代进程：Ctrl+C / 关窗口都会连带停掉它 */
 function runProxy(env) {
-  const child = spawn(process.execPath, ['openai-proxy.mjs'], {
+  const proxyScript = path.join(HERE, 'src', 'openai-proxy.mjs');
+  const child = spawn(process.execPath, [proxyScript], {
     cwd: HERE,
     stdio: 'inherit',
     env: { ...process.env, ...env },

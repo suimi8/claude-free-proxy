@@ -24,8 +24,9 @@ import time
 from ctypes import wintypes
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.abspath(os.path.join(HERE, '..')) if os.path.exists(os.path.join(HERE, '..', 'start.cmd')) else HERE
 PROFILE = os.path.join(os.environ['LOCALAPPDATA'], 'Claude-Data', 'claude_pzs8sxrjxfjjc')
-OUT = os.path.join(HERE, 'upstream.json')
+OUT = os.path.join(ROOT, 'upstream.json')
 
 # Electron 45.2.1 对应的 Chrome 主版本；cf_clearance 与 UA 绑定，改 UA 会触发 CF 挑战
 DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '

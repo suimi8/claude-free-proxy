@@ -123,8 +123,8 @@ writeFileSync(join(dir, 'upstream.json'), JSON.stringify({
 
 const KEY = 'img-collect-key';
 const PORT = 8796;
-const child = spawn(process.execPath, ['openai-proxy.mjs'], {
-  cwd: HERE,
+const child = spawn(process.execPath, [join(HERE, '..', 'src', 'openai-proxy.mjs')], {
+  cwd: join(HERE, '..'),
   env: { ...process.env, PORT: String(PORT), ACCOUNTS_FILE: accFile,
          UPSTREAM_FILE: join(dir, 'upstream.json'), USAGE_DIR: join(dir, 'usage'),
          DESKTOP_SYNC: '0', LOCAL_API_KEY: KEY, CONFIG_FILE: join(dir, 'config.json'),

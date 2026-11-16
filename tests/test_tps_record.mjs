@@ -77,8 +77,8 @@ const PORT = 8798;
 
 async function runCase(label, envExtra) {
   const usageDir = join(dir, 'usage-' + label);
-  const child = spawn(process.execPath, ['openai-proxy.mjs'], {
-    cwd: HERE,
+  const child = spawn(process.execPath, [join(HERE, '..', 'src', 'openai-proxy.mjs')], {
+    cwd: join(HERE, '..'),
     env: { ...process.env, PORT: String(PORT), ACCOUNTS_FILE: accFile,
            UPSTREAM_FILE: join(dir, 'upstream.json'), USAGE_DIR: usageDir,
            DESKTOP_SYNC: '0', LOCAL_API_KEY: KEY, CONFIG_FILE: join(dir, 'config.json'),

@@ -25,8 +25,8 @@ const RESETS_IN = 15;                 // A 号配额窗口 15 秒后恢复（等
 const resetsAtSec = Math.floor(Date.now() / 1000) + RESETS_IN;
 
 // ---- 拉起 mock 上游：A 号配额耗尽 ----
-const mock = spawn(process.execPath, ['mock_claude.mjs'], {
-  cwd: HERE,
+const mock = spawn(process.execPath, [join(HERE, 'mock_claude.mjs')], {
+  cwd: join(HERE, '..'),
   env: { ...process.env, PORT: String(MOCK_PORT), FAKE_RATELIMIT: 'sk-a', FAKE_RESETS_AT: String(resetsAtSec) },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -61,8 +61,8 @@ writeFileSync(join(dir, 'upstream.json'), JSON.stringify({
 
 const KEY = 'p429';
 const PORT = 8795;
-const child = spawn(process.execPath, ['openai-proxy.mjs'], {
-  cwd: HERE,
+const child = spawn(process.execPath, [join(HERE, '..', 'src', 'openai-proxy.mjs')], {
+  cwd: join(HERE, '..'),
   env: { ...process.env, PORT: String(PORT), ACCOUNTS_FILE: accFile,
          UPSTREAM_FILE: join(dir, 'upstream.json'), USAGE_DIR: join(dir, 'usage'),
          DESKTOP_SYNC: '0', LOCAL_API_KEY: KEY, CONFIG_FILE: join(dir, 'config.json'),
