@@ -1143,6 +1143,15 @@ async function streamToClient(res, stream, model, chatId, acct, ctx, body = null
   const chunk = (delta, finish = null) =>
     send({ id: chatId, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta, finish_reason: finish }] });
 
+  // 定期发送 SSE 心跳保活，防止客户端或网关因空闲超时掐断连接（如 pi-ai stream idle timeout）
+  const keepAliveTimer = setInterval(() => {
+    try {
+      res.write(': keep-alive\n\n');
+    } catch {
+      clearInterval(keepAliveTimer);
+    }
+  }, 10000);
+
   let started = false;
   const slot = new Map();
   let stop = null;
@@ -1188,93 +1197,97 @@ async function streamToClient(res, stream, model, chatId, acct, ctx, body = null
     }
   };
 
-  for await (const ev of normalizeSse(stream, acct, ctx)) {
-    switch (ev.type) {
-      case 'message_start':
-        if (!started) { started = true; chunk({ role: 'assistant', content: '' }); }
-        break;
-      case 'content_block_start': {
-        const cb = ev.content_block || {};
-        if (cb.type === 'tool_use') {
-          if (declaredToolNames.size > 0 && !declaredToolNames.has(cb.name) && (cb.name === 'view' || cb.name === 'repl' || cb.name === 'artifacts')) {
-            console.warn(`[tool] 拦截未在客户端声明的内部沙盒工具调用: ${cb.name}`);
-            ignoredToolIndices.add(ev.index);
-            break;
+  try {
+    for await (const ev of normalizeSse(stream, acct, ctx)) {
+      switch (ev.type) {
+        case 'message_start':
+          if (!started) { started = true; chunk({ role: 'assistant', content: '' }); }
+          break;
+        case 'content_block_start': {
+          const cb = ev.content_block || {};
+          if (cb.type === 'tool_use') {
+            if (declaredToolNames.size > 0 && !declaredToolNames.has(cb.name) && (cb.name === 'view' || cb.name === 'repl' || cb.name === 'artifacts')) {
+              console.warn(`[tool] 拦截未在客户端声明的内部沙盒工具调用: ${cb.name}`);
+              ignoredToolIndices.add(ev.index);
+              break;
+            }
+            const idx = slot.size;
+            slot.set(ev.index, idx);
+            sawTool = true;
+            chunk({ tool_calls: [{ index: idx, id: cb.id, type: 'function', function: { name: cb.name, arguments: '' } }] });
           }
-          const idx = slot.size;
-          slot.set(ev.index, idx);
-          sawTool = true;
-          chunk({ tool_calls: [{ index: idx, id: cb.id, type: 'function', function: { name: cb.name, arguments: '' } }] });
+          break;
         }
-        break;
-      }
-      case 'content_block_delta': {
-        const d = ev.delta || {};
-        if (d.type === 'text_delta') {
-          accumulatedText += d.text;
-          if (!sawTool) {
-            if (pseudoToolMode) {
-              // 处于拦截状态，静默累积，不向客户端发 content
-            } else {
-              const toolIdx = accumulatedText.indexOf('[TOOL_CALL');
-              if (toolIdx !== -1) {
-                pseudoToolMode = true;
-                if (toolIdx > sentTextLength) {
-                  chunk({ content: accumulatedText.slice(sentTextLength, toolIdx) });
-                  sentTextLength = toolIdx;
-                }
+        case 'content_block_delta': {
+          const d = ev.delta || {};
+          if (d.type === 'text_delta') {
+            accumulatedText += d.text;
+            if (!sawTool) {
+              if (pseudoToolMode) {
+                // 处于拦截状态，静默累积，不向客户端发 content
               } else {
-                // 安全窗口：暂存最后 15 字符防止 [TOOL_CALL 被断词
-                const safeLen = Math.max(0, accumulatedText.length - 15);
-                if (safeLen > sentTextLength) {
-                  chunk({ content: accumulatedText.slice(sentTextLength, safeLen) });
-                  sentTextLength = safeLen;
+                const toolIdx = accumulatedText.indexOf('[TOOL_CALL');
+                if (toolIdx !== -1) {
+                  pseudoToolMode = true;
+                  if (toolIdx > sentTextLength) {
+                    chunk({ content: accumulatedText.slice(sentTextLength, toolIdx) });
+                    sentTextLength = toolIdx;
+                  }
+                } else {
+                  // 安全窗口：暂存最后 15 字符防止 [TOOL_CALL 被断词
+                  const safeLen = Math.max(0, accumulatedText.length - 15);
+                  if (safeLen > sentTextLength) {
+                    chunk({ content: accumulatedText.slice(sentTextLength, safeLen) });
+                    sentTextLength = safeLen;
+                  }
                 }
               }
+            } else {
+              chunk({ content: d.text });
             }
-          } else {
-            chunk({ content: d.text });
           }
-        }
-        else if (d.type === 'thinking_summary_delta' || d.type === 'thinking_delta') {
-          // 思考过程：上游只回摘要（thinking_summary_delta），转成 OpenAI 生态通用的
-          // reasoning_content 增量下发（DeepSeek/Qwen 系客户端都认这个字段）
-          const s = d.type === 'thinking_delta' ? (d.thinking || '') : (d.summary?.summary || '');
-          if (s) {
-            const piece = reasoning ? '\n' + s : s;
-            reasoning += piece;
-            chunk({ reasoning_content: piece });
+          else if (d.type === 'thinking_summary_delta' || d.type === 'thinking_delta') {
+            // 思考过程：上游只回摘要（thinking_summary_delta），转成 OpenAI 生态通用的
+            // reasoning_content 增量下发（DeepSeek/Qwen 系客户端都认这个字段）
+            const s = d.type === 'thinking_delta' ? (d.thinking || '') : (d.summary?.summary || '');
+            if (s) {
+              const piece = reasoning ? '\n' + s : s;
+              reasoning += piece;
+              chunk({ reasoning_content: piece });
+            }
           }
+          else if (d.type === 'input_json_delta') {
+            if (ignoredToolIndices.has(ev.index)) break;
+            const idx = slot.get(ev.index) ?? 0;
+            chunk({ tool_calls: [{ index: idx, function: { arguments: d.partial_json || '' } }] });
+          }
+          break;
         }
-        else if (d.type === 'input_json_delta') {
-          if (ignoredToolIndices.has(ev.index)) break;
-          const idx = slot.get(ev.index) ?? 0;
-          chunk({ tool_calls: [{ index: idx, function: { arguments: d.partial_json || '' } }] });
-        }
-        break;
+        case 'message_delta':
+          flushToolFallbackIfNeeded();
+          if (ev.delta?.stop_reason) {
+            stop = sawTool ? 'tool_use' : ev.delta.stop_reason;
+            chunk({}, sawTool ? 'tool_calls' : mapStopReason(stop));
+            finishedSent = true;
+          }
+          break;
+        case 'error':
+          send({ error: { message: ev.error?.message || 'upstream error', type: 'upstream_error' } });
+          break;
+        default: break;
       }
-      case 'message_delta':
-        flushToolFallbackIfNeeded();
-        if (ev.delta?.stop_reason) {
-          stop = sawTool ? 'tool_use' : ev.delta.stop_reason;
-          chunk({}, sawTool ? 'tool_calls' : mapStopReason(stop));
-          finishedSent = true;
-        }
-        break;
-      case 'error':
-        send({ error: { message: ev.error?.message || 'upstream error', type: 'upstream_error' } });
-        break;
-      default: break;
     }
-  }
 
-  flushToolFallbackIfNeeded();
-  if (!finishedSent) {
-    chunk({}, sawTool ? 'tool_calls' : mapStopReason(stop));
+    flushToolFallbackIfNeeded();
+    if (!finishedSent) {
+      chunk({}, sawTool ? 'tool_calls' : mapStopReason(stop));
+    }
+    if (!started) chunk({ role: 'assistant', content: '' });
+    res.write('data: [DONE]\n\n');
+  } finally {
+    clearInterval(keepAliveTimer);
+    res.end();
   }
-  if (!started) chunk({ role: 'assistant', content: '' });
-  res.write('data: [DONE]\n\n');
-  res.end();
 }
 
 // ------------------------------------------------------------- 估算 usage
@@ -2707,24 +2720,32 @@ const server = http.createServer(async (req, res) => {
           });
           // 转成 Anthropic 事件
           const send = o => res.write(`event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`);
+          const keepAliveTimer = setInterval(() => {
+            try { res.write(': keep-alive\n\n'); } catch { clearInterval(keepAliveTimer); }
+          }, 10000);
           let started = false;
           let rsnPieces = 0;   // 思考段计数（多段摘要之间补换行）
-          for await (const ev of normalizeSse(run.stream, run.account, run.ctx)) {
-            // 上游思考只回摘要（thinking_summary_delta 不是 Anthropic 标准事件，
-            // 客户端 SDK 会丢弃）→ 转成标准 thinking_delta 下发，SDK 才能展示思考过程
-            if (ev.type === 'content_block_delta' && ev.delta?.type === 'thinking_summary_delta') {
-              const s = ev.delta.summary?.summary || '';
-              if (s) {
-                send({ type: 'content_block_delta', index: ev.index,
-                  delta: { type: 'thinking_delta', thinking: (rsnPieces++ ? '\n' : '') + s } });
+          try {
+            for await (const ev of normalizeSse(run.stream, run.account, run.ctx)) {
+              // 上游思考只回摘要（thinking_summary_delta 不是 Anthropic 标准事件，
+              // 客户端 SDK 会丢弃）→ 转成标准 thinking_delta 下发，SDK 才能展示思考过程
+              if (ev.type === 'content_block_delta' && ev.delta?.type === 'thinking_summary_delta') {
+                const s = ev.delta.summary?.summary || '';
+                if (s) {
+                  send({ type: 'content_block_delta', index: ev.index,
+                    delta: { type: 'thinking_delta', thinking: (rsnPieces++ ? '\n' : '') + s } });
+                }
+                continue;
               }
-              continue;
+              send(ev);
+              if (ev.type === 'message_start') started = true;
             }
-            send(ev);
-            if (ev.type === 'message_start') started = true;
+            if (!started) send({ type: 'message_start', message: { id: 'msg_' + randomUUID(), model, content: [] } });
+          } finally {
+            clearInterval(keepAliveTimer);
+            res.end();
           }
-          if (!started) send({ type: 'message_start', message: { id: 'msg_' + randomUUID(), model, content: [] } });
-          return res.end();
+          return;
         }
 
         const result = await collect(run.stream, run.account, run.ctx, body);
