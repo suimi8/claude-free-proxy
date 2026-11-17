@@ -75,15 +75,39 @@ def encrypt_cookie(key: bytes, host: str, value: str) -> bytes:
 
 def kill_claude_desktop():
     """杀掉正在运行的 Claude Desktop 进程以释放 SQLite 锁"""
+    for im in ['claude.exe', 'Claude.exe', 'claude-desktop.exe']:
+        try:
+            subprocess.run(['taskkill', '/F', '/IM', im], capture_output=True)
+        except Exception:
+            pass
+    time.sleep(0.6)
+
+
+def launch_claude_desktop():
+    """在 Windows 交互桌面安全拉起 Claude Desktop"""
+    if sys.platform != 'win32':
+        return False, 'unsupported platform'
+    # 1. 优先通过 Windows AppsFolder 协议拉起（对 MSIX 商店安装版 100% 稳定）
     try:
-        subprocess.run(['taskkill', '/F', '/IM', 'claude-desktop.exe'], capture_output=True)
-    except Exception:
+        subprocess.Popen(['cmd.exe', '/c', 'start', '', 'shell:AppsFolder\\Claude_pzs8sxrjxfjjc!Claude'], shell=False)
+        return True, 'shell:AppsFolder\\Claude_pzs8sxrjxfjjc!Claude'
+    except Exception as e:
         pass
+
+    # 2. 尝试 os.startfile 直接由系统 Explorer 唤起
+    exe = find_desktop_exe()
     try:
-        subprocess.run(['taskkill', '/F', '/IM', 'Claude.exe'], capture_output=True)
-    except Exception:
+        os.startfile(exe)
+        return True, exe
+    except Exception as e:
         pass
-    time.sleep(0.5)
+
+    # 3. 尝试 cmd /c start
+    try:
+        subprocess.Popen(['cmd.exe', '/c', 'start', '', exe], shell=False)
+        return True, exe
+    except Exception as e:
+        return False, str(e)
 
 
 def find_desktop_exe():
@@ -184,15 +208,14 @@ def inject_session(session_key: str, org: str = '', launch: bool = True):
             print(f"WARN update config.json: {e}", file=sys.stderr)
 
     launched = False
-    exe = find_desktop_exe()
+    launch_target = ''
     if launch:
-        try:
-            subprocess.Popen([exe], close_fds=True, creationflags=subprocess.DETACHED_PROCESS if sys.platform == 'win32' else 0)
-            launched = True
-        except Exception as e:
-            return {'ok': True, 'launched': False, 'message': f'登录凭据已成功写入，但自动拉起桌面端失败 ({e})，请手动打开 Claude 桌面端'}
+        ok_launch, launch_target = launch_claude_desktop()
+        if not ok_launch:
+            return {'ok': True, 'launched': False, 'message': f'登录凭据已成功写入，但自动拉起桌面端失败 ({launch_target})，请手动打开 Claude 桌面端'}
+        launched = True
 
-    return {'ok': True, 'launched': launched, 'exe': exe, 'message': '已成功将 sessionKey 写入 Claude 官方桌面端并启动！'}
+    return {'ok': True, 'launched': launched, 'exe': launch_target, 'message': '已成功将 sessionKey 写入 Claude 官方桌面端并启动！'}
 
 
 if __name__ == '__main__':

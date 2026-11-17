@@ -130,8 +130,8 @@ async function waitCdp(port, timeoutSec, flow = null) {
  * 这里用 PowerShell + user32 把窗口恢复出来并置前（Windows 专属，内存执行，不落盘临时脚本）。
  */
 function focusBrowserWindow(pid) {
-  if (process.platform !== 'win32' || !pid) return;
-  const ps = `$TargetPid = ${pid}; Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class Win32Focus {[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);[DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);}' -ErrorAction SilentlyContinue; $d = (Get-Date).AddSeconds(15); while ((Get-Date) -lt $d) { $p = Get-Process -Id $TargetPid -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1; if ($p) { [Win32Focus]::ShowWindow($p.MainWindowHandle, 9) | Out-Null; [Win32Focus]::BringWindowToTop($p.MainWindowHandle) | Out-Null; [Win32Focus]::SetForegroundWindow($p.MainWindowHandle) | Out-Null; exit 0; }; Start-Sleep -Milliseconds 400; }; exit 1;`;
+  if (process.platform !== 'win32') return;
+  const ps = `$TargetPid = ${pid || 0}; Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class Win32Focus {[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);[DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);}' -ErrorAction SilentlyContinue; $d = (Get-Date).AddSeconds(12); while ((Get-Date) -lt $d) { $p = $null; if ($TargetPid -gt 0) { $p = Get-Process -Id $TargetPid -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1; }; if (-not $p) { $p = Get-Process -Name chrome, msedge -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -Last 1; }; if ($p) { [Win32Focus]::ShowWindow($p.MainWindowHandle, 9) | Out-Null; [Win32Focus]::BringWindowToTop($p.MainWindowHandle) | Out-Null; [Win32Focus]::SetForegroundWindow($p.MainWindowHandle) | Out-Null; exit 0; }; Start-Sleep -Milliseconds 400; }; exit 1;`;
   try {
     const b64 = Buffer.from(ps, 'utf16le').toString('base64');
     spawn('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', b64], {
@@ -1809,6 +1809,16 @@ export async function openClaudeWebBrowser({ sessionKey, org = '', cookie = '', 
   const profile = path.join(os.tmpdir(), `claude-web-user-${Buffer.from(sessionKey).toString('hex').slice(-8)}`);
   fs.mkdirSync(profile, { recursive: true });
 
+  // 清除旧的 Singleton 锁，防止重复点击或残留锁阻止浏览器弹出
+  if (process.platform === 'win32') {
+    try {
+      for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+        const p = path.join(profile, f);
+        if (fs.existsSync(p)) fs.unlinkSync(p);
+      }
+    } catch {}
+  }
+
   const args = [
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profile}`,
@@ -1821,8 +1831,18 @@ export async function openClaudeWebBrowser({ sessionKey, org = '', cookie = '', 
   ];
 
   const env = { ...process.env };
-  const proc = spawn(exe, args, { stdio: 'ignore', windowsHide: false, env, detached: true });
-  proc.unref();
+  let proc;
+  if (process.platform === 'win32') {
+    // Windows 下通过 cmd.exe /c start 拉起独立交互窗口，确保附着在用户交互桌面 (Winsta0\Default)
+    proc = spawn('cmd.exe', ['/c', 'start', '', exe, ...args], {
+      stdio: 'ignore',
+      windowsHide: true,
+      env,
+    });
+  } else {
+    proc = spawn(exe, args, { stdio: 'ignore', windowsHide: false, env, detached: true });
+    proc.unref();
+  }
 
   // 等待 CDP 调试端口就绪
   const ver = await waitCdp(port, 25);
@@ -1896,11 +1916,15 @@ export async function openClaudeWebBrowser({ sessionKey, org = '', cookie = '', 
     await pageCdp.call('Page.navigate', { url: targetUrl }).catch(() => {});
 
     // 聚焦窗口拉到前台
-    focusBrowserWindow(proc.pid);
+    focusBrowserWindow(proc?.pid);
   } catch (err) {
     console.warn(`[open-web] 设置 cookie 或导航异常: ${err.message}`);
+  } finally {
+    if (pageCdp) {
+      try { pageCdp.close(); } catch {}
+    }
   }
 
-  return { ok: true, browser: path.basename(exe), pid: proc.pid };
+  return { ok: true, browser: path.basename(exe), pid: proc?.pid };
 }
 

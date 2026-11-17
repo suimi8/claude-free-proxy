@@ -135,8 +135,9 @@
   .chip.k-neutral { background: #eef2f7; color: var(--sub); }
   .errline { font-size: 11.5px; color: var(--red); white-space: nowrap; overflow: hidden;
     text-overflow: ellipsis; }
-  .actions { display: flex; gap: 6px; margin-top: 2px; }
-  .actions .btn.sm { flex: 1; justify-content: center; }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; align-items: center; }
+  .actions .btn.sm { flex: 0 0 auto; white-space: nowrap; padding: 4px 7px; font-size: 11.5px; line-height: 1.4; height: 26px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; }
+  .actions .btn.danger { margin-left: auto; }
   .foot { display: flex; justify-content: space-between; color: #94a3b8; font-size: 11px; }
 
   .empty { grid-column: 1/-1; text-align: center; color: var(--sub); padding: 46px 0;
@@ -266,6 +267,7 @@
     <button id="tabUsage">📊 用量统计 / Tokens</button>
     <button id="tabKeys">🔑 API Keys</button>
     <button id="tabSettings">⚙️ 系统设置</button>
+    <button id="tabOps">📋 操作日志</button>
   </div>
 
   <div id="viewPool">
@@ -548,6 +550,56 @@
       <button class="btn primary" id="btnSaveSettings" style="min-width:140px">💾 保存全部设置</button>
     </div>
   </div><!-- /viewSettings -->
+
+  <div id="viewOps" style="display:none">
+    <div class="tiles" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 16px;">
+      <div class="tile"><div class="k">总操作数</div><div class="v" id="opStatTotal">–</div></div>
+      <div class="tile"><div class="k">今日操作</div><div class="v" id="opStatToday">–</div></div>
+      <div class="tile"><div class="k">成功操作</div><div class="v" id="opStatSuccess" style="color:#10b981">–</div></div>
+      <div class="tile"><div class="k">失败异常</div><div class="v" id="opStatFailed" style="color:#ef4444">–</div></div>
+    </div>
+
+    <div class="bar" style="margin-bottom: 14px; flex-wrap: wrap;">
+      <div class="search" style="max-width: 320px;">
+        <input id="opSearch" placeholder="搜索操作、对象、详情、IP...">
+      </div>
+      <select id="opCategory" style="padding: 7px 12px; border: 1px solid #d4deee; border-radius: 8px; font-size: 13px; background: #fff;">
+        <option value="">全部类别</option>
+        <option value="登录认证">🔐 登录认证</option>
+        <option value="账号管理">👥 账号管理</option>
+        <option value="客户端调起">🖥️ 客户端调起</option>
+        <option value="额度风控">📊 额度风控</option>
+        <option value="凭据密钥">🔑 凭据密钥</option>
+        <option value="系统配置">⚙️ 系统配置</option>
+      </select>
+      <select id="opStatus" style="padding: 7px 12px; border: 1px solid #d4deee; border-radius: 8px; font-size: 13px; background: #fff;">
+        <option value="">全部状态</option>
+        <option value="success">✅ 成功</option>
+        <option value="failed">❌ 失败</option>
+      </select>
+      <button class="btn" id="btnOpRefresh">🔄 刷新</button>
+      <button class="btn danger sm" id="btnOpClear" style="margin-left:auto;">🗑 清空日志</button>
+    </div>
+
+    <div class="op-table-wrap" style="background:#fff; border: 1px solid #e2e8f0; border-radius: 12px; overflow-x: auto; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+      <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; min-width: 800px;">
+        <thead>
+          <tr style="background: #f8fafc; border-bottom: 1px solid #e2e8f0; color: #64748b; font-weight: 600;">
+            <th style="padding: 10px 14px; width: 155px;">时间</th>
+            <th style="padding: 10px 12px; width: 110px;">分类</th>
+            <th style="padding: 10px 12px; width: 120px;">操作</th>
+            <th style="padding: 10px 14px; width: 160px;">操作对象</th>
+            <th style="padding: 10px 10px; width: 85px; text-align: center;">状态</th>
+            <th style="padding: 10px 14px;">执行详情</th>
+            <th style="padding: 10px 12px; width: 110px;">来源 IP</th>
+          </tr>
+        </thead>
+        <tbody id="opTableBody">
+          <tr><td colspan="7" style="text-align: center; padding: 36px; color: #94a3b8;">加载中…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div><!-- /viewOps -->
 </div>
 
 <!-- 链接登录（主入口） -->
@@ -733,7 +785,7 @@ sessionKey=sk-ant-sid02-wwwwwwww; ..."></textarea>
     </div>
     <div class="mrow">
       <button class="btn" onclick="closeBatchImport()">取消</button>
-      <button class="btn primary" id="btnBatchStart">🚀 开始批量导入</button>
+      <button class="btn primary" id="btnImportKeysStart">🚀 开始批量导入</button>
     </div>
   </div>
 </div>
@@ -1104,13 +1156,16 @@ function switchTab(t) {
   $("#tabUsage").classList.toggle("on", t === "usage");
   $("#tabKeys").classList.toggle("on", t === "keys");
   $("#tabSettings").classList.toggle("on", t === "settings");
+  $("#tabOps").classList.toggle("on", t === "ops");
   $("#viewPool").style.display = t === "pool" ? "" : "none";
   $("#viewUsage").style.display = t === "usage" ? "" : "none";
   $("#viewKeys").style.display = t === "keys" ? "" : "none";
   $("#viewSettings").style.display = t === "settings" ? "" : "none";
+  $("#viewOps").style.display = t === "ops" ? "" : "none";
   if (t === "usage") loadUsage();
   if (t === "keys") loadKeys();
   if (t === "settings") renderSettings();
+  if (t === "ops") loadOperations();
 }
 async function loadUsage() {
   try {
@@ -1826,8 +1881,8 @@ $("#btnBatchImport").onclick = () => {
   $("#fBatchText").value = "";
   $("#batchCountHint").textContent = "已输入 0 行";
   $("#batchProgressBox").style.display = "none";
-  $("#btnBatchStart").disabled = false;
-  $("#btnBatchStart").textContent = "🚀 开始批量导入";
+  $("#btnImportKeysStart").disabled = false;
+  $("#btnImportKeysStart").textContent = "🚀 开始批量导入";
   $("#maskBatchImport").classList.add("on");
   $("#fBatchText").focus();
 };
@@ -1835,10 +1890,10 @@ $("#fBatchText").addEventListener("input", () => {
   const lines = $("#fBatchText").value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   $("#batchCountHint").textContent = "已输入 " + lines.length + " 行";
 });
-$("#btnBatchStart").onclick = async () => {
+$("#btnImportKeysStart").onclick = async () => {
   const text = $("#fBatchText").value.trim();
   if (!text) return toast("请先输入至少一行 sessionKey", true);
-  const btn = $("#btnBatchStart");
+  const btn = $("#btnImportKeysStart");
   btn.disabled = true;
   btn.textContent = "正在导入…";
   const box = $("#batchProgressBox");
@@ -2082,6 +2137,99 @@ $("#kRows").addEventListener("click", async e => {
     catch (err) { toast("删除失败: " + err.message, true); }
   }
 });
+
+/* ---------------- 操作审计日志 ---------------- */
+let OP_STATE = {
+  category: "",
+  status: "",
+  q: "",
+  timer: null,
+};
+
+async function loadOperations() {
+  try {
+    const q = new URLSearchParams();
+    if (OP_STATE.category) q.set("category", OP_STATE.category);
+    if (OP_STATE.status) q.set("status", OP_STATE.status);
+    if (OP_STATE.q) q.set("q", OP_STATE.q);
+    q.set("limit", "150");
+
+    const res = await api("/v1/operations?" + q.toString());
+    renderOperations(res);
+  } catch (ex) {
+    if (S.tab === "ops") toast("获取操作日志失败: " + ex.message, true);
+  }
+}
+
+function renderOperations(data) {
+  const stats = data.stats || {};
+  $("#opStatTotal").textContent = nfmt(stats.total || 0);
+  $("#opStatToday").textContent = nfmt(stats.today || 0);
+  $("#opStatSuccess").textContent = nfmt(stats.success || 0);
+  $("#opStatFailed").textContent = nfmt(stats.failed || 0);
+
+  const tbody = $("#opTableBody");
+  const items = data.items || [];
+  if (!items.length) {
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 36px; color: #94a3b8;">暂无符合条件的操作日志</td></tr>`;
+    return;
+  }
+
+  const catColors = {
+    "登录认证": "#6366f1",
+    "账号管理": "#0284c7",
+    "客户端调起": "#8b5cf6",
+    "额度风控": "#f59e0b",
+    "凭据密钥": "#10b981",
+    "系统配置": "#64748b",
+  };
+
+  tbody.innerHTML = items.map(it => {
+    const isOk = it.status === "success";
+    const catCol = catColors[it.category] || "#64748b";
+    return `<tr style="border-bottom: 1px solid #f1f5f9; transition: background 0.15s;" onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background=''">
+      <td style="padding: 9px 14px; font-family: monospace; font-size: 11.5px; color: #64748b;">${esc(it.time)}</td>
+      <td style="padding: 9px 12px;">
+        <span style="display:inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; background: ${catCol}15; color: ${catCol}; border: 1px solid ${catCol}30;">
+          ${esc(it.category)}
+        </span>
+      </td>
+      <td style="padding: 9px 12px; font-weight: 600; color: #1e293b;">${esc(it.action)}</td>
+      <td style="padding: 9px 14px; color: #334155; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${esc(it.target)}">
+        <code style="font-size: 11.5px; background: #f1f5f9; padding: 2px 5px; border-radius: 4px;">${esc(it.target)}</code>
+      </td>
+      <td style="padding: 9px 10px; text-align: center;">
+        <span class="chip ${isOk ? "ok" : "err"}" style="padding: 2px 7px; font-size: 11px;">${isOk ? "成功" : "失败"}</span>
+      </td>
+      <td style="padding: 9px 14px; color: ${isOk ? "#475569" : "#dc2626"}; line-height: 1.4; word-break: break-all;">
+        ${esc(it.detail || "—")}
+      </td>
+      <td style="padding: 9px 12px; font-family: monospace; font-size: 11px; color: #94a3b8;">${esc(it.ip || "127.0.0.1")}</td>
+    </tr>`;
+  }).join("");
+}
+
+$("#tabOps").onclick = () => switchTab("ops");
+$("#btnOpRefresh").onclick = () => loadOperations().then(() => toast("操作日志已刷新"));
+$("#opCategory").onchange = e => { OP_STATE.category = e.target.value; loadOperations(); };
+$("#opStatus").onchange = e => { OP_STATE.status = e.target.value; loadOperations(); };
+$("#opSearch").oninput = e => {
+  clearTimeout(OP_STATE.timer);
+  OP_STATE.timer = setTimeout(() => {
+    OP_STATE.q = e.target.value.trim();
+    loadOperations();
+  }, 300);
+};
+$("#btnOpClear").onclick = async () => {
+  if (!confirm("确定要清空全部操作审计日志吗？此操作不可逆。")) return;
+  try {
+    await api("/v1/operations/clear", { method: "POST" });
+    toast("操作日志已清空");
+    loadOperations();
+  } catch (ex) {
+    toast("清空失败: " + ex.message, true);
+  }
+};
 
 /* ---------------- 启动 ---------------- */
 (async function boot() {

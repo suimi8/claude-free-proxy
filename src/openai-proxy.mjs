@@ -69,6 +69,7 @@ import { createUsageLog, prefixOf } from './usage-log.mjs';
 import { fetch as undiciFetch, FormData as UndiciFormData } from 'undici';
 import { pruneMessageImages, pruneToolOutputs, optimizeContext } from './context-optimizer.mjs';
 import { getSharedDispatcher } from './network-optimizer.mjs';
+import { logOperation, queryOperations, getOperationStats, clearOperations } from './operation-log.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = fs.existsSync(path.join(HERE, '..', 'start.cmd')) || fs.existsSync(path.join(HERE, '..', 'LICENSE'))
@@ -118,6 +119,12 @@ function localIpSet() {
 function isLoopbackReq(req) {
   const ip = (req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
   return localIpSet().has(ip);
+}
+
+function getReqIp(req) {
+  const forwarded = req.headers && (req.headers['x-forwarded-for'] || req.headers['x-real-ip']);
+  if (forwarded) return String(forwarded).split(',')[0].trim();
+  return (req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
 }
 
 // 硬性保护：开放局域网却一个 key 都没有，等于把账号额度公开给整个网络
@@ -2800,6 +2807,14 @@ const server = http.createServer(async (req, res) => {
         }
       });
       await Promise.all(workers);
+      logOperation({
+        category: '额度风控',
+        action: '查询KYC',
+        target: wantId ? (targets[0]?.label || wantId) : `全部账号(${targets.length})`,
+        status: 'success',
+        detail: `已查询 ${targets.length} 个账号 (重新探测: ${todo.length}, 缓存: ${targets.length - todo.length})`,
+        ip: getReqIp(req),
+      });
       return json(res, 200, { results, checked: todo.length, cached: targets.length - todo.length });
     }
 
@@ -2820,6 +2835,14 @@ const server = http.createServer(async (req, res) => {
         }
       }
       const { account, created } = POOL.add({ ...b, org });
+      logOperation({
+        category: '账号管理',
+        action: created ? '添加账号' : '更新账号',
+        target: account.label || account.id,
+        status: 'success',
+        detail: `${created ? '新增账号成功' : '更新账号成功'} (org: ${account.org || '-'})`,
+        ip: getReqIp(req),
+      });
       return json(res, created ? 201 : 200, { created, account: maskAccount(account) });
     }
 
@@ -2973,6 +2996,14 @@ const server = http.createServer(async (req, res) => {
           }
         });
         await Promise.all(workers);
+        logOperation({
+          category: '账号管理',
+          action: '批量导入',
+          target: `${unique.length}个凭据`,
+          status: (results.imported + results.updated > 0) ? 'success' : 'failed',
+          detail: `成功导入: ${results.imported} 新增, ${results.updated} 更新, ${results.skipped} 跳过, ${results.failed} 失败`,
+          ip: getReqIp(req),
+        });
         return json(res, 200, results);
       }
 
@@ -2998,8 +3029,24 @@ const server = http.createServer(async (req, res) => {
         if (!sk) return json(res, 400, { error: { message: 'sessionKey is required', type: 'invalid_request_error' } });
         try {
           const r = await openDesktopLogin(sk, org, cookie);
+          logOperation({
+            category: '客户端调起',
+            action: '打开桌面端',
+            target: acctId || '当前账号',
+            status: r.ok ? 'success' : 'failed',
+            detail: r.message || '已成功写入凭据并拉起官方桌面端',
+            ip: getReqIp(req),
+          });
           return json(res, 200, r);
         } catch (e) {
+          logOperation({
+            category: '客户端调起',
+            action: '打开桌面端',
+            target: acctId || '当前账号',
+            status: 'failed',
+            detail: e.message,
+            ip: getReqIp(req),
+          });
           return json(res, 500, { error: { message: `调起 Claude 桌面端失败: ${e.message}`, type: 'proxy_error' } });
         }
       }
@@ -3028,8 +3075,24 @@ const server = http.createServer(async (req, res) => {
         if (!sk) return json(res, 400, { error: { message: 'sessionKey is required', type: 'invalid_request_error' } });
         try {
           const r = await openClaudeWebBrowser({ sessionKey: sk, org, cookie, ua });
+          logOperation({
+            category: '客户端调起',
+            action: '打开网页端',
+            target: acctId || '当前账号',
+            status: 'success',
+            detail: `在 ${r.browser} 浏览器打开官方网页端并登录 (PID: ${r.pid || '-'})`,
+            ip: getReqIp(req),
+          });
           return json(res, 200, { ok: true, message: `已成功在 ${r.browser} 浏览器中打开官方网页端并登录！`, ...r });
         } catch (e) {
+          logOperation({
+            category: '客户端调起',
+            action: '打开网页端',
+            target: acctId || '当前账号',
+            status: 'failed',
+            detail: e.message,
+            ip: getReqIp(req),
+          });
           return json(res, 500, { error: { message: `调起浏览器失败: ${e.message}`, type: 'proxy_error' } });
         }
       }
@@ -3098,6 +3161,14 @@ const server = http.createServer(async (req, res) => {
 
         if (format === 'txt') {
           const txt = keys.join('\n');
+          logOperation({
+            category: '凭据密钥',
+            action: '导出密钥',
+            target: `${keys.length}个账号`,
+            status: 'success',
+            detail: `导出 TXT 格式密钥 (${keys.length} 行)`,
+            ip: getReqIp(req),
+          });
           res.writeHead(200, {
             'content-type': 'text/plain; charset=utf-8',
             'content-disposition': 'attachment; filename="claude-sessionkeys.txt"',
@@ -3106,6 +3177,14 @@ const server = http.createServer(async (req, res) => {
           return res.end(txt);
         }
 
+        logOperation({
+          category: '凭据密钥',
+          action: '导出密钥',
+          target: `${keys.length}个账号`,
+          status: 'success',
+          detail: `导出 JSON 格式凭据 (共 ${keys.length} 条)`,
+          ip: getReqIp(req),
+        });
         return json(res, 200, {
           total: list.length,
           count: keys.length,
@@ -3128,6 +3207,14 @@ const server = http.createServer(async (req, res) => {
         }
         const acct = POOL.get(id.slice(0, -'/credentials'.length));
         if (!acct) return json(res, 404, { error: { message: 'account not found', type: 'invalid_request_error' } });
+        logOperation({
+          category: '凭据密钥',
+          action: '查看密钥',
+          target: acct.label || acct.id,
+          status: 'success',
+          detail: `查看明文 sessionKey (org: ${acct.org || '-'})`,
+          ip: getReqIp(req),
+        });
         return json(res, 200, {
           id: acct.id,
           label: acct.label,
@@ -3145,8 +3232,24 @@ const server = http.createServer(async (req, res) => {
         if (!acct) return json(res, 404, { error: { message: 'account not found', type: 'invalid_request_error' } });
         try {
           const d = await discoverOrg(acct.sessionKey, acct.base, acct.ua);
+          logOperation({
+            category: '额度风控',
+            action: '连通性测试',
+            target: acct.label || acct.id,
+            status: 'success',
+            detail: `组织: ${d.name || d.org}, 计划: ${d.plan || 'free'}`,
+            ip: getReqIp(req),
+          });
           return json(res, 200, { ok: true, org: d.org, name: d.name, plan: d.plan });
         } catch (e) {
+          logOperation({
+            category: '额度风控',
+            action: '连通性测试',
+            target: acct.label || acct.id,
+            status: 'failed',
+            detail: e.message,
+            ip: getReqIp(req),
+          });
           return json(res, e.status || 502, {
             ok: false,
             error: { message: `登录态校验失败: ${e.message}`, type: 'proxy_error' },
@@ -3163,6 +3266,16 @@ const server = http.createServer(async (req, res) => {
             POOL.updateQuota(acct, { ...r.limit, rate_limits: r.rate_limits, probedAt: Date.now() });
           }
           const st = POOL.status().accounts.find(x => x.id === acct.id);
+          const u5 = Math.round((r.limit?.windows?.['5h']?.utilization ?? 0) * 100);
+          const u7 = Math.round((r.limit?.windows?.['7d']?.utilization ?? 0) * 100);
+          logOperation({
+            category: '额度风控',
+            action: '主动查额度',
+            target: acct.label || acct.id,
+            status: 'success',
+            detail: `会话5h用量: ${u5}%, 7天周额度用量: ${u7}% (剩余: ${Math.round((r.limit?.remaining ?? 1) * 100)}%)`,
+            ip: getReqIp(req),
+          });
           return json(res, 200, {
             ok: !!r.limit,
             quota: {
@@ -3197,6 +3310,14 @@ const server = http.createServer(async (req, res) => {
             POOL.fail(acct, c.kind, e.message);
           }
           const st = POOL.status().accounts.find(x => x.id === acct.id);
+          logOperation({
+            category: '额度风控',
+            action: '主动查额度',
+            target: acct.label || acct.id,
+            status: 'failed',
+            detail: e.message,
+            ip: getReqIp(req),
+          });
           return json(res, status, {
             ok: false,
             error: { message: `额度探测失败: ${e.message}`, type: 'proxy_error' },
@@ -3208,12 +3329,31 @@ const server = http.createServer(async (req, res) => {
         const b = await readBody(req);
         const a = POOL.set(id, b);
         if (!a) return json(res, 404, { error: { message: 'account not found', type: 'invalid_request_error' } });
+        const isClearCd = b.cooldownUntil === 0;
+        logOperation({
+          category: isClearCd ? '额度风控' : '账号管理',
+          action: isClearCd ? '清空冷却' : '修改账号',
+          target: a.label || id,
+          status: 'success',
+          detail: isClearCd ? '手动清空 429 冷却与重试等待' : `更新设置: ${Object.keys(b).join(', ')}`,
+          ip: getReqIp(req),
+        });
         return json(res, 200, { account: maskAccount(a) });
       }
       if (req.method === 'DELETE') {
+        const a = POOL.get(id);
+        const lbl = a?.label || id;
         if (!POOL.remove(id)) {
           return json(res, 404, { error: { message: 'account not found', type: 'invalid_request_error' } });
         }
+        logOperation({
+          category: '账号管理',
+          action: '删除账号',
+          target: lbl,
+          status: 'success',
+          detail: `账号 ${id} 已从账号池彻底移除`,
+          ip: getReqIp(req),
+        });
         return json(res, 200, { removed: id });
       }
     }
@@ -3244,15 +3384,58 @@ const server = http.createServer(async (req, res) => {
         try {
           KEYS.updateSettings(b);
           const cfg = POOL.configure(b);
+          logOperation({
+            category: '系统配置',
+            action: '修改系统设置',
+            target: 'pool/settings',
+            status: 'success',
+            detail: `调度策略: ${b.strategy || '-'}, 并发: ${b.perAccountConcurrency || '-'}, 额度阈值: ${b.minQuotaRemaining != null ? Math.round(b.minQuotaRemaining * 100) + '%' : '-'}`,
+            ip: getReqIp(req),
+          });
           return json(res, 200, {
             ...cfg,
             ...(KEYS.settings() || {}),
             price_per_million_tokens: KEYS.settings()?.pricePerMillionTokens || 0,
           });
         } catch (e) {
+          logOperation({
+            category: '系统配置',
+            action: '修改系统设置',
+            target: 'pool/settings',
+            status: 'failed',
+            detail: e.message,
+            ip: getReqIp(req),
+          });
           return json(res, e.status || 400, { error: { message: e.message, type: 'invalid_request_error' } });
         }
       }
+    }
+
+    // ---------------------------------------------------------- 操作审计日志
+    if (url.pathname === '/v1/operations' && req.method === 'GET') {
+      const category = url.searchParams.get('category') || '';
+      const status = url.searchParams.get('status') || '';
+      const q = url.searchParams.get('q') || '';
+      const limit = +(url.searchParams.get('limit') || 100);
+      const offset = +(url.searchParams.get('offset') || 0);
+      const result = queryOperations({ category, status, query: q, limit, offset });
+      const stats = getOperationStats();
+      return json(res, 200, { ok: true, ...result, stats });
+    }
+    if (url.pathname === '/v1/operations/clear' && req.method === 'POST') {
+      if (!isLoopbackReq(req)) {
+        return json(res, 403, { error: { message: '清空操作日志需本机访问', type: 'permission_error' } });
+      }
+      clearOperations();
+      logOperation({
+        category: '系统配置',
+        action: '清空日志',
+        target: 'operations',
+        status: 'success',
+        detail: '操作审计日志已被清空',
+        ip: getReqIp(req),
+      });
+      return json(res, 200, { ok: true, message: '操作日志已清空' });
     }
 
     // ---------------------------------------------------------- 用量统计（分账号 / 按小时 / 全局）
@@ -3288,19 +3471,44 @@ const server = http.createServer(async (req, res) => {
       const emails = Array.isArray(body.emails) ? body.emails : [];
       const concurrency = +body.concurrency || 2;
       const resData = LOGIN.startBatch(emails, concurrency, `http://${host}`);
+      logOperation({
+        category: '登录认证',
+        action: '批量自动登录',
+        target: `${emails.length}个邮箱`,
+        status: resData.ok ? 'success' : 'failed',
+        detail: `并发: ${concurrency}, ${resData.message || (resData.ok ? '任务已启动' : '启动失败')}`,
+        ip: getReqIp(req),
+      });
       return json(res, resData.ok ? 200 : 400, resData);
     }
     if (url.pathname === '/v1/login/batch' && req.method === 'GET') {
       return json(res, 200, { ok: true, batch: LOGIN.batchStatus() });
     }
     if (url.pathname === '/v1/login/batch/cancel' && req.method === 'POST') {
+      logOperation({
+        category: '登录认证',
+        action: '取消批量登录',
+        target: 'batch-task',
+        status: 'success',
+        detail: '用户手动中止批量登录队列',
+        ip: getReqIp(req),
+      });
       return json(res, 200, { ok: true, batch: LOGIN.cancelBatch() });
     }
     if (url.pathname === '/v1/login' && req.method === 'POST') {
       const host = req.headers.host || `127.0.0.1:${PORT}`;
       let body = {};
       try { body = await readBody(req); } catch {}
-      return json(res, 200, LOGIN.start(`http://${host}`, body));
+      const resData = LOGIN.start(`http://${host}`, body);
+      logOperation({
+        category: '登录认证',
+        action: '发起单邮箱登录',
+        target: body.email || '网页会话',
+        status: 'success',
+        detail: `流程ID: ${resData.id || '-'}`,
+        ip: getReqIp(req),
+      });
+      return json(res, 200, resData);
     }
     if (url.pathname.startsWith('/v1/login/')) {
       const rest = url.pathname.slice('/v1/login/'.length);
