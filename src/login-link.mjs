@@ -500,6 +500,73 @@ export function createLoginManager(opts) {
     };
   }
 
+  /* ---------------- 全局人机验证互斥锁 (防并发窗口抢占) ---------------- */
+  // 当批量并发登录中有某个账号遇到 hCaptcha / Cloudflare / 人机验证时，独占前台焦点与用户操作界面。
+  // 其他并发账号检测到验证或尝试提交时自动排队等待，绝不抢占前台或弹出打扰用户，待正在验证的账号完成后依次唤醒。
+  const VERIFY_LOCK = {
+    holderId: null,
+    holderEmail: '',
+    kind: null,
+    acquiredAt: 0,
+  };
+  const VERIFY_QUEUE = [];
+
+  function isInteractiveVerify(kind) {
+    return kind === 'hcaptcha' || kind === 'recaptcha' || kind === 'cloudflare' || kind === 'browser_not_verified' || kind === 'email_code';
+  }
+
+  function tryAcquireVerifyLock(flow, kind) {
+    if (!VERIFY_LOCK.holderId || VERIFY_LOCK.holderId === flow.id) {
+      VERIFY_LOCK.holderId = flow.id;
+      VERIFY_LOCK.holderEmail = flow.autoEmail || flow.id;
+      VERIFY_LOCK.kind = kind;
+      VERIFY_LOCK.acquiredAt = Date.now();
+      const qIdx = VERIFY_QUEUE.findIndex(x => x.id === flow.id);
+      if (qIdx !== -1) VERIFY_QUEUE.splice(qIdx, 1);
+      return true;
+    }
+    if (!VERIFY_QUEUE.some(x => x.id === flow.id)) {
+      VERIFY_QUEUE.push(flow);
+    }
+    return false;
+  }
+
+  async function releaseVerifyLock(flow) {
+    const qIdx = VERIFY_QUEUE.findIndex(x => x && x.id === flow.id);
+    if (qIdx !== -1) VERIFY_QUEUE.splice(qIdx, 1);
+
+    if (VERIFY_LOCK.holderId !== flow.id) return;
+
+    console.log(`[login] ${flow.id} (${flow.autoEmail || ''}) 释放人机验证互斥锁`);
+    VERIFY_LOCK.holderId = null;
+    VERIFY_LOCK.holderEmail = '';
+    VERIFY_LOCK.kind = null;
+    VERIFY_LOCK.acquiredAt = 0;
+
+    // 唤醒下一个在队列中等待的 flow
+    while (VERIFY_QUEUE.length > 0) {
+      const nextFlow = VERIFY_QUEUE.shift();
+      if (nextFlow && LIVE.has(nextFlow.state)) {
+        VERIFY_LOCK.holderId = nextFlow.id;
+        VERIFY_LOCK.holderEmail = nextFlow.autoEmail || nextFlow.id;
+        VERIFY_LOCK.kind = nextFlow.verify || 'verify';
+        VERIFY_LOCK.acquiredAt = Date.now();
+        nextFlow._verifyFocused = true;
+        console.log(`[login] 人机验证互斥锁移交给排队账号: ${nextFlow.id} (${nextFlow.autoEmail || ''})`);
+
+        try {
+          const cdp = await ensurePageCdp(nextFlow);
+          await cdp.call('Page.bringToFront');
+          focusBrowserWindow(nextFlow.proc?.pid);
+        } catch {}
+
+        const k = nextFlow.verify;
+        nextFlow.message = VERIFY_HINT[k] || `需要人工验证（${VERIFY_LABEL[k] || k}），请在当前窗口完成`;
+        break;
+      }
+    }
+  }
+
   async function submitEmailToClaude(flow, email) {
     const cdp = await ensurePageCdp(flow);
     const start = Date.now();
@@ -508,6 +575,13 @@ export function createLoginManager(opts) {
 
     while (Date.now() - start < 90000) {
       if (!LIVE.has(flow.state)) return false;
+
+      // 如果当前已有其它并发账号正在经历人机验证码，暂停提交，绝不抢占前台或并发触发多重验证码
+      while (VERIFY_LOCK.holderId && VERIFY_LOCK.holderId !== flow.id && LIVE.has(flow.state)) {
+        const holder = VERIFY_LOCK.holderEmail ? `「${VERIFY_LOCK.holderEmail}」` : '前一个账号';
+        flow.message = `⏳ 等待 ${holder} 完成验证码后再继续…`;
+        await sleep(1500);
+      }
       try {
         // 1. 检查页面是否已进入验证码输入页 (code_view)
         const checkCode = await cdp.call('Runtime.evaluate', {
@@ -801,6 +875,7 @@ export function createLoginManager(opts) {
   }
 
   function cleanup(f) {
+    releaseVerifyLock(f);
     if (f.port) ALLOCATED_PORTS.delete(f.port);
     try { f.pageCdp?.close(); } catch { /* noop */ }
     try { f.cdp?.close(); } catch { /* noop */ }
@@ -857,6 +932,7 @@ export function createLoginManager(opts) {
 
       const sk = cookies.find(c => c.name === 'sessionKey' && c.value);
       if (sk) {
+        await releaseVerifyLock(f);
         f.state = 'capturing';
         f.message = '已捕获登录凭据，正在校验组织信息…';
         const cookie = cookies.map(c => `${c.name}=${c.value}`).join('; ');
@@ -885,33 +961,47 @@ export function createLoginManager(opts) {
         // —— 人工验证检测：需要用户介入时把话说清楚，用户完成后自动继续捕获 ——
         const kind = await detectVerify(f, cookies);
         if (kind) {
-          if (f.verify !== kind) {
-            f.verify = kind;
-            console.log(`[login] ${f.id} 需要人工验证：${VERIFY_LABEL[kind] || kind}（等待用户完成后自动继续）`);
-            // 验证常要换邮箱/等邮件/过页面加载，给一轮新的等待窗口（最多补 4 次，防止无限等）
-            if ((f.verifyExtends || 0) < 4) {
-              f.verifyExtends = (f.verifyExtends || 0) + 1;
-              f.expiresAt = Math.max(f.expiresAt, Date.now() + timeoutMs);
-            }
-            // 把登录窗口提到最前，用户能立刻看到要验证的地方
-            try {
-              await (await ensurePageCdp(f)).call('Page.bringToFront');
-              focusBrowserWindow(f.proc?.pid);
-            } catch { /* 置顶失败不影响流程 */ }
-          }
           f.needVerify = true;
-          if (kind === 'email_link' && f.autoVerifying && f.autoVerifyMsg) {
-            f.message = f.autoVerifyMsg;
+          f.verify = kind;
+
+          if (isInteractiveVerify(kind)) {
+            const gotLock = tryAcquireVerifyLock(f, kind);
+            if (gotLock) {
+              if (!f._verifyFocused) {
+                f._verifyFocused = true;
+                console.log(`[login] ${f.id} 获取验证锁，将窗口置顶：${VERIFY_LABEL[kind] || kind}`);
+                if ((f.verifyExtends || 0) < 4) {
+                  f.verifyExtends = (f.verifyExtends || 0) + 1;
+                  f.expiresAt = Math.max(f.expiresAt, Date.now() + timeoutMs);
+                }
+                try {
+                  await (await ensurePageCdp(f)).call('Page.bringToFront');
+                  focusBrowserWindow(f.proc?.pid);
+                } catch { /* 置顶失败不影响流程 */ }
+              }
+              f.message = VERIFY_HINT[kind] || `需要人工验证（${VERIFY_LABEL[kind] || kind}），到浏览器窗口完成后会自动继续`;
+            } else {
+              // 锁被其它账号占用：绝不抢占前台！静默等待排队
+              f._verifyFocused = false;
+              const holder = VERIFY_LOCK.holderEmail ? `「${VERIFY_LOCK.holderEmail}」` : '前一个账号';
+              f.message = `⏳ 验证码排队等待中：当前正在处理 ${holder} 的验证码，请勿抢占，完成后将自动切换到此窗口…`;
+            }
           } else {
-            f.message = VERIFY_HINT[kind] || `需要人工验证（${VERIFY_LABEL[kind] || kind}），到浏览器窗口完成后会自动继续`;
+            if (kind === 'email_link' && f.autoVerifying && f.autoVerifyMsg) {
+              f.message = f.autoVerifyMsg;
+            } else {
+              f.message = VERIFY_HINT[kind] || `需要人工验证（${VERIFY_LABEL[kind] || kind}），到浏览器窗口完成后会自动继续`;
+            }
           }
         } else if (f.verify) {
           // 验证消失了 = 用户已完成，自动往下走（无需刷新/重启）
           f.verify = null;
           f.needVerify = false;
+          f._verifyFocused = false;
           f.verifyPassedAt = Date.now();
           f.message = '✅ 验证已通过，正在自动继续捕获登录态…';
-          console.log(`[login] ${f.id} 验证已通过，自动继续捕获`);
+          console.log(`[login] ${f.id} 验证已通过，释放验证锁并继续`);
+          await releaseVerifyLock(f);
         } else if (f.verifyPassedAt && Date.now() - f.verifyPassedAt < 6000) {
           f.message = '✅ 验证已通过，正在自动继续捕获登录态…';
         } else {
@@ -1148,6 +1238,10 @@ export function createLoginManager(opts) {
         it.message = '已终止，浏览器已关闭';
       }
     }
+    VERIFY_LOCK.holderId = null;
+    VERIFY_LOCK.holderEmail = '';
+    VERIFY_LOCK.kind = null;
+    VERIFY_QUEUE.length = 0;
     return batchStatus();
   }
 
