@@ -74,19 +74,10 @@ function findBrowser() {
     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
   ];
 
-  // 优先匹配当前系统的默认浏览器（若用户默认是 Edge 则优先拉起 Edge，避免调起未用的 Chrome 导致看不见窗口）
-  let preferEdge = false;
-  if (process.platform === 'win32') {
-    try {
-      const reg = execSync('reg query HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\http\\UserChoice /v ProgId', {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore']
-      });
-      if (/edge/i.test(reg)) preferEdge = true;
-    } catch {}
-  }
-
-  const order = preferEdge ? [...edgePaths, ...chromePaths] : [...chromePaths, ...edgePaths];
+  // 无条件 Chrome 优先（用户明确要求：不要用 Edge，像以前一样用 Chrome）。
+  // 系统默认浏览器跟随逻辑已移除——默认浏览器是 Edge 时会误拉 Edge，
+  // 导致 cf_clearance 绑定到 Edg UA。想用别的浏览器用 LOGIN_BROWSER 指定。
+  const order = [...chromePaths, ...edgePaths];
   for (const p of order) {
     try { if (fs.existsSync(p)) return p; } catch { /* noop */ }
   }
@@ -198,13 +189,22 @@ class CDP {
 
 /** 取回 claude.ai 域下的全部 cookie（含 HttpOnly） */
 async function readCookies(flow) {
-  // 1) 浏览器级 Storage.getCookies（Chrome/Edge 100+ 支持，覆盖所有 profile cookie）
+  // 1) 页面级 Network.getCookies（限定 claude.ai）——无痕窗口的独立内存 jar
+  //    只有页面级会话能看到，浏览器级读的是默认 jar（恒空）
+  try {
+    if (flow.pageCdp && flow.pageCdp.ws.readyState === 1) {
+      const r = await flow.pageCdp.call('Network.getCookies', { urls: ['https://claude.ai/'] });
+      if (Array.isArray(r?.cookies) && r.cookies.length) return r.cookies;
+    }
+  } catch { /* 断线走下面兜底 */ }
+
+  // 2) 浏览器级 Storage.getCookies（Chrome/Edge 100+，非无痕模式兜底）
   try {
     const r = await flow.cdp.call('Storage.getCookies');
     if (Array.isArray(r?.cookies)) return r.cookies;
   } catch { /* 老版本回退到页面 target */ }
 
-  // 2) 页面级 Network.getAllCookies
+  // 3) 页面级 Network.getAllCookies
   if (!flow.pageCdp || flow.pageCdp.ws.readyState !== 1) {
     await ensurePageCdp(flow);
   }
@@ -220,7 +220,7 @@ function claudeCookies(cookies) {
 }
 
 /** 取回/复用「页面级」CDP 连接（DOM 检测与跳转都用它） */
-async function ensurePageCdp(flow) {
+async function ensurePageCdp(flow, loginUrl = 'https://claude.ai/login') {
   if (flow.pageCdp && flow.pageCdp.ws.readyState === 1) return flow.pageCdp;
   let page = null;
   // 多次轮询探测可用 page target
@@ -256,6 +256,12 @@ async function ensurePageCdp(flow) {
   // 必须显式激活并导航到登录页，确保 0 秒直达，不卡在 about:blank
   try {
     await flow.pageCdp.call('Page.enable');
+    await flow.pageCdp.call('Page.addScriptToEvaluateOnNewDocument', {
+      source: `try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch {}`,
+    }).catch(() => {});
+    await flow.pageCdp.call('Runtime.evaluate', {
+      expression: `try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch {}`,
+    }).catch(() => {});
     const u = String(page.url || '');
     if (!u || u === 'about:blank' || !/claude\.ai/i.test(u)) {
       await flow.pageCdp.call('Page.navigate', { url: loginUrl });
@@ -284,6 +290,8 @@ const VERIFY_EXPR = `(() => {
   if (frames.some(f => src(f).indexOf('challenges.cloudflare.com') >= 0)) return 'cloudflare';
   if (String(document.title || '').toLowerCase().indexOf('just a moment') === 0) return 'cloudflare';
   if (frames.some(f => src(f).indexOf('recaptcha') >= 0)) return 'recaptcha';
+  const bodyText = (document.body ? document.body.innerText : '') || '';
+  if (/无法验证您的浏览器|Unable to verify your browser|ブラウザを確認できませんでした|確認できません/i.test(bodyText)) return 'browser_not_verified';
   const inputs = Array.prototype.slice.call(document.querySelectorAll('input')).filter(vis);
   const codePending = inputs.some(i => {
     const type = String(i.type || '').toLowerCase();
@@ -299,6 +307,7 @@ const VERIFY_EXPR = `(() => {
 })()`;
 
 const VERIFY_LABEL = {
+  browser_not_verified: '浏览器环境验证未通过',
   hcaptcha: 'hCaptcha 人机验证',
   cloudflare: 'Cloudflare 安全检查',
   recaptcha: 'reCAPTCHA 人机验证',
@@ -307,6 +316,7 @@ const VERIFY_LABEL = {
 };
 
 const VERIFY_HINT = {
+  browser_not_verified: '⚠️ 页面提示「无法验证您的浏览器」：正在自动尝试重新提交；您也可以在弹出的浏览器窗口中直接点击「使用电子邮箱继续」或刷新重试。',
   hcaptcha: '⚠️ 需要人工验证：请到弹出的浏览器窗口完成 hCaptcha（勾选「我是人类」或完成图片选择）。'
     + '完成后无需刷新、无需任何操作 —— 本流程会自动继续并捕获登录态',
   cloudflare: '⚠️ 需要人工验证：浏览器窗口正显示 Cloudflare 安全检查，请在窗口里点选通过。完成后会自动继续',
@@ -356,6 +366,31 @@ async function validateLogin({ cookie, ua, base }) {
  * 登录流程管理器。
  * @param {{onCapture: Function, baseUrl: string, webBase?: string, timeoutMs?: number, loginUrl?: string}} opts
  */
+/* 临时 Chrome profile 登记表：在跑的流程占用中，启动清扫时跳过防止误删 */
+const PROFILES_IN_USE = new Set();
+
+/**
+ * 清扫上次异常退出（崩溃/强杀/断电）遗留的临时 Chrome profile。
+ * 非无痕时期的 profile 里落盘过 sessionKey / cf_clearance，属于凭据残留，必须删；
+ * 正常流程的 cleanup 会删自己的（含 800ms 延迟兜底），这里只兜底收尸体。
+ * 在管理器创建（代理启动）时调用 —— 此时本进程还没有任何在跑的流程。
+ */
+function sweepStaleProfiles() {
+  let entries;
+  try { entries = fs.readdirSync(os.tmpdir(), { withFileTypes: true }); } catch { return; }
+  for (const ent of entries) {
+    if (!ent.isDirectory()) continue;
+    // 本仓库两类临时 Chrome profile + 早期手工测试目录；前缀匹配（后缀是随机 flow id/时间戳）
+    if (!/^(?:claude-cf-verify-|claude-free-login-|claude-free-har-|cfv-manual-test)/.test(ent.name)) continue;
+    const full = path.join(os.tmpdir(), ent.name);
+    if (PROFILES_IN_USE.has(full)) continue;
+    try {
+      fs.rmSync(full, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 });
+      console.log(`[profile-sweep] 已清理遗留临时目录 ${ent.name}`);
+    } catch { /* 可能被残留 Chrome 进程占用，下次启动再清 */ }
+  }
+}
+
 export function createLoginManager(opts) {
   const {
     onCapture,
@@ -364,6 +399,9 @@ export function createLoginManager(opts) {
     timeoutMs = 5 * 60 * 1000,
     loginUrl = 'https://claude.ai/login',
   } = opts;
+
+  // 启动即清扫上次异常退出遗留的临时 Chrome profile（可能含落盘凭据）
+  sweepStaleProfiles();
 
   let verificationProvider = typeof opts.onAutoVerification === 'function' ? opts.onAutoVerification : null;
 
@@ -392,44 +430,142 @@ export function createLoginManager(opts) {
   async function submitEmailToClaude(flow, email) {
     const cdp = await ensurePageCdp(flow);
     const start = Date.now();
-    while (Date.now() - start < 25000) {
+    let retryCount = 0;
+    const maxRetries = 4;
+
+    while (Date.now() - start < 90000) {
       if (!LIVE.has(flow.state)) return false;
       try {
-        const r = await cdp.call('Runtime.evaluate', {
+        const prep = await cdp.call('Runtime.evaluate', {
           expression: `(() => {
+            const consent = document.querySelector('[data-testid="consent-accept"]');
+            if (consent && consent.offsetWidth && consent.offsetHeight) consent.click();
+            if (document.readyState !== 'complete') return { status: 'loading' };
+
+            const codeInput = document.querySelector('input#code, input[data-testid="code"], input[name*="code" i]');
+            if (codeInput) return { status: 'code_view' };
+
+            const bodyText = (document.body ? document.body.innerText : '') || '';
+            const hasBrowserErr = /无法验证您的浏览器|Unable to verify your browser|ブラウザを確認できませんでした|確認できません/i.test(bodyText);
+
             const inputs = Array.from(document.querySelectorAll('input'));
             const input = document.querySelector('input[type="email"], input[name="email"], input#email')
               || inputs.find(i => /email|mail|メール/i.test([i.placeholder, i.name, i.id, i.getAttribute('aria-label')].join(' ')))
               || (inputs.length === 1 ? inputs[0] : null);
-            if (!input) return false;
-            input.focus();
-            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-            if (setter) {
-              setter.call(input, ${JSON.stringify(email)});
-            } else {
-              input.value = ${JSON.stringify(email)};
-            }
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            input.dispatchEvent(new Event('change', { bubbles: true }));
-            input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+            if (!input) return { status: 'no_input', hasBrowserErr };
 
-            // 优先查找表单提交按钮或 continue 专用按钮，严格排除第三方 Google / Apple 授权按钮
+            input.focus();
+            if (input.value !== ${JSON.stringify(email)}) {
+              const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+              if (setter) {
+                setter.call(input, ${JSON.stringify(email)});
+              } else {
+                input.value = ${JSON.stringify(email)};
+              }
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+              input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+            }
+
             const buttons = Array.from(document.querySelectorAll('button'));
             const btn = document.querySelector('button[data-testid="continue"]')
               || document.querySelector('button[type="submit"]')
               || buttons.find(b => !/google|apple/i.test(b.innerText || '') && /メールで続ける|email|继续|continue|login|登录/i.test((b.innerText || '').trim()));
 
-            if (btn && !btn.disabled) {
-              btn.click();
+            if (!btn) return { status: 'no_btn', hasBrowserErr };
+            if (btn.disabled) return { status: 'btn_disabled', hasBrowserErr };
+
+            btn.scrollIntoView({ block: 'center' });
+            const rect = btn.getBoundingClientRect();
+            return {
+              status: 'ready_to_click',
+              hasBrowserErr,
+              x: Math.round(rect.left + rect.width / 2),
+              y: Math.round(rect.top + rect.height / 2),
+            };
+          })()`,
+          returnByValue: true,
+        });
+
+        const res = prep?.result?.value;
+        if (res?.status === 'code_view') {
+          return true;
+        }
+
+        if (res?.status === 'ready_to_click') {
+          if (res.hasBrowserErr) {
+            console.log(`[login] ${flow.id} 检测到「无法验证您的浏览器」，准备自动重试点击提交 (第 ${retryCount + 1} 次)...`);
+            flow.message = `页面提示「无法验证您的浏览器」，正在自动重试提交 (${retryCount + 1}/${maxRetries})…`;
+          }
+
+          // 优先使用真实的 CDP 鼠标点击事件（isTrusted = true），避免被反爬机制标记为机器人
+          if (res.x > 0 && res.y > 0) {
+            await cdp.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: res.x, y: res.y, buttons: 0 }).catch(() => {});
+            await sleep(100);
+            await cdp.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: res.x, y: res.y, button: 'left', clickCount: 1, buttons: 1 }).catch(() => {});
+            await sleep(80);
+            await cdp.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: res.x, y: res.y, button: 'left', clickCount: 1, buttons: 0 }).catch(() => {});
+          } else {
+            await cdp.call('Runtime.evaluate', {
+              expression: `(() => {
+                const btn = document.querySelector('button[data-testid="continue"]')
+                  || document.querySelector('button[type="submit"]')
+                  || [...document.querySelectorAll('button')].find(b => !/google|apple/i.test(b.innerText || '') && /メールで続ける|email|继续|continue|login|登录/i.test((b.innerText || '').trim()));
+                if (btn && !btn.disabled) btn.click();
+              })()`,
+            }).catch(() => {});
+          }
+
+          // 点击后观察页面状态
+          const clickTime = Date.now();
+          let advanceDetected = false;
+          while (Date.now() - clickTime < 4500) {
+            await sleep(800);
+            const check = await cdp.call('Runtime.evaluate', {
+              expression: `(() => {
+                const bodyText = (document.body ? document.body.innerText : '') || '';
+                const codeInput = document.querySelector('input#code, input[data-testid="code"], input[name*="code" i]');
+                const hasBrowserErr = /无法验证您的浏览器|Unable to verify your browser|ブラウザを確認できませんでした|確認できません/i.test(bodyText);
+                const isRateLimited = /試行回数が多|too_many_attempts|しばらくしてから再度お試し|尝试次数过多/i.test(bodyText);
+                return { hasCode: !!codeInput, hasBrowserErr, isRateLimited };
+              })()`,
+              returnByValue: true,
+            }).catch(() => null);
+
+            const st = check?.result?.value;
+            if (st?.hasCode) {
+              advanceDetected = true;
               return true;
             }
-            return 'ready';
-          })()`,
-          returnByValue: true
-        });
-        if (r?.result?.value === true) return true;
+            if (st?.isRateLimited) {
+              flow.message = '该邮箱触发了登录频率限制，请稍后再试或更换邮箱';
+              return false;
+            }
+            if (st?.hasBrowserErr) {
+              break;
+            }
+          }
+
+          if (advanceDetected) return true;
+
+          const cookies = await readCookies(flow).catch(() => []);
+          if (cookies.some(c => c.name === 'pendingLogin' && c.value && c.value !== 'false')) {
+            return true;
+          }
+
+          retryCount++;
+          if (retryCount >= maxRetries) {
+            console.log(`[login] ${flow.id} 「无法验证您的浏览器」重试超限，重新加载登录页...`);
+            flow.message = '正在重载登录页并重试…';
+            await cdp.call('Page.reload').catch(() => {});
+            retryCount = 0;
+            await sleep(3000);
+          } else {
+            await sleep(2000);
+          }
+        }
       } catch {}
-      await sleep(600);
+      await sleep(800);
     }
     return false;
   }
@@ -468,7 +604,18 @@ export function createLoginManager(opts) {
             const btn = document.querySelector('button[data-testid="continue"]')
               || document.querySelector('button[type="submit"]')
               || [...document.querySelectorAll('button')].find(b => /continue|验证|verify|確認/i.test(b.innerText || ''));
-            if (btn && !btn.disabled) btn.click();
+            if (btn && !btn.disabled) {
+              btn.click();
+            } else {
+              // 没有可点的提交按钮时，靠回车提交（只走一条路，避免重复提交）
+              for (const type of ['keydown', 'keypress', 'keyup']) {
+                single.dispatchEvent(new KeyboardEvent(type, {
+                  key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true,
+                }));
+              }
+              const form = single.closest('form');
+              if (form && typeof form.requestSubmit === 'function') { try { form.requestSubmit(); } catch {} }
+            }
             return true;
           }
           return false;
@@ -494,6 +641,7 @@ export function createLoginManager(opts) {
       // 登录态已入库，临时 profile 里的 cookie 不再需要，删掉避免凭据残留
       setTimeout(() => {
         try { fs.rmSync(f.profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 }); } catch { /* noop */ }
+        PROFILES_IN_USE.delete(f.profile);
       }, 800);
     }
     if (active === f) active = null;
@@ -628,6 +776,7 @@ export function createLoginManager(opts) {
       f.port = await freePort();
       f.profile = path.join(os.tmpdir(), `claude-free-login-${f.id}`);
       fs.mkdirSync(f.profile, { recursive: true });
+      PROFILES_IN_USE.add(f.profile);
 
       const args = [
         `--remote-debugging-port=${f.port}`,
@@ -635,6 +784,9 @@ export function createLoginManager(opts) {
         '--remote-allow-origins=*',
         '--no-first-run',
         '--no-default-browser-check',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=AutomationControlled,Translate,OptimizationHints',
+        '--disable-infobars',
         '--new-window',
         loginUrl,
       ];
@@ -1123,4 +1275,420 @@ document.getElementById('mlinkGo').onclick=async e=>{
 document.getElementById('mlink').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('mlinkGo').click();});
 tick();
 </script></body></html>`;
+}
+
+/* ---------------------------------------------------------------------- */
+/* 手动过 Cloudflare：弹真浏览器 → 用户手动过挑战 → 收新 cf_clearance + UA  */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * 「手动过CF」管理器。
+ *
+ * 适用场景：池中账号的 cf_clearance 被 Cloudflare 作废（上游集体返回
+ * cloudflare_challenge）。此时不打码、不重试 —— 直接弹一个有头 Chrome
+ * （临时 profile），只种 sessionKey（旧 clearance 已作废，不种，避免污染
+ * 新会话），打开 claude.ai 让用户手动过挑战。浏览器一旦拿到新 cf_clearance：
+ *   1. 读回全部 claude.ai cookie + 浏览器精确 UA（clearance 与 UA 必须配套）
+ *   2. validateLogin 用「新 cookie + 新 UA」校验 sessionKey 仍有效
+ *   3. onCapture 回调（反代侧写回账号池并清冷却）
+ *   4. 关浏览器、删临时 profile
+ * 同一时刻只允许一个流程（弹窗是稀缺交互资源）；超时默认 5 分钟。
+ *
+ * 复用本模块私有工具：findBrowser / freePort / waitCdp / focusBrowserWindow /
+ * CDP / readCookies / claudeCookies / validateLogin。
+ * 不复用 ensurePageCdp —— 它的兜底导航固定指向登录页，这里需要的是首页。
+ *
+ * @param {{onCapture: Function, webUrl?: string|Function, timeoutMs?: number}} opts
+ *   onCapture({ accountId, cookie, ua, org, name, plan }) → 反代负责写回账号池
+ */
+export function createCfVerifyManager(opts) {
+  const {
+    onCapture,
+    webUrl = 'https://claude.ai/',
+    timeoutMs = 5 * 60 * 1000,
+  } = opts;
+
+  // 创建时顺手清扫上次遗留的临时 Chrome profile（崩溃/强杀留下的尸体）
+  sweepStaleProfiles();
+
+  const flows = new Map();
+  let active = null;
+  const LIVE = new Set(['starting', 'waiting', 'capturing']);
+
+  function stateOf(f) {
+    return {
+      id: f.id,
+      account_id: f.accountId,
+      state: f.state,
+      message: f.message,
+      browser: f.browser || '',
+      fingerprint: f.fingerprint || null,
+      startedAt: f.startedAt,
+      expiresAt: f.expiresAt,
+      account: f.account || null,
+    };
+  }
+
+  function state(fid) {
+    const f = flows.get(fid);
+    if (f) return stateOf(f);
+    if (batch && batch.id === fid) return batchStateOf(batch);
+    return null;
+  }
+
+  function activeFlow() {
+    return active && LIVE.has(active.state) ? active : null;
+  }
+
+  function cleanup(f) {
+    if (f.port) ALLOCATED_PORTS.delete(f.port);
+    try { f.pageCdp?.close(); } catch { /* noop */ }
+    try { f.cdp?.close(); } catch { /* noop */ }
+    if (f.proc && !f.proc.killed && f.proc.exitCode === null) {
+      // Windows 上 Chrome 有子进程树，taskkill /T 才能干净退出并释放 profile
+      if (process.platform === 'win32') {
+        try { spawn('taskkill', ['/PID', String(f.proc.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }); } catch { /* noop */ }
+      } else {
+        try { f.proc.kill('SIGTERM'); } catch { /* noop */ }
+      }
+    }
+    if (f.profile) {
+      // 新 clearance 已入库，临时 profile 里的 cookie 不再需要，删掉避免凭据残留
+      setTimeout(() => {
+        try { fs.rmSync(f.profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 }); } catch { /* noop */ }
+        PROFILES_IN_USE.delete(f.profile);
+      }, 800);
+    }
+    if (active === f) active = null;
+  }
+
+  /** 连接页面 target 并确保导航到目标 URL（启动参数通常已直达，这里只兜底 about:blank） */
+  async function connectPage(f, url) {
+    for (let i = 0; i < 12; i++) {
+      try {
+        const list = await (await fetch(`http://127.0.0.1:${f.port}/json/list`, {
+          signal: AbortSignal.timeout(2000),
+        })).json();
+        const page = list.find(t => t.type === 'page' && t.webSocketDebuggerUrl);
+        if (page) {
+          const p = await CDP.connect(page.webSocketDebuggerUrl);
+          try {
+            await p.call('Page.enable');
+            await p.call('Page.addScriptToEvaluateOnNewDocument', {
+              source: `try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch {}`,
+            }).catch(() => {});
+            await p.call('Runtime.evaluate', {
+              expression: `try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch {}`,
+            }).catch(() => {});
+            const cur = String(page.url || '');
+            if (!cur || cur === 'about:blank') await p.call('Page.navigate', { url });
+          } catch { /* 导航失败不影响 cookie 捕获 */ }
+          return p;
+        }
+      } catch { /* 端口还没就绪 */ }
+      await sleep(500);
+    }
+    return null;
+  }
+
+  async function run(f) {
+    try {
+      const exe = findBrowser();
+      f.browser = path.basename(exe);
+      console.log(`[cfverify] ${f.id} 正在启动过CF浏览器: ${exe}`);
+      f.port = await freePort();
+      f.profile = path.join(os.tmpdir(), `claude-cf-verify-${f.id}`);
+      fs.mkdirSync(f.profile, { recursive: true });
+      PROFILES_IN_USE.add(f.profile);
+
+      const target = typeof webUrl === 'function' ? webUrl() : webUrl;
+      // 指纹随机（每次过CF现场抽签）：窗口尺寸 8 组池 + ±12px 抖动避开标准值，
+      // Accept-Language 4 组 ja 系变体随机；无痕模式 cookie 只进内存不落盘。
+      // 时区固定 Asia/Tokyo、UA 保持真实版本——这两项与账号/真机绑定，不能随机。
+      const rnd = (n) => Math.floor(Math.random() * n);
+      const pick = (arr) => arr[rnd(arr.length)];
+      const SIZES = [[1366, 768], [1440, 900], [1536, 864], [1600, 900], [1680, 1050], [1920, 1080], [1280, 800], [1856, 1044]];
+      const LANGS = ['ja-JP,ja,en-US,en;q=0.8', 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7', 'ja,en-US;q=0.9,en;q=0.8', 'ja-JP,ja,en;q=0.8'];
+      const [pw, ph] = pick(SIZES);
+      const fsize = [pw + rnd(25) - 12, ph + rnd(25) - 12];
+      const flang = pick(LANGS);
+      f.fingerprint = { size: `${fsize[0]}x${fsize[1]}`, lang: flang, tz: 'Asia/Tokyo', incognito: true };
+      console.log(`[cfverify] ${f.id} 账号 ${f.accountId} 随机指纹: ${f.fingerprint.size} / ${flang} / 无痕`);
+      const args = [
+        `--remote-debugging-port=${f.port}`,
+        `--user-data-dir=${f.profile}`,
+        '--incognito',
+        '--remote-allow-origins=*',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=AutomationControlled,Translate,OptimizationHints',
+        '--disable-infobars',
+        `--window-size=${fsize[0]},${fsize[1]}`,
+        `--accept-lang=${flang}`,
+        '--new-window',
+        target,
+      ];
+      const env = { ...process.env };
+      if (process.platform === 'linux') {
+        if (!env.DISPLAY) {
+          try {
+            const xFiles = fs.readdirSync('/tmp/.X11-unix');
+            const found = xFiles.find(name => /^X\d+$/.test(name));
+            if (found) env.DISPLAY = ':' + found.slice(1);
+          } catch {}
+          if (!env.DISPLAY) env.DISPLAY = ':77';
+        }
+        args.unshift('--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu');
+      }
+
+      f.proc = spawn(exe, args, { stdio: 'ignore', windowsHide: false, env });
+      f.proc.on('error', e => {
+        console.warn(`[cfverify] ${f.id} 浏览器启动失败: ${e.message}`);
+        f.state = 'error';
+        f.message = `浏览器启动失败：${e.message}`;
+        if (active === f) active = null;
+      });
+      f.proc.on('exit', code => {
+        console.log(`[cfverify] ${f.id} 浏览器窗口已退出 (code=${code})`);
+        if (LIVE.has(f.state)) {
+          f.state = 'closed';
+          f.message = '浏览器窗口已被关闭，未捕获到新的 cf_clearance；可重新发起';
+        }
+        if (active === f) active = null;
+      });
+
+      // 等调试端口就绪（冷启动 + 安全软件扫描可能较慢，给 60s）
+      const ver = await waitCdp(f.port, 60, f);
+      if (!ver?.webSocketDebuggerUrl) {
+        f.state = 'error';
+        f.message = '浏览器已启动，但调试端口 60 秒内没就绪（可能被安全软件拦截），请重试';
+        return;
+      }
+      f.cdp = await CDP.connect(ver.webSocketDebuggerUrl);
+      // UA 必须与新 clearance 配套保存 —— 取这个浏览器的真实 UA
+      try { const v = await f.cdp.call('Browser.getVersion'); f.ua = v?.userAgent || ''; } catch {}
+
+      f.pageCdp = await connectPage(f, target);
+      if (!f.pageCdp) {
+        f.state = 'error';
+        f.message = '无法连接页面调试通道，无痕模式下无法种入登录态，请重试';
+        if (active === f) active = null;
+        try { f.proc.kill(); } catch { /* noop */ }
+        return;
+      }
+      // 时区/区域覆盖：对挑战页 JS 同样生效（CDP Emulation 级），刷新前套好
+      try { await f.pageCdp.call('Emulation.setTimezoneOverride', { timezoneId: f.fingerprint.tz }); } catch { /* 老内核不支持就算了 */ }
+      try { await f.pageCdp.call('Emulation.setLocaleOverride', { locale: 'ja-JP' }); } catch { /* noop */ }
+      // 只种 sessionKey：旧 cf_clearance 已被 CF 作废，种进去反而污染新会话。
+      // 无痕窗口用独立内存 jar，浏览器级 Storage.setCookies 写的是默认 jar
+      // （无痕页看不见），必须走页面级 Network.setCookie；种完刷新一次生效。
+      const seeded = await f.pageCdp.call('Network.setCookie', {
+        name: 'sessionKey',
+        value: f.sessionKey,
+        domain: '.claude.ai',
+        path: '/',
+        secure: true,
+        httpOnly: true,
+        sameSite: 'Lax',
+      }).catch(() => null);
+      if (!(seeded === true || seeded?.success === true)) {
+        f.state = 'error';
+        f.message = '种入 sessionKey 失败（页面级 CDP 拒绝），请重试';
+        if (active === f) active = null;
+        try { f.proc.kill(); } catch { /* noop */ }
+        return;
+      }
+      await f.pageCdp.call('Page.reload', { ignoreCache: true }).catch(() => {});
+
+      focusBrowserWindow(f.proc.pid);
+      f.state = 'waiting';
+      f.message = '已弹出浏览器并载入 claude.ai —— 请在窗口里完成 Cloudflare 验证'
+        + '（「确认您是真人」点选等），通过后自动捕获新 cf_clearance 并写回账号池';
+
+      let consecutiveFails = 0;
+      while (Date.now() < f.expiresAt && f.state !== 'cancelled' && f.state !== 'closed') {
+        if (f.proc && (f.proc.exitCode !== null || f.proc.killed)) break; // exit 事件已收尾
+        let cookies = [];
+        try {
+          cookies = claudeCookies(await readCookies(f));
+          consecutiveFails = 0;
+        } catch (e) {
+          // 连续 4 次（约 6 秒）读不到 → 浏览器连接已断开
+          console.warn(`[cfverify] ${f.id} 读取 cookie 失败: ${e.message}`);
+          f.message = `读取浏览器 cookie 失败（${e.message}），重试中…`;
+          if (++consecutiveFails >= 4) {
+            f.state = 'closed';
+            f.message = '浏览器连接已断开，未捕获到新的 cf_clearance；可重新发起';
+            if (active === f) active = null;
+            break;
+          }
+          cookies = [];
+        }
+
+        if (cookies.some(c => c.name === 'cf_clearance' && c.value)) {
+          f.state = 'capturing';
+          f.message = '✅ 检测到新 cf_clearance，正在校验登录态并写回账号池…';
+          const cookie = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+          const ua = f.ua || DEFAULT_UA;
+          // 用「新 cookie + 新 UA」校验：sessionKey 失效会在这里原样报出来
+          const info = await validateLogin({ cookie, ua, base: 'https://claude.ai' });
+          const account = await onCapture({
+            accountId: f.accountId,
+            cookie,
+            ua,
+            org: info.org,
+            name: info.name,
+            plan: info.plan,
+          });
+          f.account = account || { id: f.accountId };
+          f.state = 'done';
+          f.message = '✅ cf_clearance 已更新并写回账号池，该账号已解除 Cloudflare 拦截';
+          console.log(`[cfverify] ${f.id} 账号 ${f.accountId} 新 cf_clearance 已入池 (org=${info.org} plan=${info.plan || '-'})`);
+          break;
+        }
+        await sleep(1500);
+      }
+
+      if (LIVE.has(f.state)) {
+        f.state = 'timeout';
+        f.message = '过CF超时（5 分钟内未捕获到新 cf_clearance），可重新发起';
+      }
+    } catch (e) {
+      if (f.state !== 'cancelled' && f.state !== 'closed') {
+        f.state = 'error';
+        f.message = e.message || String(e);
+        console.warn(`[cfverify] ${f.id} 流程异常: ${f.message}`);
+      }
+    } finally {
+      cleanup(f);
+    }
+  }
+
+  /* —— 批量过CF：顺序弹窗逐个捕获，一次只弹一个浏览器窗口 —— */
+  const BATCH_LIVE = new Set(['starting', 'running']);
+  let batch = null;
+
+  function batchStateOf(b) {
+    return {
+      id: b.id,
+      state: b.state,
+      // 动态拼接当前账号的实时进度（b.current.message 每秒都在变）
+      message: b.current ? `${b.index + 1}/${b.total} · ${b.current.message}` : b.message,
+      startedAt: b.startedAt,
+      batch: {
+        index: b.index,
+        total: b.total,
+        current_account_id: b.current ? b.current.accountId : null,
+        results: b.results,
+      },
+    };
+  }
+
+  function batchLive() {
+    return batch && BATCH_LIVE.has(batch.state) ? batch : null;
+  }
+
+  function makeFlow(accountId, sessionKey) {
+    const f = {
+      id: 'cf' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      accountId,
+      sessionKey: String(sessionKey || '').trim(),
+      state: 'starting',
+      message: '正在启动浏览器…',
+      startedAt: Date.now(),
+      expiresAt: Date.now() + timeoutMs,
+    };
+    flows.set(f.id, f);
+    active = f;
+    return f;
+  }
+
+  async function driveBatch(b) {
+    while (b.queue.length && b.state === 'running') {
+      const item = b.queue.shift();
+      const f = makeFlow(item.id, item.sessionKey);
+      b.current = f;
+      console.log(`[cfverify] 批量 ${b.index + 1}/${b.total}：账号 ${item.id} 开始过CF`);
+      await run(f); // 等这个账号终态（浏览器已关）再弹下一个
+      b.results.push({ id: item.id, ok: f.state === 'done', state: f.state, message: f.message });
+      b.index++;
+      b.current = null;
+      // 用户主动关掉浏览器窗口 = 停止批量（否则关一个会立刻弹下一个，停不下来）
+      if (f.state === 'closed' && b.state === 'running' && b.queue.length) {
+        b.state = 'cancelled';
+        b.message = '检测到浏览器窗口被关闭，批量已停止';
+        console.log(`[cfverify] ${b.message}`);
+      }
+    }
+    const okN = b.results.filter(x => x.ok).length;
+    const cancelled = b.state === 'cancelled';
+    b.message = `批量过CF结束：成功 ${okN}/${b.total}` + (cancelled ? '（中途取消，剩余账号未处理）' : '');
+    b.state = cancelled ? 'cancelled' : 'done';
+    console.log(`[cfverify] ${b.message} (${b.results.map(x => `${x.id}:${x.ok ? 'ok' : x.state}`).join(' ')})`);
+  }
+
+  return {
+    /**
+     * 发起一次「手动过CF」。
+     * @param {string} accountId 账号池 id
+     * @param {string} sessionKey 该账号当前 sessionKey（只种这一个 cookie）
+     * @returns {{ok: true, flowId: string, reused?: boolean} | {ok: false, error: string}}
+     */
+    start(accountId, sessionKey) {
+      const sk = String(sessionKey || '').trim();
+      if (!sk) return { ok: false, error: '该账号没有 sessionKey，无法过CF（请重新登录导入）' };
+      const b = batchLive();
+      if (b) return { ok: false, error: `批量过CF进行中（${b.index + 1}/${b.total}），等它完成` };
+      const cur = activeFlow();
+      if (cur) {
+        if (cur.accountId === accountId) return { ok: true, flowId: cur.id, reused: true };
+        return { ok: false, error: `已有一个过CF流程在进行中（账号 ${cur.accountId}），等它完成后再试` };
+      }
+      const f = makeFlow(accountId, sk);
+      run(f); // 后台跑，不 await
+      return { ok: true, flowId: f.id };
+    },
+
+    /**
+     * 一键批量过CF：把队列里的账号顺序过一遍（每个账号弹一次浏览器，
+     * 终态后自动换下一个）。任何时刻只有一个浏览器窗口。
+     * @param {Array<{id: string, sessionKey: string}>} items 由反代从账号池组装
+     */
+    startBatch(items) {
+      const list = (Array.isArray(items) ? items : []).filter(x => x && x.id && x.sessionKey);
+      if (!list.length) return { ok: false, error: '没有可过CF的账号（缺 sessionKey）' };
+      const cur = batchLive();
+      if (cur) return { ok: true, flowId: cur.id, reused: true };
+      const single = activeFlow();
+      if (single) return { ok: false, error: `单个过CF流程进行中（账号 ${single.accountId}），等它完成后再批量` };
+      const b = {
+        id: 'cfB' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        queue: list.map(x => ({ id: x.id, sessionKey: x.sessionKey })),
+        index: 0,
+        total: list.length,
+        results: [],
+        current: null,
+        state: 'running',
+        message: `批量过CF：共 ${list.length} 个账号，逐个弹出浏览器…`,
+        startedAt: Date.now(),
+      };
+      batch = b;
+      driveBatch(b).catch(e => { b.state = 'error'; b.message = e.message || String(e); });
+      return { ok: true, flowId: b.id };
+    },
+
+    /** 取消批量：当前账号跑完后不再弹下一个（不杀正在进行的浏览器窗口） */
+    cancel(fid) {
+      if (batch && batch.id === fid && BATCH_LIVE.has(batch.state)) {
+        batch.state = 'cancelled';
+        batch.message = '正在取消（当前账号完成后停止）…';
+        return true;
+      }
+      return false;
+    },
+
+    state,
+    activeFlow: () => (active ? stateOf(active) : null),
+  };
 }

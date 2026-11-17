@@ -293,6 +293,7 @@
     <button class="btn" id="btnRefresh">⟳ 刷新</button>
     <button class="btn" id="btnQuotaAll" title="对所有账号主动查一次额度（每个账号消耗 1 条最小消息）">📊 刷新全部额度</button>
     <button class="btn" id="btnKycAll" title="查询所有账号各组织的 KYC 状态（只读接口，不消耗额度，结果缓存 5 分钟）">🪪 查全部 KYC</button>
+    <button class="btn" id="btnCfAll" title="对被 Cloudflare 拦截（cloudflare_challenge）的账号一键批量过验证：逐个弹出 Chrome 窗口（一次一个），手动过挑战后自动收新 cf_clearance + 配套 UA 入池并清冷却">🛡 批量过CF</button>
     <div class="grow"></div>
     <div class="cfg">
       <label>轮询</label>
@@ -709,6 +710,42 @@ async function api(path, opts = {}) {
   return j;
 }
 
+/* 手动过CF：启动后轮询流程状态；状态/进度变化用 toast 提示，终态自动停止并刷新列表 */
+let _cfPoll = null, _cfLast = "", _cfLastMsg = "";
+function pollCfVerify(fid) {
+  if (_cfPoll) clearInterval(_cfPoll);
+  _cfLast = ""; _cfLastMsg = "";
+  const t0 = Date.now();
+  _cfPoll = setInterval(async () => {
+    try {
+      const s = await api("/v1/cfverify/" + encodeURIComponent(fid) + "/state");
+      if (s.state !== _cfLast) {
+        _cfLast = s.state;
+        if (s.state === "waiting") toast("🛡 请在弹出的浏览器窗口里完成 Cloudflare 验证，通过后自动写回账号池");
+        else if (s.state === "capturing") toast("🛡 检测到新 cf_clearance，正在校验并写回…");
+      }
+      // 批量模式：进度消息变化就提示（如「3/22 · 已弹出浏览器…」）
+      if (s.batch && s.message !== _cfLastMsg) { _cfLastMsg = s.message; toast("🛡 " + s.message); }
+      if (s.state === "done") {
+        clearInterval(_cfPoll); _cfPoll = null;
+        toast("✅ " + s.message);
+        load(true);
+        return;
+      }
+      if (s.state !== "starting" && s.state !== "waiting" && s.state !== "capturing" && s.state !== "running") {
+        clearInterval(_cfPoll); _cfPoll = null;
+        toast((s.state === "error" ? "❌ " : "⚠️ ") + s.message, true);
+        load(true);
+      }
+    } catch (ex) {
+      clearInterval(_cfPoll); _cfPoll = null;
+      toast("🛡 " + ex.message, true);
+    }
+    // 兜底：轮询最长 30 分钟（批量 22 个账号），防止状态端异常时永久空转
+    if (_cfPoll && Date.now() - t0 > 30 * 60 * 1000) { clearInterval(_cfPoll); _cfPoll = null; }
+  }, 2000);
+}
+
 /**
  * 显示「输入 API Key」弹窗。
  * 只把它提到最上层（z-index 70），刻意不动下面已打开的弹窗——
@@ -884,6 +921,7 @@ function card(a) {
       <button class="btn sm" data-act="test">🧪 测试</button>
       <button class="btn sm" data-act="edit">✏️ 备注</button>
       <button class="btn sm" data-act="uncd" ${cdSec > 0 ? "" : "disabled"}>⏱ 清冷却</button>
+      ${/cloudflare|challenge/i.test(a.last_error || "") ? `<button class="btn sm" data-act="cfpass" title="弹出一个无痕 Chrome 窗口（随机指纹，登录态只进内存不落盘），完成 Cloudflare 验证后自动把新 cf_clearance + 配套 UA 写回该账号并清冷却（不打码）">🛡 过CF</button>` : ""}
       <button class="btn sm danger" data-act="del">🗑</button>
     </div>
     <div class="foot"><span>创建 ${dt(a.created_at)}</span><span>最近使用 ${dt(a.last_used_at)}</span></div>
@@ -893,9 +931,13 @@ function card(a) {
 function renderCards() {
   const st = S.status; if (!st) return;
   const list = st.accounts.filter(matches);
-  $("#grid").innerHTML = list.length
+  const storm = st.cf_storm;
+  const stormBanner = storm?.active
+    ? `<div style="grid-column:1/-1;background:#fef2f2;border:1px solid #fca5a5;color:#991b1b;border-radius:12px;padding:12px 16px;font-weight:600" title="Cloudflare 把池子里大部分 clearance 作废了，完成类请求会 502 + 冷却；点上方「🛡 批量过CF」重新过墙（几分钟，挑战基本自动过）">🛡 <b>CF 风暴</b>：近 ${storm.window_min} 分钟 ${storm.count} 次 challenge（阈值 ${storm.threshold}）—— 池子大面积被拦，建议点「🛡 批量过CF」</div>`
+    : "";
+  $("#grid").innerHTML = stormBanner + (list.length
     ? list.map(card).join("")
-    : `<div class="empty">${st.total ? "没有匹配的账号" : "还没有账号 —— 点「添加账号」或「导入 Desktop 登录态」"} </div>`;
+    : `<div class="empty">${st.total ? "没有匹配的账号" : "还没有账号 —— 点「添加账号」或「导入 Desktop 登录态」"} </div>`);
   const selN = S.sel.size;
   $("#selInfo").textContent = selN ? "已选 " + selN + " 个" : "";
   $("#btnDelSel").style.display = selN ? "" : "none";
@@ -1138,6 +1180,20 @@ $("#btnKycAll").onclick = async e => {
     renderCards();
   } catch (ex) { toast("🪪 " + ex.message, true); }
   finally { b.disabled = false; b.textContent = "🪪 查全部 KYC"; }
+};
+$("#btnCfAll").onclick = async e => {
+  const b = e.currentTarget;
+  const challenged = (S.status?.accounts || []).filter(x => x.enabled !== false && /cloudflare|challenge/i.test(x.last_error || ""));
+  const ids = challenged.map(x => x.id);
+  if (!ids.length) { toast("没有发现被 CF 拦截（cloudflare_challenge）的账号", true); return; }
+  if (!confirm("对 " + ids.length + " 个被 CF 拦截的账号批量过验证？\n会逐个弹出 Chrome 窗口（一次一个），请在窗口里完成验证；每个账号约 20-60 秒，全程自动衔接。")) return;
+  b.disabled = true; b.textContent = "过CF中…";
+  try {
+    const r = await api("/v1/cfverify/batch", { method: "POST", body: JSON.stringify({ ids }) });
+    toast(r.reused ? "🛡 批量过CF已在进行中，继续跟踪" : "🛡 批量过CF开始：共 " + r.total + " 个账号" + (r.skipped && r.skipped.length ? "（跳过 " + r.skipped.length + " 个）" : ""));
+    pollCfVerify(r.flowId);
+  } catch (ex) { toast("🛡 " + ex.message, true); }
+  finally { b.disabled = false; b.textContent = "🛡 批量过CF"; }
 };
 $("#btnKey").onclick = () => showKey(true);
 $("#btnKeySave").onclick = async () => {
@@ -1457,6 +1513,15 @@ $("#grid").addEventListener("click", async e => {
       { method: "PATCH", body: JSON.stringify({ cooldownUntil: 0 }) });
       S.cd.set(id, 0); a.cooldown_remaining_s = 0; toast("冷却已清零"); renderCards();
     } catch (ex) { toast(ex.message, true); }
+  }
+  if (act === "cfpass") {
+    try {
+      const r = await api("/v1/accounts/" + encodeURIComponent(id) + "/cfverify", { method: "POST", body: "{}" });
+      toast(r.reused
+        ? "🛡 该账号已有一个过CF流程在进行中，继续跟踪其状态"
+        : "🖥 已弹出浏览器窗口，请在窗口里完成 Cloudflare 验证");
+      pollCfVerify(r.flowId);
+    } catch (ex) { toast("🛡 " + ex.message, true); }
   }
   if (act === "del") {
     if (!confirm("删除账号「" + (a.label || a.id) + "」？")) return;

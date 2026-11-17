@@ -59,13 +59,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { Readable, PassThrough } from 'node:stream';
 import { AccountPool, discoverOrg, DEFAULT_UA, sleep } from './accounts.mjs';
-import { createLoginManager, loginPage } from './login-link.mjs';
+import { createLoginManager, createCfVerifyManager, loginPage } from './login-link.mjs';
 import { createConfigStore } from './config.mjs';
 import { probeQuota } from './quota-probe.mjs';
 import { checkKyc } from './kyc.mjs';
 import { createUsageLog, prefixOf } from './usage-log.mjs';
-import { fetch as undiciFetch } from 'undici';
+import { fetch as undiciFetch, FormData as UndiciFormData } from 'undici';
 import { pruneMessageImages, pruneToolOutputs, optimizeContext } from './context-optimizer.mjs';
 import { getSharedDispatcher } from './network-optimizer.mjs';
 
@@ -178,6 +179,51 @@ const LOGIN = createLoginManager({
 });
 
 /**
+ * 「手动过CF」管理器：池中账号 cf_clearance 被 Cloudflare 作废（cloudflare_challenge）
+ * 时，弹真浏览器窗口让用户手动过挑战，自动捕获新 cf_clearance + 配套 UA 回填账号池。
+ * 不打码、0 积分；成功后清冷却/连败（手动停用的账号保持停用）。
+ */
+const CFVERIFY = createCfVerifyManager({
+  webUrl: () => (UP.web_base || 'https://claude.ai') + '/',
+  timeoutMs: +(process.env.CFVERIFY_TIMEOUT_MS || 5 * 60 * 1000),
+  onCapture: ({ accountId, cookie, ua, org }) => {
+    const prev = POOL.get(accountId);
+    if (!prev) return null;
+    const account = POOL.set(accountId, {
+      cookie,
+      ua,
+      ...(org ? { org } : {}),
+      // 过CF成功 = 账号恢复可用：清冷却/连败；手动停用的账号保持停用
+      ...(prev.enabled !== false ? { enabled: true } : {}),
+      // cloudflare_challenge 已修复：清掉旧错误，否则 UI 错误条和「过CF」按钮一直挂着
+      clearError: true,
+    });
+    console.log(`[cfverify] 账号 ${accountId} 已更新 cf_clearance + 配套 UA (label=${account?.label || '-'})`);
+    return account ? { id: account.id, label: account.label, org: account.org } : null;
+  },
+});
+
+/* —— CF challenge 风暴检测：近 5 分钟 challenge 失败次数，供 WebUI 弹横幅提醒批量过CF —— */
+const CF_CHALLENGE_EVENTS = []; // 时间戳滚动窗口
+const CF_STORM_WINDOW_MS = 5 * 60 * 1000;
+const CF_STORM_MIN = +(process.env.CF_STORM_MIN || 10); // 窗口内达到该次数 = 风暴
+function noteChallenge() {
+  const now = Date.now();
+  CF_CHALLENGE_EVENTS.push(now);
+  while (CF_CHALLENGE_EVENTS.length && now - CF_CHALLENGE_EVENTS[0] > CF_STORM_WINDOW_MS) CF_CHALLENGE_EVENTS.shift();
+}
+function cfStormActive() {
+  const now = Date.now();
+  while (CF_CHALLENGE_EVENTS.length && now - CF_CHALLENGE_EVENTS[0] > CF_STORM_WINDOW_MS) CF_CHALLENGE_EVENTS.shift();
+  return {
+    active: CF_CHALLENGE_EVENTS.length >= CF_STORM_MIN,
+    count: CF_CHALLENGE_EVENTS.length,
+    window_min: CF_STORM_WINDOW_MS / 60000,
+    threshold: CF_STORM_MIN,
+  };
+}
+
+/**
  * 把 upstream.json（Desktop 解密产物）同步进账号池。
  * 以 sessionKey 为幂等键，每次刷新都会覆盖 cookie/org。
  */
@@ -239,15 +285,18 @@ function refreshSession(force = false) {
 
 // ---------------------------------------------------------------- 上游请求
 function webHeaders(acct) {
+  // sec-ch-ua 的版本号要和 UA 里的 Chrome 大版本一致 —— 不配套本身就是 CF 的一个风控信号
+  const ua = acct.ua || DEFAULT_UA;
+  const major = (String(ua).match(/Chrome\/(\d+)/) || [])[1] || '140';
   return {
     'cookie': acct.cookie || `sessionKey=${acct.sessionKey}`,
-    'user-agent': acct.ua || DEFAULT_UA,
+    'user-agent': ua,
     'accept': 'application/json, text/event-stream',
     'accept-language': 'zh-CN,zh;q=0.9',
     'content-type': 'application/json',
     'origin': acct.base || 'https://claude.ai',
     'referer': (acct.base || 'https://claude.ai') + '/',
-    'sec-ch-ua': '"Chromium";v="140", "Not?A_Brand";v="24"',
+    'sec-ch-ua': `"Chromium";v="${major}", "Not?A_Brand";v="24"`,
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Windows"',
     'sec-fetch-site': 'same-origin',
@@ -315,12 +364,120 @@ function clientGoneError() {
   });
 }
 
+/* —— TLS 指纹伪装（可选）：curl-impersonate 以真实 Chrome 的 ClientHello + H2 SETTINGS
+ * 指纹发请求。node fetch(undici) 的 TLS 指纹是知名机器人特征，CF 对 completion 端点
+ * 逐请求打分时即使 clearance 有效也会概率性下发 challenge（2026-11-17 实测：批量刚
+ * 刷完的新 clearance 几分钟内又被打标）。二进制缺失或 UPSTREAM_IMPERSONATE=0 时自动
+ * 回退 node fetch；伪装层自身网络失败也回退，绝不放大故障。 */
+const CURL_EXE = path.join(ROOT, 'tools', 'curl-impersonate', 'curl-impersonate.exe');
+const CURL_ENABLED = process.env.UPSTREAM_IMPERSONATE !== '0' && fs.existsSync(CURL_EXE);
+const CURL_PROFILES = ['chrome152', 'chrome151', 'chrome150', 'chrome146', 'chrome145', 'chrome142', 'chrome136', 'chrome133a', 'chrome131', 'chrome124', 'chrome123', 'chrome120', 'chrome119', 'chrome116', 'chrome110', 'chrome107', 'chrome104', 'chrome101', 'chrome100', 'chrome99'];
+/** 按账号 UA 的 Chrome 大版本选最接近（不超过）的指纹档位，缩小 TLS 版本与 UA 的错位 */
+function curlProfileFor(ua) {
+  const major = +(String(ua).match(/Chrome\/(\d+)/) || [])[1] || 0;
+  let best = null, bestN = -1;
+  for (const p of CURL_PROFILES) {
+    const n = +(/chrome(\d+)/.exec(p)?.[1] || 0);
+    if (major >= n && n > bestN) { best = p; bestN = n; }
+  }
+  return best || 'chrome131';
+}
+
+/**
+ * curl-impersonate 传输：接口形状与 fetch Response 对齐（ok/status/headers.get/text()/body）。
+ * -i 让状态行+响应头随 stdout 流式到达，解析完头部后余量直接进管道；
+ * --compressed 让 curl 自动解压（转发层无需透传 content-encoding）；
+ * backpressure 正确传导到 curl（out 写满就暂停读 stdout）；abort 直接杀进程。
+ */
+async function curlFetch(url, { method = 'GET', headers = {}, body = null, signal = null } = {}) {
+  const profile = curlProfileFor(headers['user-agent'] || DEFAULT_UA);
+  const args = ['-i', '-sS', '-N', '--compressed', '--connect-timeout', '15', '--max-time', '600', '--impersonate', profile, '-X', method];
+  for (const [k, v] of Object.entries(headers)) args.push('-H', `${k}: ${v}`);
+  if (body != null && method !== 'GET' && method !== 'HEAD') args.push('--data-binary', '@-');
+  args.push(url);
+  const child = spawn(CURL_EXE, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  if (signal) {
+    if (signal.aborted) { try { child.kill('killed'); } catch { /* noop */ } }
+    else signal.addEventListener('abort', () => { try { child.kill('killed'); } catch { /* noop */ } }, { once: true });
+  }
+  return await new Promise((resolve, reject) => {
+    let buf = Buffer.alloc(0), headersDone = false, settled = false, textPromise = null;
+    let status = 0;
+    const respHeaders = new Map();
+    const out = new PassThrough();
+    const fail = (msg) => { if (!settled) { settled = true; reject(Object.assign(new Error(`upstream network error: ${msg}`), { status: 0, kind: 'transient', retryable: true })); } };
+    child.on('error', e => fail(e.message));
+    child.stdout.on('data', chunk => {
+      if (headersDone) {
+        if (!out.write(chunk)) child.stdout.pause();
+        return;
+      }
+      buf = Buffer.concat([buf, chunk]);
+      const idx = buf.indexOf('\r\n\r\n');
+      if (idx < 0) return;
+      const head = buf.slice(0, idx).toString('utf8');
+      status = +(/^HTTP\/[\d.]+\s+(\d+)/.exec(head)?.[1] || 0);
+      for (const line of head.split(/\r?\n/).slice(1)) {
+        const c = line.indexOf(':');
+        if (c > 0) respHeaders.set(line.slice(0, c).trim().toLowerCase(), line.slice(c + 1).trim());
+      }
+      headersDone = true;
+      const rest = buf.slice(idx + 4);
+      buf = null;
+      if (rest.length && !out.write(rest)) child.stdout.pause();
+      settled = true;
+      resolve({
+        ok: status >= 200 && status < 300,
+        status,
+        headers: { get: n => respHeaders.get(String(n).toLowerCase()) ?? null },
+        text: () => {
+          if (!textPromise) {
+            textPromise = new Promise((res2, rej2) => {
+              const chunks = [];
+              out.on('data', c => chunks.push(c));
+              out.on('end', () => res2(Buffer.concat(chunks).toString('utf8')));
+              out.on('error', rej2);
+            });
+          }
+          return textPromise;
+        },
+        body: Readable.toWeb(out),
+      });
+    });
+    out.on('drain', () => child.stdout.resume());
+    child.stdout.on('end', () => out.end());
+    child.on('close', code => { out.end(); if (!headersDone) fail(`curl exit ${code} (no response headers)`); });
+    if (body != null && method !== 'GET' && method !== 'HEAD') {
+      child.stdin.end(typeof body === 'string' ? body : Buffer.from(body));
+    } else child.stdin.end();
+  });
+}
+
 /**
  * fetch 包装：网络层 reject（fetch failed / ECONNRESET / 超时）没有状态码，
  * 单独归类成 transient，避免被当成 400 类"不可重试"错误直接打挂整个请求。
  * 客户端断连触发的 AbortError 单独上抛（绝不能按 transient 冷却账号）。
+ * 走 curl-impersonate 时伪装层失败自动回退 node fetch，两层都炸才算 transient。
  */
 async function upstreamFetch(url, init = {}) {
+  if (CURL_ENABLED) {
+    try {
+      return await curlFetch(url, init);
+    } catch (e) {
+      if (e?.name === 'AbortError' || init?.signal?.aborted) throw clientGoneError();
+      if (e?.kind !== 'transient') throw e;   // 理论上 curl 层只抛 transient
+      // 伪装层失败：回退原生 fetch 兜底
+      try {
+        const dispatcher = getSharedDispatcher();
+        return await undiciFetch(url, { ...init, dispatcher });
+      } catch (e2) {
+        if (e2?.name === 'AbortError' || init?.signal?.aborted) throw clientGoneError();
+        const inner = e2?.cause ? `: ${e2.cause.code || e2.cause.message || e2.cause}` : '';
+        throw Object.assign(new Error(`upstream network error: ${e2?.message || e2}${inner}`),
+          { status: 0, kind: 'transient', retryable: true });
+      }
+    }
+  }
   try {
     const dispatcher = getSharedDispatcher();
     return await undiciFetch(url, { ...init, dispatcher });
@@ -505,11 +662,21 @@ function collectImages(body) {
 /** 上传单张图，返回 file_uuid；失败按 classify 归类（可重试的上抛交给 failover） */
 async function uploadOne(acct, img, signal) {
   const base = acct.base || 'https://claude.ai';
+  let org = acct.org;
+  if (!org) {
+    try {
+      const d = await discoverOrg(acct.sessionKey, acct.base, acct.ua);
+      org = d.org;
+      acct.org = org;
+    } catch {}
+  }
   const headers = webHeaders(acct);
   delete headers['content-type'];        // FormData 必须自带 multipart boundary
-  const form = new FormData();
+  headers['accept'] = '*/*';
+  headers['referer'] = (acct.base || 'https://claude.ai') + '/new';
+  const form = new UndiciFormData();
   form.append('file', new Blob([img.bytes], { type: img.mime }), img.name);
-  const r = await upstreamFetch(`${base}/api/${acct.org}/upload`, {
+  const r = await upstreamFetch(`${base}/api/${org}/upload`, {
     method: 'POST', headers, body: form, signal,
   });
   if (!r.ok) {
@@ -2033,6 +2200,7 @@ async function runCompletion(body, model, signal, apiKey, req) {
       }
       lastErr = e;
       const kind = e.kind || 'error';
+      if (kind === 'challenge') noteChallenge(); // 风暴检测：5 分钟滚动窗口计数
       // rate_limit 且上游给了 resetsAt -> 精确收紧到 429 耗尽池（到点自动回有效池）
       const cool = POOL.fail(acct, kind, e.message, { resetsAt: e.resetsAt, reason: e.reason });
       console.warn(`[pool] ${acct.label} ${kind} -> cooldown ${Math.round(cool / 1000)}s: ${String(e.message).slice(0, 160)}`);
@@ -2123,6 +2291,104 @@ async function loadLocalPlugins() {
   }
 }
 await loadLocalPlugins();
+
+/**
+ * HTML 实体解码工具
+ */
+function decodeHtmlEntities(str) {
+  if (!str) return '';
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)));
+}
+
+/**
+ * 免费 DuckDuckGo 网页搜索
+ * 兼容 DeepSeek Search API 的数据格式返回
+ */
+async function searchDuckDuckGo(query, count = 10) {
+  if (!query || typeof query !== 'string' || !query.trim()) {
+    return [];
+  }
+  const cleanQuery = query.trim();
+  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(cleanQuery)}`;
+  const res = await undiciFetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    },
+  });
+
+  if (!res.ok) {
+    throw new Error(`DuckDuckGo 搜索请求失败: HTTP ${res.status}`);
+  }
+
+  const html = await res.text();
+  const results = [];
+  const parts = html.split(/class="[^"]*result\s+results_links[^"]*"/i);
+
+  for (let i = 1; i < parts.length && results.length < count; i++) {
+    const chunk = parts[i];
+    const titleMatch = chunk.match(/<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+    const snippetMatch = chunk.match(/<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/i);
+
+    if (titleMatch) {
+      let rawUrl = titleMatch[1];
+      if (rawUrl.includes('uddg=')) {
+        try {
+          const u = new URL(rawUrl.startsWith('//') ? `https:${rawUrl}` : rawUrl);
+          const decoded = u.searchParams.get('uddg');
+          if (decoded) rawUrl = decoded;
+        } catch {}
+      }
+
+      const title = decodeHtmlEntities(titleMatch[2].replace(/<[^>]+>/g, '').trim());
+      const snippet = snippetMatch ? decodeHtmlEntities(snippetMatch[1].replace(/<[^>]+>/g, '').trim()) : '';
+
+      if (rawUrl && title) {
+        results.push({
+          url: rawUrl,
+          title,
+          snippet: snippet || title,
+          summary: snippet || title,
+          date: null,
+        });
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
+ * 免费网页抓取
+ */
+async function fetchWebContent(targetUrl) {
+  if (!targetUrl || typeof targetUrl !== 'string') throw new Error('url 参数缺失');
+  const res = await undiciFetch(targetUrl, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,text/plain,*/*',
+    },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const html = await res.text();
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return text.slice(0, 50000);
+}
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -2239,6 +2505,70 @@ const server = http.createServer(async (req, res) => {
     const r = await LOGIN.goto(id, body?.url);
     return json(res, r.ok ? 200 : 400, r);
   }
+
+  // —— 手动过 Cloudflare：弹真浏览器窗口（只种 sessionKey），用户手动过挑战后
+  //    自动捕获新 cf_clearance + 配套 UA 写回账号池。不打码、0 积分。
+  //    会弹出本机浏览器窗口，和 /login/ 一样仅限本机回环操作。
+  if (/^\/v1\/accounts\/[^/]+\/cfverify$/.test(url.pathname) && req.method === 'POST') {
+    if (!isLoopbackReq(req)) {
+      return json(res, 403, {
+        error: { message: '过CF流程会弹出本机浏览器窗口，只能在运行反代的机器上操作（需本机回环访问）', type: 'permission_error' },
+      });
+    }
+    const id = url.pathname.split('/')[3];
+    const acct = POOL.get(id);
+    if (!acct) return json(res, 404, { error: { message: 'account not found', type: 'invalid_request_error' } });
+    const r = CFVERIFY.start(id, acct.sessionKey);
+    if (!r.ok) return json(res, 409, { error: { message: r.error, type: 'invalid_request_error' } });
+    console.log(`[cfverify] 账号 ${id} 发起手动过CF (flow=${r.flowId}${r.reused ? ' 复用进行中的流程' : ''})`);
+    return json(res, 200, { ok: true, flowId: r.flowId, reused: !!r.reused });
+  }
+  if (/^\/v1\/cfverify\/[^/]+\/state$/.test(url.pathname) && req.method === 'GET') {
+    if (!isLoopbackReq(req)) {
+      return json(res, 403, {
+        error: { message: '过CF流程只能在运行反代的机器上查看（需本机回环访问）', type: 'permission_error' },
+      });
+    }
+    const fid = url.pathname.split('/')[3];
+    const s = CFVERIFY.state(fid);
+    return json(res, s ? 200 : 404, s || { error: { message: '过CF流程不存在或已过期', type: 'invalid_request_error' } });
+  }
+
+  // —— 一键批量过CF：客户端传被拦截账号 id 列表，服务端顺序弹窗逐个处理 ——
+  if (url.pathname === '/v1/cfverify/batch' && req.method === 'POST') {
+    if (!isLoopbackReq(req)) {
+      return json(res, 403, {
+        error: { message: '批量过CF会弹出本机浏览器窗口，只能在运行反代的机器上操作（需本机回环访问）', type: 'permission_error' },
+      });
+    }
+    let body;
+    try { body = await readBody(req); } catch { body = {}; }
+    const ids = Array.isArray(body?.ids) ? body.ids.filter(x => typeof x === 'string' && x) : [];
+    if (!ids.length) {
+      return json(res, 400, { error: { message: 'ids 数组为空', type: 'invalid_request_error' } });
+    }
+    const items = [];
+    const skipped = [];
+    for (const id of ids) {
+      const acct = POOL.get(id);
+      if (acct && acct.sessionKey) items.push({ id, sessionKey: acct.sessionKey });
+      else skipped.push(id);
+    }
+    const r = CFVERIFY.startBatch(items);
+    if (!r.ok) return json(res, 409, { error: { message: r.error, type: 'invalid_request_error' } });
+    console.log(`[cfverify] 批量过CF发起：${items.length} 个账号${skipped.length ? `（跳过 ${skipped.length} 个无效 id）` : ''}`);
+    return json(res, 200, { ok: true, flowId: r.flowId, total: items.length, skipped, reused: !!r.reused });
+  }
+  if (/^\/v1\/cfverify\/[^/]+\/cancel$/.test(url.pathname) && req.method === 'POST') {
+    if (!isLoopbackReq(req)) {
+      return json(res, 403, {
+        error: { message: '过CF流程只能在运行反代的机器上操作（需本机回环访问）', type: 'permission_error' },
+      });
+    }
+    const fid = url.pathname.split('/')[3];
+    const ok = CFVERIFY.cancel(fid);
+    return json(res, ok ? 200 : 404, { ok, message: ok ? '已请求取消，当前账号完成后停止' : '流程不存在或已结束' });
+  }
   if (req.method === 'GET' && /^\/login\/[^/]+$/.test(url.pathname)) {
     const id = url.pathname.slice('/login/'.length);
     if (!LOGIN.get(id)) {
@@ -2255,8 +2585,15 @@ const server = http.createServer(async (req, res) => {
 
   const auth = authenticate(req);
   if (auth.error) {
-    const e = auth.error;
-    return json(res, e.status, { error: { message: e.message, type: e.type, hint: e.hint } });
+    // 允许本机回环免 key 调用搜索与抓取
+    const isToolPath = url.pathname === '/v1/tools/search' || url.pathname === '/tools/search'
+      || url.pathname === '/v1/search' || url.pathname === '/search'
+      || url.pathname === '/v1/tools/fetch' || url.pathname === '/tools/fetch'
+      || url.pathname === '/v1/fetch' || url.pathname === '/fetch';
+    if (!isToolPath || !isLoopbackReq(req)) {
+      const e = auth.error;
+      return json(res, e.status, { error: { message: e.message, type: e.type, hint: e.hint } });
+    }
   }
   req.apiKey = auth.key;
   // 计入该 key 的请求数与 RPM 窗口（额度检查在 authenticate 里已经做过）
@@ -2314,6 +2651,65 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { object: 'list', data: modelList() });
     }
 
+    // ---------------------------------------------------------- 网页搜索与获取 (兼容 DeepSeek Search API & DuckDuckGo)
+    const isSearchPath = url.pathname === '/v1/tools/search' || url.pathname === '/tools/search'
+      || url.pathname === '/v1/search' || url.pathname === '/search';
+    if (isSearchPath) {
+      try {
+        let query = '';
+        let count = 10;
+        if (req.method === 'POST') {
+          const b = await readBody(req);
+          query = b.query || b.q || b.prompt || b.ori_question || '';
+          count = +(b.count || b.max_results || b.maxResults || 10);
+        } else if (req.method === 'GET') {
+          query = url.searchParams.get('query') || url.searchParams.get('q') || '';
+          count = +(url.searchParams.get('count') || 10);
+        } else {
+          return json(res, 405, { error: { message: 'Method Not Allowed', type: 'invalid_request_error' } });
+        }
+
+        if (!query) {
+          return json(res, 200, { results: [] });
+        }
+
+        console.log(`[web-search] DuckDuckGo 搜索: "${query}" (期望结果数: ${count})`);
+        const results = await searchDuckDuckGo(query, Math.min(Math.max(1, count), 30));
+        console.log(`[web-search] 返回 ${results.length} 条搜索结果`);
+        return json(res, 200, { results });
+      } catch (e) {
+        console.error('[web-search] 搜索异常:', e.message);
+        return json(res, 500, { error: { message: `搜索失败: ${e.message}`, type: 'search_error' } });
+      }
+    }
+
+    const isFetchPath = url.pathname === '/v1/tools/fetch' || url.pathname === '/tools/fetch'
+      || url.pathname === '/v1/fetch' || url.pathname === '/fetch';
+    if (isFetchPath) {
+      try {
+        let targetUrl = '';
+        if (req.method === 'POST') {
+          const b = await readBody(req);
+          targetUrl = b.url || '';
+        } else if (req.method === 'GET') {
+          targetUrl = url.searchParams.get('url') || '';
+        } else {
+          return json(res, 405, { error: { message: 'Method Not Allowed', type: 'invalid_request_error' } });
+        }
+
+        if (!targetUrl) {
+          return json(res, 400, { error: { message: 'url is required', type: 'invalid_request_error' } });
+        }
+
+        console.log(`[web-fetch] 网页抓取: ${targetUrl}`);
+        const content = await fetchWebContent(targetUrl);
+        return json(res, 200, { content });
+      } catch (e) {
+        console.error('[web-fetch] 抓取异常:', e.message);
+        return json(res, 500, { error: { message: `抓取失败: ${e.message}`, type: 'fetch_error' } });
+      }
+    }
+
     // ---------------------------------------------------------- 账号管理
     if (url.pathname === '/v1/accounts' && req.method === 'GET') {
       const st = POOL.status();
@@ -2323,6 +2719,7 @@ const server = http.createServer(async (req, res) => {
       st.maomail_token = setts.maomailToken || setts.maomail_token || '';
       st.maomail_base_url = setts.maomailBaseUrl || setts.maomail_base_url || 'https://zjkdongao.cn';
       st.server = KEYS.serverConfig();
+      st.cf_storm = cfStormActive(); // CF 风暴状态，WebUI 顶部横幅用
       // 用请求级用量日志校准「已用 token」：
       // 账号池的 tokensInEst 只在请求成功时累加——失败的 429 请求同样消耗了输入，
       // 重启也会丢，所以它只能算运行时参考值。日志是权威源，且 input_tokens 用的是

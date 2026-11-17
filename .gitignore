@@ -37,3 +37,7 @@ tmp/
 Thumbs.db
 .vscode/
 .idea/
+
+tools/curl-impersonate/
+
+NUL

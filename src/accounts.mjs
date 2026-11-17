@@ -355,6 +355,9 @@ export class AccountPool {
       cur.stats.ok++;
       cur.failStreak = 0;
       cur.streaks = {};          // 成功一次：所有类别的连续失败计数清零
+      // 成功一次：最近错误一并清零——成功说明账号当前可用，旧错误（如
+      // cloudflare_challenge）继续挂着会让 UI 错误条和「过CF」按钮永不消失
+      cur.stats.lastError = '';
       // 注意：账号还挂在「429 耗尽池」时，不能因为别的在途请求成功就把冷却清掉 ——
       // 配额窗口没过之前它还是用不了。
       if (cur.exhaustedUntil > Date.now()) {
@@ -554,6 +557,7 @@ export class AccountPool {
       a.stats.lastError = '';
     }
     if (patch.cookie !== undefined) a.cookie = String(patch.cookie || '');
+    if (patch.clearError && a.stats) a.stats.lastError = ''; // 过CF成功等：错误已修复，主动清掉
     if (patch.base) a.base = patch.base;
     if (patch.ua) a.ua = patch.ua;
     if (typeof patch.cooldownUntil === 'number') a.cooldownUntil = patch.cooldownUntil;
