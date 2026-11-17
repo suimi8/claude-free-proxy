@@ -18,6 +18,10 @@ import path from 'node:path';
 import net from 'node:net';
 import { spawn, execSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(HERE, '..');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
@@ -1830,19 +1834,14 @@ export async function openClaudeWebBrowser({ sessionKey, org = '', cookie = '', 
     'about:blank',
   ];
 
-  const env = { ...process.env };
-  let proc;
-  if (process.platform === 'win32') {
-    // Windows 下通过 cmd.exe /c start 拉起独立交互窗口，确保附着在用户交互桌面 (Winsta0\Default)
-    proc = spawn('cmd.exe', ['/c', 'start', '', exe, ...args], {
-      stdio: 'ignore',
-      windowsHide: true,
-      env,
-    });
-  } else {
-    proc = spawn(exe, args, { stdio: 'ignore', windowsHide: false, env, detached: true });
-    proc.unref();
+  const yesExt = path.join(ROOT, 'tools', 'extensions', 'yescaptcha');
+  if (fs.existsSync(path.join(yesExt, 'manifest.json'))) {
+    args.push(`--load-extension=${yesExt}`);
   }
+
+  const env = { ...process.env };
+  const proc = spawn(exe, args, { stdio: 'ignore', windowsHide: false, env, detached: true });
+  proc.unref();
 
   // 等待 CDP 调试端口就绪
   const ver = await waitCdp(port, 25);

@@ -5,6 +5,10 @@
 [![Node.js](https://img.shields.io/badge/Node.js-22+-green.svg)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20Compatible-blue.svg)](https://platform.openai.com/docs/api-reference)
+[![Shop](https://img.shields.io/badge/%F0%9F%9B%92%20%E6%88%90%E5%93%81%E8%B4%A6%E5%8F%B7%E8%B4%AD%E4%B9%B0-%E7%A2%8E%E7%B1%B3%E7%9A%84%E5%B0%8F%E5%BA%97-orange.svg)](https://wzyp.cn/shop/8WRBPFIB)
+
+> 🛒 **成品账号购买**：如果你需要现成、稳定、开箱即用的 Claude 官方账号或独享账号，欢迎前往小店选购：
+> 👉 **[碎米的小店的小店 - 链动小铺](https://wzyp.cn/shop/8WRBPFIB)**（购买后获取 sessionKey 支持一键批量导入反代池，免去繁琐注册）
 
 ---
 
@@ -155,8 +159,13 @@ python tools/desktop_session.py
 3. 在弹出的窗口中正常登录你的 Claude 账号。
 4. 登录完成后，后台自动捕获 `sessionKey`、`cf_clearance` 与配套 UA 并加入账号池。
 
-#### 模式三：手动添加 sessionKey
-在控制台的账号管理中，直接填入账号备注与 `sessionKey=sk-ant-sid02-...`。
+#### 模式三：批量导入 sessionKey 与购买成品账号
+- **批量导入**：在控制台点击 **「📥 批量导入」**，支持多格式批量粘贴导入（TXT 每行一个 / 邮箱----密码----sessionKey / JSON 数组），后台自动并发发现组织 Org 与备注入池。
+- **购买成品账号**：如果你没有现成的 Claude 账号或不想花费时间自建注册，可直接前往小店购买高质量稳定成品账号：
+  👉 **[碎米的小店的小店 - 链动小铺](https://wzyp.cn/shop/8WRBPFIB)**（购买后获取 sessionKey 直接批量粘贴导入，秒级开启并发服务）
+
+#### 模式四：手动单账号添加
+在控制台的账号管理中，点击「✎ 手动输入」，直接填入账号备注与 `sessionKey=sk-ant-sid02-...`。
 
 ---
 

@@ -89,7 +89,7 @@
   .selectbar label { display: flex; gap: 8px; align-items: center; color: var(--sub); font-size: 13px; }
 
   /* ---------- 账号卡片 ---------- */
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; }
   .acc { background: var(--card); border: 1px solid var(--line); border-radius: var(--r);
     box-shadow: var(--shadow); padding: 14px 16px 12px; display: flex; flex-direction: column; gap: 9px;
     transition: box-shadow .15s, border-color .15s; }
@@ -135,6 +135,37 @@
   .chip.k-neutral { background: #eef2f7; color: var(--sub); }
   .errline { font-size: 11.5px; color: var(--red); white-space: nowrap; overflow: hidden;
     text-overflow: ellipsis; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; }
+  .actions-grid { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; width: 100%; }
+  .actions-row { display: flex; align-items: center; gap: 5px; width: 100%; }
+  .actions-row .btn.sm {
+    flex: 1 1 0;
+    min-width: 0;
+    white-space: nowrap;
+    word-break: keep-all;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding: 0 4px;
+    font-size: 11px;
+    height: 27px;
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    line-height: 1;
+    box-sizing: border-box;
+  }
+  .actions-row .btn.sm.icon-del {
+    flex: 0 0 28px;
+    width: 28px;
+    padding: 0;
+  }
+  .actions-row .btn.sm.cf-btn {
+    border-color: #f59e0b;
+    color: #b45309;
+    background: #fffbeb;
+  }
   .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; align-items: center; }
   .actions .btn.sm { flex: 0 0 auto; white-space: nowrap; padding: 4px 7px; font-size: 11.5px; line-height: 1.4; height: 26px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; }
   .actions .btn.danger { margin-left: auto; }
@@ -528,6 +559,32 @@
         </div>
       </div>
 
+      <!-- 肥猫猫临时邮箱配置 -->
+      <div class="scard">
+        <h3>🐱 肥猫猫临时邮箱 · 一键自动登录配置</h3>
+        <div class="sdesc">配置肥猫猫临时邮箱服务（zjkdongao.cn）的 API 鉴权 Token。配置后支持在添加账号时一键全自动接收验证邮件/Magic Link 并完成登录。</div>
+
+        <div class="sitem">
+          <label>肥猫猫服务接口地址 (Base URL)</label>
+          <input type="text" id="cfgMaoMailBaseUrl" placeholder="https://zjkdongao.cn">
+          <div class="tip">默认端点 <code>https://zjkdongao.cn</code>。</div>
+        </div>
+
+        <div class="sitem">
+          <label>Authorization Token (JWT Bearer)</label>
+          <input type="password" id="cfgMaoMailToken" placeholder="请在此输入肥猫猫 Token，输入后点击下方保存" autocomplete="off">
+          <div class="tip">肥猫猫登录后的 Bearer Token（网页版登录后在请求头或 localStorage 中获取）。支持带或不带 "Bearer " 前缀。</div>
+        </div>
+
+        <div class="sitem">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <button class="btn sm primary" id="btnSaveMaoMailOnly" type="button" style="background:#6366f1;border-color:#6366f1;color:#fff">💾 保存肥猫猫配置</button>
+            <button class="btn sm" id="btnTestMaoMail" type="button">🔍 测试邮箱连接与邮箱列表</button>
+            <span id="maomailStatusTip" style="font-size:12px;color:var(--sub)"></span>
+          </div>
+        </div>
+      </div>
+
       <!-- 服务状态与存储说明 -->
       <div class="scard">
         <h3>ℹ️ 反代服务信息与即时生效</h3>
@@ -606,33 +663,126 @@
 <div class="mask" id="maskLogin">
   <div class="modal" style="width:min(760px,95vw);max-height:92vh;overflow-y:auto">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-      <h3 style="margin:0">🔗 浏览器链接登录 · 自动捕获账号</h3>
+      <h3 style="margin:0">🐱 Claude 自动登录 · 凭据捕获</h3>
+      <div style="display:flex;gap:6px">
+        <button class="btn sm on" id="tabLoginBatch" type="button" style="font-weight:600">🚀 多邮箱并发批量登录</button>
+        <button class="btn sm" id="tabLoginSingle" type="button">⚡ 单邮箱登录</button>
+      </div>
     </div>
-    <p class="hint" style="margin-bottom:12px">启动独立隔离浏览器窗口（Edge / Chrome），在窗口中登录 Claude 账号后，反代将通过 CDP 自动捕获 <code>sessionKey</code>、<code>cf_clearance</code> 与组织信息并自动加入账号池。</p>
+    <p class="hint" style="margin-bottom:10px">自动驱动 Edge 独立浏览器打开 Claude、自动填入邮箱、从肥猫猫 API 实时接收 Magic Link 并自动跳转登录写入账号池。</p>
 
-    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:12px 14px;margin-bottom:14px">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-        <input id="inputCustomEmail" placeholder="（可选）预填登录邮箱，自动在 Claude 页面输入" style="flex:1;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:12.5px;background:#fff">
-        <button class="btn primary" id="btnLoginStart" type="button" style="background:linear-gradient(135deg,#6366f1,#8b5cf6);border-color:#6366f1;color:#fff;white-space:nowrap;padding:8px 16px;font-weight:600">
-          🚀 打开独立登录窗口
-        </button>
+    <!-- 批量并发登录面板 -->
+    <div id="boxLoginBatch">
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:12px 14px;margin-bottom:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+          <div style="display:flex;align-items:center;gap:6px">
+            <span style="font-size:12.5px;font-weight:700;color:#334155">肥猫猫邮箱选择</span>
+            <span id="batchMailCount" style="font-size:12px;color:var(--sub)">(加载中…)</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <button class="btn sm" id="btnBatchSelectUnadded" type="button" style="padding:2px 8px;font-size:11.5px;background:#e0f2fe;color:#0369a1;border-color:#bae6fd">✨ 一键勾选未入池</button>
+            <button class="btn sm" id="btnBatchSelectAll" type="button" style="padding:2px 8px;font-size:11.5px">全选</button>
+            <button class="btn sm" id="btnBatchSelectNone" type="button" style="padding:2px 8px;font-size:11.5px">清空</button>
+            <button class="btn sm" id="btnBatchRefresh" type="button" style="padding:2px 8px;font-size:11.5px">↺ 刷新</button>
+          </div>
+        </div>
+
+        <!-- 邮箱多选滚动容器 -->
+        <div id="batchMailList" style="max-height:160px;overflow-y:auto;background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px;font-size:12px;display:grid;grid-template-columns:repeat(auto-fill, minmax(215px, 1fr));gap:6px">
+          <div style="color:var(--sub);padding:8px">正在加载邮箱…</div>
+        </div>
+
+        <!-- 自定义追加邮箱折叠 -->
+        <details style="margin-top:8px;font-size:12px">
+          <summary style="cursor:pointer;color:var(--blue);font-weight:600">+ 手动追加其它邮箱（每行一个）</summary>
+          <textarea id="batchCustomArea" placeholder="每行填入一个邮箱，如：&#10;user1@example.com&#10;user2@example.com" style="width:100%;height:60px;margin-top:6px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;font-size:12px;font-family:monospace"></textarea>
+        </details>
       </div>
-      <div style="font-size:11.5px;color:var(--sub)">
-        独立环境：每次登录使用全新隔离 Profile，不影响日常浏览器数据；登录完成后窗口自动关闭并入池。
+
+      <!-- 控制参数与操作栏 -->
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <label style="font-size:12.5px;font-weight:600;color:#334155">并发独立窗口数：</label>
+          <select id="batchConcurrency" style="padding:4px 8px;border:1px solid var(--line);border-radius:6px;font-size:12px;background:#fff">
+            <option value="1">1（单线程排队）</option>
+            <option value="2" selected>2（推荐，平稳高效）</option>
+            <option value="3">3（快速，配置较高）</option>
+            <option value="4">4（极速）</option>
+          </select>
+          <span style="font-size:11.5px;color:var(--sub)">每个窗口独立隔离 Profile</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button class="btn danger" id="btnBatchCancel" type="button" style="display:none">⏹ 终止批量任务</button>
+          <button class="btn primary" id="btnBatchStart" type="button" style="background:linear-gradient(135deg,#6366f1,#8b5cf6);border-color:#6366f1;color:#fff;font-weight:600;padding:6px 18px">
+            🚀 开始并发批量登录 (<span id="batchCountBadge">0</span>)
+          </button>
+        </div>
+      </div>
+
+      <!-- 实时任务监控看板 -->
+      <div id="batchProgressCard" style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#f8fafc">
+        <div style="display:flex;align-items:center;justify-content:space-between;font-size:12.5px;margin-bottom:6px">
+          <div style="font-weight:700;color:#1e293b" id="batchProgressSummary">批量任务就绪</div>
+          <div style="font-size:12px;color:var(--sub)" id="batchProgressStat">未开始</div>
+        </div>
+        <div style="width:100%;height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden;margin-bottom:8px">
+          <div id="batchProgressBar" style="width:0%;height:100%;background:linear-gradient(90deg,#6366f1,#10b981);transition:width .3s"></div>
+        </div>
+        <div style="max-height:170px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;background:#fff">
+          <table style="width:100%;border-collapse:collapse;font-size:11.5px;text-align:left">
+            <thead style="background:#f1f5f9;position:sticky;top:0;color:#475569">
+              <tr>
+                <th style="padding:5px 8px;width:36px">#</th>
+                <th style="padding:5px 8px;width:170px">邮箱</th>
+                <th style="padding:5px 8px;width:80px">状态</th>
+                <th style="padding:5px 8px">实时进展与凭据</th>
+              </tr>
+            </thead>
+            <tbody id="batchTableBody">
+              <tr><td colspan="4" style="text-align:center;padding:14px;color:var(--sub)">暂无运行中的批量任务，请勾选邮箱后点击上方「开始并发批量登录」</td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
 
-    <div class="loginbox" id="loginBox">
-      <div class="loginst" id="loginSt"><span id="loginDot" class="spin" style="display:none"></span>
-        <span id="loginMsg">就绪。点击上方「打开独立登录窗口」开始。</span></div>
-      <div class="loginlink" id="loginLinkRow" style="display:none">
-        <input id="loginLink" readonly><button class="btn sm" id="btnLoginCopy">复制</button>
-        <button class="btn sm" id="btnLoginOpen">新标签打开</button>
+    <!-- 单邮箱登录面板 -->
+    <div id="boxLoginSingle" style="display:none">
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:12px 14px;margin-bottom:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <label style="font-size:12.5px;font-weight:700;color:#334155;display:flex;align-items:center;gap:6px">
+            ⚡ 肥猫猫临时邮箱一键自动登录
+          </label>
+          <button class="btn sm" id="btnRefreshMaoMail" type="button" style="padding:2px 8px;font-size:11.5px">↺ 刷新邮箱</button>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <select id="selMaoMail" style="flex:1;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:12.5px;background:#fff">
+            <option value="">正在加载邮箱列表...</option>
+          </select>
+          <button class="btn primary" id="btnAutoLogin" type="button" style="background:linear-gradient(135deg,#6366f1,#8b5cf6);border-color:#6366f1;color:#fff;white-space:nowrap;padding:8px 16px;font-weight:600">
+            ⚡ 一键自动登录
+          </button>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <input id="inputCustomEmail" placeholder="或手动输入任意邮箱（若在肥猫猫中亦可自动收信）" style="flex:1;padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-size:12px;background:#fff">
+        </div>
+        <div style="font-size:11.5px;color:var(--sub);margin-top:6px">
+          流程：Edge 后台自动填邮箱 ➔ 自动获取肥猫猫 Magic Link / 验证码 ➔ 自动跳转登录 ➔ 写入账号池。
+        </div>
       </div>
-    </div>
-    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">
-      <button class="btn danger" id="btnLoginCancel" style="display:none">取消本次登录</button>
-    </div>
+
+      <div class="loginbox" id="loginBox">
+        <div class="loginst" id="loginSt"><span id="loginDot" class="spin" style="display:none"></span>
+          <span id="loginMsg">尚未开始。选择上方邮箱点「一键自动登录」，或点「手动打开浏览器」。</span></div>
+        <div class="loginlink" id="loginLinkRow" style="display:none">
+          <input id="loginLink" readonly><button class="btn sm" id="btnLoginCopy">复制</button>
+          <button class="btn sm" id="btnLoginOpen">新标签打开</button>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">
+        <button class="btn danger" id="btnLoginCancel" style="display:none">取消登录</button>
+        <button class="btn" id="btnLoginStart" title="不自动填邮箱，仅打开浏览器手工操作">手动打开浏览器</button>
+      </div>
     </div>
 
     <div class="mrow" style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
@@ -1068,8 +1218,8 @@ function card(a) {
       <span class="pct">${p5 == null ? "—" : "已用 " + p5 + "%"}</span>
       <span class="rem">${a.exhausted ? "🚫 429 耗尽" : (rem != null ? "剩 " + Math.round(rem * 100) + "%" : (a.quota_detail?.probed ? "待上报" : "未上报 · 点📊查额度"))}</span>
     </div>
-    <div class="qline" title="7d 本周窗口">
-      <span class="qlabel">📅 本周</span>
+    <div class="qline" title="官方 7 天滚动周额度窗口（7d Weekly Quota，Anthropic 官方无月额度机制）">
+      <span class="qlabel">📅 本周(7天)</span>
       <span class="bar ${barCls(p7)}"><span style="width:${p7 ?? 0}%"></span></span>
       <span class="pct">${p7 == null ? "—" : "已用 " + p7 + "%"}</span>
       <span class="rem">${a.exhausted && a.exhausted_until ? fmtReset(a.exhausted_until) : (a.quota_7d ? fmtReset(a.quota_7d.resets_at) : (a.quota_5h ? fmtReset(a.quota_5h.resets_at) : ""))}</span>
@@ -1093,17 +1243,21 @@ function card(a) {
       ${a.enabled ? "" : '<span class="chip err">已停用</span>'}
     </div>
     ${a.last_error ? `<div class="errline" title="${esc(a.last_error)}">✖ ${esc(a.last_error)}</div>` : ""}
-    <div class="actions">
-      <button class="btn sm" data-act="quota" title="主动查额度：发 1 条最小消息取回上游利用率（会消耗一次极小的消息）">📊 查额度</button>
-      <button class="btn sm" data-act="kyc" title="查询该账号各组织的 KYC 状态（只读接口，不消耗额度）">🪪 KYC</button>
-      <button class="btn sm" data-act="test">🧪 测试</button>
-      <button class="btn sm" data-act="creds" title="查询该账号的完整 sessionKey 与 org，一键复制（仅限本机访问）">🔑 密钥</button>
-      <button class="btn sm" data-act="edit">✏️ 备注</button>
-      <button class="btn sm" data-act="desktop" title="一键将该账号写入官方 Claude 桌面端并启动">🖥️ 桌面</button>
-      <button class="btn sm" data-act="web" title="一键在官方 Chrome 浏览器中登录并打开，或复制一键登录脚本">🌐 网页</button>
-      <button class="btn sm" data-act="uncd" ${cdSec > 0 ? "" : "disabled"}>⏱ 清冷却</button>
-      ${/cloudflare|challenge/i.test(a.last_error || "") ? `<button class="btn sm" data-act="cfpass" title="弹出一个无痕 Chrome 窗口（随机指纹，登录态只进内存不落盘），完成 Cloudflare 验证后自动把新 cf_clearance + 配套 UA 写回该账号并清冷却（不打码）">🛡 过CF</button>` : ""}
-      <button class="btn sm danger" data-act="del">🗑</button>
+    <div class="actions-grid">
+      <div class="actions-row">
+        <button class="btn sm" data-act="quota" title="主动查额度：发 1 条极小消息取回 5h 会话与 7d 周额度利用率">📊 查额度</button>
+        <button class="btn sm" data-act="kyc" title="查询各组织 KYC 状态（只读接口，不消耗额度）">🪪 KYC</button>
+        <button class="btn sm" data-act="test" title="校验登录态连通性">🧪 测试</button>
+        <button class="btn sm" data-act="creds" title="查看并复制完整 sessionKey 与 org">🔑 密钥</button>
+        <button class="btn sm" data-act="edit" title="修改账号备注">✏️ 备注</button>
+      </div>
+      <div class="actions-row">
+        <button class="btn sm" data-act="desktop" title="一键将该账号写入官方 Claude 桌面端并启动">🖥️ 桌面</button>
+        <button class="btn sm" data-act="web" title="一键在官方 Chrome 独立浏览器中打开官方网页端并登录">🌐 网页</button>
+        <button class="btn sm" data-act="uncd" ${cdSec > 0 ? "" : "disabled"} title="清除冷却状态与连续失败计数">⏱ 清冷却</button>
+        ${/cloudflare|challenge/i.test(a.last_error || "") ? `<button class="btn sm cf-btn" data-act="cfpass" title="手动过 Cloudflare 验证并自动保存新 cf_clearance">🛡 过CF</button>` : ""}
+        <button class="btn sm danger icon-del" data-act="del" title="删除账号">🗑</button>
+      </div>
     </div>
     <div class="foot"><span>创建 ${dt(a.created_at)}</span><span>最近使用 ${dt(a.last_used_at)}</span></div>
   </div>`;
@@ -1141,6 +1295,14 @@ function renderSettings() {
   if (document.activeElement !== $("#cfgFullPruneKeep")) $("#cfgFullPruneKeep").value = st.prune_keep_recent_tools ?? 4;
   if (document.activeElement !== $("#cfgFullEffort")) $("#cfgFullEffort").value = st.default_effort || "max";
   if (document.activeElement !== $("#cfgFullPrice")) $("#cfgFullPrice").value = st.price_per_million_tokens || 0;
+  const savedToken = st.maomail_token || st.maomailToken || "";
+  if ($("#cfgMaoMailToken") && document.activeElement !== $("#cfgMaoMailToken")) {
+    if (savedToken) $("#cfgMaoMailToken").value = savedToken;
+  }
+  const savedBase = st.maomail_base_url || st.maomailBaseUrl || "https://zjkdongao.cn";
+  if ($("#cfgMaoMailBaseUrl") && document.activeElement !== $("#cfgMaoMailBaseUrl")) {
+    if (savedBase && !$("#cfgMaoMailBaseUrl").value) $("#cfgMaoMailBaseUrl").value = savedBase;
+  }
   if ($("#srvAddr")) $("#srvAddr").textContent = location.origin + "/v1";
   if ($("#srvAccCount")) $("#srvAccCount").textContent = `${st.total} 个账号 (${st.eligible_now} 可用 / ${st.enabled} 启用)`;
 }
@@ -1418,6 +1580,20 @@ function resetLoginUIButtons(done = false) {
 
 function openLogin() {
   $("#maskLogin").classList.add("on");
+  switchLoginTab(LOGIN_TAB || "batch");
+  loadMaoMailboxes();
+  api("/v1/login/batch").then(res => {
+    if (res.ok && res.batch && res.batch.status === "running") {
+      if ($("#btnBatchCancel")) $("#btnBatchCancel").style.display = "inline-flex";
+      if ($("#btnBatchStart")) {
+        $("#btnBatchStart").disabled = true;
+        $("#btnBatchStart").textContent = "🚀 批量登录运行中…";
+      }
+      renderBatchDashboard(res.batch);
+      pollBatchStatus();
+    }
+  }).catch(() => {});
+
   if (LOGIN_ID) {
     api("/v1/login/" + encodeURIComponent(LOGIN_ID)).then(s => {
       if (LOGIN_TERMINAL.has(s.state)) {
@@ -1428,16 +1604,17 @@ function openLogin() {
       } else {
         $("#btnLoginStart").textContent = "登录进行中…";
         $("#btnLoginCancel").style.display = "inline-flex";
+        if ($("#btnAutoLogin")) $("#btnAutoLogin").textContent = "⚡ 自动登录中…";
         pollLogin();
       }
     }).catch(() => {
       LOGIN_ID = null;
-      setLoginUI("就绪。点击上方「打开独立登录窗口」开始。", "", false);
+      setLoginUI("尚未开始。选择上方邮箱点「一键自动登录」，或点「手动打开浏览器」。", "", false);
       $("#loginLinkRow").style.display = "none";
       resetLoginUIButtons(false);
     });
   } else {
-    setLoginUI("就绪。点击上方「打开独立登录窗口」开始。", "", false);
+    setLoginUI("尚未开始。选择上方邮箱点「一键自动登录」，或点「手动打开浏览器」。", "", false);
     $("#loginLinkRow").style.display = "none";
     resetLoginUIButtons(false);
   }
@@ -1485,12 +1662,8 @@ $("#btnLoginStart").onclick = async e => {
   setLoginUI("正在启动登录浏览器…", "", true);
   if (LOGIN_TIMER) { clearInterval(LOGIN_TIMER); LOGIN_TIMER = null; }
   LOGIN_ID = null;
-  const custom = $("#inputCustomEmail") ? $("#inputCustomEmail").value.trim() : "";
   try {
-    const s = await api("/v1/login", {
-      method: "POST",
-      body: JSON.stringify({ autoEmail: custom || undefined, force: true })
-    });
+    const s = await api("/v1/login", { method: "POST", body: JSON.stringify({ force: true }) });
     LOGIN_ID = s.id;
     $("#loginLink").value = s.link;
     $("#loginLinkRow").style.display = "flex";
@@ -1505,7 +1678,7 @@ $("#btnLoginCancel").onclick = async () => {
   const cancelId = LOGIN_ID;
   LOGIN_ID = null;
   if (LOGIN_TIMER) { clearInterval(LOGIN_TIMER); LOGIN_TIMER = null; }
-  setLoginUI("已取消登录。可点击上方按钮重新发起登录。", "", false);
+  setLoginUI("已取消登录。可选择邮箱重新发起「一键自动登录」。", "", false);
   resetLoginUIButtons(false);
   try { await api("/v1/login/" + encodeURIComponent(cancelId) + "/cancel", { method: "POST", body: "{}" }); }
   catch (e) { /* noop */ }
@@ -1517,6 +1690,383 @@ $("#btnLoginCopy").onclick = async () => {
   catch (e) { $("#loginLink").select(); document.execCommand("copy"); toast("登录链接已复制"); }
 };
 $("#btnLoginOpen").onclick = () => { if ($("#loginLink").value) window.open($("#loginLink").value, "_blank"); };
+
+/* ---------------- 批量登录与选项卡交互 ---------------- */
+let LOGIN_TAB = "batch";
+function switchLoginTab(t) {
+  LOGIN_TAB = t;
+  const bBatch = $("#tabLoginBatch");
+  const bSingle = $("#tabLoginSingle");
+  if (bBatch) bBatch.classList.toggle("on", t === "batch");
+  if (bSingle) bSingle.classList.toggle("on", t === "single");
+  if ($("#boxLoginBatch")) $("#boxLoginBatch").style.display = t === "batch" ? "" : "none";
+  if ($("#boxLoginSingle")) $("#boxLoginSingle").style.display = t === "single" ? "" : "none";
+}
+if ($("#tabLoginBatch")) $("#tabLoginBatch").onclick = () => switchLoginTab("batch");
+if ($("#tabLoginSingle")) $("#tabLoginSingle").onclick = () => switchLoginTab("single");
+
+let MAOMAIL_ITEMS = [];
+let BATCH_POLL_TIMER = null;
+
+function updateBatchSelectionCount() {
+  const cks = Array.from(document.querySelectorAll(".batch-ck:checked"));
+  const count = cks.length;
+  if ($("#batchCountBadge")) $("#batchCountBadge").textContent = String(count);
+}
+
+function renderBatchMailboxes() {
+  const listEl = $("#batchMailList");
+  if (!listEl) return;
+  if (!MAOMAIL_ITEMS.length) {
+    listEl.innerHTML = `<div style="color:var(--sub);padding:8px">肥猫猫中没有查询到可用邮箱</div>`;
+    return;
+  }
+  const poolAccs = (S.status?.accounts || []);
+  const inPoolSet = new Set();
+  for (const a of poolAccs) {
+    for (const m of MAOMAIL_ITEMS) {
+      const email = m.email || m.address || m.name || "";
+      const prefix = email.split("@")[0];
+      if (a.label && (a.label.includes(email) || a.label.includes(prefix))) {
+        inPoolSet.add(email);
+      }
+    }
+  }
+
+  const unaddedCount = MAOMAIL_ITEMS.filter(m => !inPoolSet.has(m.email)).length;
+  if ($("#batchMailCount")) {
+    $("#batchMailCount").textContent = `(共 ${MAOMAIL_ITEMS.length} 个邮箱，其中 ${unaddedCount} 个未入池)`;
+  }
+
+  listEl.innerHTML = MAOMAIL_ITEMS.map((m, idx) => {
+    const email = m.email || m.address || m.name || "";
+    const inPool = inPoolSet.has(email);
+    const badge = inPool
+      ? `<span style="font-size:10px;color:#16a34a;background:#dcfce7;padding:1px 5px;border-radius:4px;white-space:nowrap">已在池中</span>`
+      : `<span style="font-size:10px;color:#2563eb;background:#eff6ff;padding:1px 5px;border-radius:4px;white-space:nowrap">未入池</span>`;
+    return `<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:4px 6px;border-radius:6px;border:1px solid #f1f5f9;background:#fafafa;user-select:none" class="batch-mail-item ${inPool ? 'in-pool' : 'unadded'}">
+      <input type="checkbox" class="batch-ck" data-email="${esc(email)}" style="width:auto" ${inPool ? '' : 'checked'}>
+      <span style="font-family:monospace;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1" title="${esc(email)}">${esc(email)}</span>
+      ${badge}
+    </label>`;
+  }).join("");
+
+  listEl.onchange = e => {
+    if (e.target.classList.contains("batch-ck")) updateBatchSelectionCount();
+  };
+
+  updateBatchSelectionCount();
+}
+
+if ($("#btnBatchSelectAll")) {
+  $("#btnBatchSelectAll").onclick = () => {
+    document.querySelectorAll(".batch-ck").forEach(c => c.checked = true);
+    updateBatchSelectionCount();
+  };
+}
+if ($("#btnBatchSelectNone")) {
+  $("#btnBatchSelectNone").onclick = () => {
+    document.querySelectorAll(".batch-ck").forEach(c => c.checked = false);
+    updateBatchSelectionCount();
+  };
+}
+if ($("#btnBatchSelectUnadded")) {
+  $("#btnBatchSelectUnadded").onclick = () => {
+    document.querySelectorAll(".batch-mail-item").forEach(el => {
+      const ck = el.querySelector(".batch-ck");
+      if (ck) ck.checked = el.classList.contains("unadded");
+    });
+    updateBatchSelectionCount();
+  };
+}
+if ($("#btnBatchRefresh")) {
+  $("#btnBatchRefresh").onclick = async () => {
+    const b = $("#btnBatchRefresh");
+    b.disabled = true; b.textContent = "刷新中…";
+    await loadMaoMailboxes();
+    b.disabled = false; b.textContent = "↺ 刷新";
+    toast("邮箱列表已刷新");
+  };
+}
+
+async function pollBatchStatus() {
+  if (BATCH_POLL_TIMER) return;
+  BATCH_POLL_TIMER = setInterval(async () => {
+    try {
+      const res = await api("/v1/login/batch");
+      const b = res.batch;
+      if (!b) {
+        clearInterval(BATCH_POLL_TIMER);
+        BATCH_POLL_TIMER = null;
+        return;
+      }
+      renderBatchDashboard(b);
+      if (b.status !== "running") {
+        clearInterval(BATCH_POLL_TIMER);
+        BATCH_POLL_TIMER = null;
+        if ($("#btnBatchCancel")) $("#btnBatchCancel").style.display = "none";
+        if ($("#btnBatchStart")) {
+          $("#btnBatchStart").disabled = false;
+          $("#btnBatchStart").textContent = `🚀 开始并发批量登录 (${document.querySelectorAll(".batch-ck:checked").length})`;
+        }
+        toast(`批量登录任务${b.status === "completed" ? "完成" : "已终止"}：成功 ${b.done} 个，失败 ${b.failed} 个`);
+        await load(true);
+      } else {
+        if (b.done > 0) load(true);
+      }
+    } catch {}
+  }, 1000);
+}
+
+function renderBatchDashboard(b) {
+  if (!b) return;
+  const pct = b.total ? Math.round(((b.done + b.failed) / b.total) * 100) : 0;
+  if ($("#batchProgressBar")) $("#batchProgressBar").style.width = pct + "%";
+  if ($("#batchProgressSummary")) {
+    const stText = b.status === "running" ? "🚀 批量登录进行中…" : (b.status === "completed" ? "✅ 批量登录已完成" : "⏹ 任务已终止");
+    $("#batchProgressSummary").textContent = `${stText} (进度 ${b.done + b.failed}/${b.total} · ${pct}%)`;
+  }
+  if ($("#batchProgressStat")) {
+    $("#batchProgressStat").textContent = `成功 ${b.done} | 失败 ${b.failed} | 进行中 ${b.running} | 排队中 ${b.pending}`;
+  }
+
+  const tbody = $("#batchTableBody");
+  if (!tbody || !b.items) return;
+  tbody.innerHTML = b.items.map(it => {
+    let stTag = "";
+    if (it.state === "pending") stTag = `<span style="color:#64748b;background:#f1f5f9;padding:1px 6px;border-radius:4px">排队中</span>`;
+    else if (it.state === "starting" || it.state === "waiting") stTag = `<span style="color:#2563eb;background:#eff6ff;padding:1px 6px;border-radius:4px">浏览器中</span>`;
+    else if (it.state === "capturing") stTag = `<span style="color:#d97706;background:#fef3c7;padding:1px 6px;border-radius:4px">捕获凭据</span>`;
+    else if (it.state === "done") stTag = `<span style="color:#16a34a;background:#dcfce7;padding:1px 6px;border-radius:4px;font-weight:600">✓ 成功</span>`;
+    else stTag = `<span style="color:#dc2626;background:#fee2e2;padding:1px 6px;border-radius:4px">✗ ${esc(it.state)}</span>`;
+
+    const sec = it.endedAt ? Math.round((it.endedAt - it.startedAt) / 1000) + "s"
+      : (it.startedAt ? Math.round((Date.now() - it.startedAt) / 1000) + "s" : "—");
+
+    const detail = it.account ? `已入池: org ${esc(it.account.org ? it.account.org.slice(0, 8) : '✓')}` : esc(it.message || '—');
+
+    return `<tr style="border-bottom:1px solid #f1f5f9">
+      <td style="padding:4px 8px;color:var(--sub)">${it.index}</td>
+      <td style="padding:4px 8px;font-family:monospace;font-weight:600">${esc(it.email)}</td>
+      <td style="padding:4px 8px">${stTag}</td>
+      <td style="padding:4px 8px" title="${esc(it.message || '')}">
+        <span style="color:#334155">${detail}</span>
+        <span style="font-size:10.5px;color:var(--sub);margin-left:6px">${sec}</span>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+if ($("#btnBatchStart")) {
+  $("#btnBatchStart").onclick = async () => {
+    const cks = Array.from(document.querySelectorAll(".batch-ck:checked")).map(c => c.dataset.email);
+    const customText = $("#batchCustomArea") ? $("#batchCustomArea").value.trim() : "";
+    const customList = customText.split(/[\r\n,;]+/).map(s => s.trim()).filter(Boolean);
+    const allEmails = [...new Set([...cks, ...customList])];
+
+    if (!allEmails.length) {
+      return toast("请先勾选或在输入框填入至少一个邮箱", true);
+    }
+
+    const concurrency = +$("#batchConcurrency").value || 2;
+    const btn = $("#btnBatchStart");
+    btn.disabled = true;
+    btn.textContent = `启动批量任务中…`;
+    if ($("#btnBatchCancel")) $("#btnBatchCancel").style.display = "inline-flex";
+
+    try {
+      const res = await api("/v1/login/batch", {
+        method: "POST",
+        body: JSON.stringify({ emails: allEmails, concurrency })
+      });
+      if (res.ok) {
+        toast(`已启动 ${allEmails.length} 个邮箱批量自动登录 (并发数: ${concurrency})`);
+        renderBatchDashboard(res.batch);
+        pollBatchStatus();
+      } else {
+        toast("启动失败: " + (res.message || "未知错误"), true);
+        btn.disabled = false;
+        if ($("#btnBatchCancel")) $("#btnBatchCancel").style.display = "none";
+      }
+    } catch (err) {
+      toast("启动失败: " + err.message, true);
+      btn.disabled = false;
+      if ($("#btnBatchCancel")) $("#btnBatchCancel").style.display = "none";
+    }
+  };
+}
+
+if ($("#btnBatchCancel")) {
+  $("#btnBatchCancel").onclick = async () => {
+    if (!confirm("确定终止当前的批量登录任务？正在执行的浏览器窗口将被关闭。")) return;
+    try {
+      const res = await api("/v1/login/batch/cancel", { method: "POST", body: "{}" });
+      toast("批量任务已申请终止");
+      renderBatchDashboard(res.batch);
+    } catch (e) {
+      toast("终止失败: " + e.message, true);
+    }
+  };
+}
+
+/* 肥猫猫临时邮箱一键全自动登录 */
+async function loadMaoMailboxes() {
+  const sel = $("#selMaoMail");
+  const listEl = $("#batchMailList");
+  try {
+    const res = await api("/v1/maomail/mailboxes");
+    if (!res.ok) {
+      const errMsg = res.error || "未配置 Token";
+      if (sel) sel.innerHTML = `<option value="">加载失败：${esc(errMsg)}</option>`;
+      if (listEl) listEl.innerHTML = `<div style="color:#dc2626;padding:8px">⚠️ 肥猫猫加载失败：${esc(errMsg)}<br><span style="font-size:11px;color:var(--sub)">请先在页面下方「肥猫猫临时邮箱·一键自动登录配置」填入 Token 并点击保存。</span></div>`;
+      return;
+    }
+    const items = res.mailboxes || [];
+    MAOMAIL_ITEMS = items;
+    renderBatchMailboxes();
+
+    if (sel) {
+      if (!items.length) {
+        sel.innerHTML = `<option value="">肥猫猫无可用邮箱（请在肥猫猫先生成或导入邮箱）</option>`;
+        return;
+      }
+      const prev = sel.value;
+      sel.innerHTML = items.map(m => {
+        const email = m.email || m.address || m.name || "";
+        const unread = m.unread_count ? ` (${m.unread_count}封未读)` : "";
+        return `<option value="${esc(email)}">${esc(email)}${unread}</option>`;
+      }).join("");
+      if (prev && items.some(m => (m.email || m.address || m.name) === prev)) {
+        sel.value = prev;
+      }
+    }
+  } catch (err) {
+    if (sel) sel.innerHTML = `<option value="">无法获取肥猫猫邮箱: ${esc(err.message)}</option>`;
+    if (listEl) listEl.innerHTML = `<div style="color:#dc2626;padding:8px">⚠️ 网络请求异常: ${esc(err.message)}</div>`;
+  }
+}
+
+const saveMaoMailConfigDirect = async () => {
+  const token = $("#cfgMaoMailToken") ? $("#cfgMaoMailToken").value.trim() : "";
+  const baseUrl = $("#cfgMaoMailBaseUrl") ? $("#cfgMaoMailBaseUrl").value.trim() : "";
+  await api("/v1/pool", {
+    method: "POST",
+    body: JSON.stringify({
+      maomailToken: token,
+      maomail_token: token,
+      maomailBaseUrl: baseUrl || "https://zjkdongao.cn",
+      maomail_base_url: baseUrl || "https://zjkdongao.cn",
+    })
+  });
+};
+
+if ($("#btnSaveMaoMailOnly")) {
+  $("#btnSaveMaoMailOnly").onclick = async () => {
+    const b = $("#btnSaveMaoMailOnly");
+    const token = $("#cfgMaoMailToken") ? $("#cfgMaoMailToken").value.trim() : "";
+    if (!token) {
+      toast("请先在上方输入框填入肥猫猫 Token (JWT Bearer)", true);
+      return;
+    }
+    b.disabled = true; b.textContent = "保存中…";
+    try {
+      await saveMaoMailConfigDirect();
+      toast("肥猫猫配置已直接保存并即时生效！");
+      await loadMaoMailboxes();
+    } catch (e) {
+      toast("保存失败: " + e.message, true);
+    } finally {
+      b.disabled = false; b.textContent = "💾 保存肥猫猫配置";
+    }
+  };
+}
+
+if ($("#btnRefreshMaoMail")) {
+  $("#btnRefreshMaoMail").onclick = async () => {
+    const b = $("#btnRefreshMaoMail");
+    b.disabled = true; b.textContent = "刷新中…";
+    await loadMaoMailboxes();
+    b.disabled = false; b.textContent = "↺ 刷新邮箱";
+    toast("邮箱列表已刷新");
+  };
+}
+
+if ($("#btnAutoLogin")) {
+  $("#btnAutoLogin").onclick = async e => {
+    const b = e.currentTarget;
+    const custom = $("#inputCustomEmail") ? $("#inputCustomEmail").value.trim() : "";
+    const selected = $("#selMaoMail") ? $("#selMaoMail").value.trim() : "";
+    const email = custom || selected;
+    if (!email) return toast("请选择或输入邮箱地址", true);
+
+    b.disabled = true; b.textContent = "启动中…";
+    setLoginUI(`正在启动 Edge 并准备自动登录 [${email}]…`, "", true);
+    if (LOGIN_TIMER) { clearInterval(LOGIN_TIMER); LOGIN_TIMER = null; }
+    LOGIN_ID = null;
+    try {
+      const s = await api("/v1/login", {
+        method: "POST",
+        body: JSON.stringify({ email, autoLogin: true, force: true })
+      });
+      LOGIN_ID = s.id;
+      $("#loginLink").value = s.link;
+      $("#loginLinkRow").style.display = "flex";
+      $("#btnLoginCancel").style.display = "inline-flex";
+      setLoginUI(s.reused ? "已复用正在进行的登录流程…" : s.message, "", true);
+      b.textContent = "⚡ 自动登录中…";
+      pollLogin();
+    } catch (ex) {
+      setLoginUI("自动登录启动失败: " + ex.message, "bad", false);
+      resetLoginUIButtons(false);
+    }
+  };
+}
+
+if ($("#btnTestMaoMail")) {
+  $("#btnTestMaoMail").onclick = async () => {
+    const b = $("#btnTestMaoMail");
+    const tip = $("#maomailStatusTip");
+    const typedToken = $("#cfgMaoMailToken") ? $("#cfgMaoMailToken").value.trim() : "";
+    const typedBaseUrl = $("#cfgMaoMailBaseUrl") ? $("#cfgMaoMailBaseUrl").value.trim() : "";
+    
+    b.disabled = true; b.textContent = "测试中…";
+    if (tip) tip.textContent = "正在测试连接并保存配置…";
+    try {
+      if (!typedToken) {
+        throw new Error("请先在上方输入框填入肥猫猫 Token (JWT Bearer)");
+      }
+      // 1. 自动持久化保存到后端配置，省去翻到底部手动保存
+      await saveMaoMailConfigDirect();
+
+      // 2. 携带 token 请求测试
+      const q = new URLSearchParams({ token: typedToken, baseUrl: typedBaseUrl || "https://zjkdongao.cn" });
+      const res = await api("/v1/maomail/mailboxes?" + q.toString());
+      if (res.ok) {
+        const count = (res.mailboxes || []).length;
+        if (tip) {
+          tip.style.color = "#16a34a";
+          tip.textContent = `✓ 连通并保存成功！已获取 ${count} 个可用邮箱`;
+        }
+        toast(`肥猫猫配置已保存！成功获取 ${count} 个邮箱`);
+        await loadMaoMailboxes();
+      } else {
+        if (tip) {
+          tip.style.color = "#dc2626";
+          tip.textContent = `✗ 测试失败: ${res.error || "未知错误"}`;
+        }
+        toast("肥猫猫连接失败: " + (res.error || "未知错误"), true);
+      }
+    } catch (e) {
+      if (tip) {
+        tip.style.color = "#dc2626";
+        tip.textContent = `✗ 测试失败: ${e.message}`;
+      }
+      toast("肥猫猫测试失败: " + e.message, true);
+    } finally {
+      b.disabled = false; b.textContent = "🔍 测试邮箱连接与邮箱列表";
+    }
+  };
+}
 
 $("#btnAdd").onclick = () => { S.editId = null; $("#accTitle").textContent = "手动添加账号（高级）";
   $("#fLabel").value = ""; $("#fKey").value = ""; $("#fOrg").value = "";
@@ -1583,6 +2133,8 @@ $("#btnSaveSettings").onclick = async e => {
       pruneKeepRecentTools: +$("#cfgFullPruneKeep").value,
       defaultEffort: $("#cfgFullEffort").value,
       pricePerMillionTokens: +$("#cfgFullPrice").value,
+      maomailToken: $("#cfgMaoMailToken") ? $("#cfgMaoMailToken").value.trim() : undefined,
+      maomailBaseUrl: $("#cfgMaoMailBaseUrl") ? $("#cfgMaoMailBaseUrl").value.trim() : undefined,
     };
     await api("/v1/pool", { method: "POST", body: JSON.stringify(payload) });
     toast("所有系统配置已成功保存，即时生效！");
@@ -1604,6 +2156,7 @@ $("#btnResetSettings").onclick = () => {
   $("#cfgFullPruneKeep").value = 4;
   $("#cfgFullEffort").value = "max";
   $("#cfgFullPrice").value = 0;
+  if ($("#cfgMaoMailBaseUrl")) $("#cfgMaoMailBaseUrl").value = "https://zjkdongao.cn";
   toast("已填入推荐值，点「保存全部设置」后生效");
 };
 
@@ -1634,6 +2187,8 @@ $("#grid").addEventListener("click", async e => {
     e.target.checked ? S.sel.add(id) : S.sel.delete(id);
     $("#selInfo").textContent = S.sel.size ? "已选 " + S.sel.size + " 个" : "";
     $("#btnDelSel").style.display = S.sel.size ? "" : "none";
+    if ($("#btnCopySel")) $("#btnCopySel").style.display = S.sel.size ? "" : "none";
+    if ($("#btnExportSel")) $("#btnExportSel").style.display = S.sel.size ? "" : "none";
     return;
   }
   if (e.target.classList.contains("en")) {

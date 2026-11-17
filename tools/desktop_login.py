@@ -83,31 +83,68 @@ def kill_claude_desktop():
     time.sleep(0.6)
 
 
+def activate_claude_window():
+    """将已启动的 Claude 桌面端窗口带到最前台激活显示"""
+    if sys.platform != 'win32':
+        return
+    ps_cmd = (
+        "$p = Get-Process claude, claude-desktop -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1; "
+        "if ($p) { "
+        "$w = $p.MainWindowHandle; "
+        "$sig = '[DllImport(\"user32.dll\")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow); [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);'; "
+        "$type = Add-Type -MemberDefinition $sig -Name Win32 -Namespace Native -PassThru; "
+        "[Native.Win32]::ShowWindowAsync($w, 9); "
+        "[Native.Win32]::SetForegroundWindow($w); "
+        "}"
+    )
+    try:
+        subprocess.Popen(['powershell', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps_cmd],
+                         creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+    except Exception:
+        pass
+
+
 def launch_claude_desktop():
     """在 Windows 交互桌面安全拉起 Claude Desktop"""
     if sys.platform != 'win32':
         return False, 'unsupported platform'
     # 1. 优先通过 Windows AppsFolder 协议拉起（对 MSIX 商店安装版 100% 稳定）
+    launched = False
+    target = ''
     try:
         subprocess.Popen(['cmd.exe', '/c', 'start', '', 'shell:AppsFolder\\Claude_pzs8sxrjxfjjc!Claude'], shell=False)
-        return True, 'shell:AppsFolder\\Claude_pzs8sxrjxfjjc!Claude'
-    except Exception as e:
+        launched = True
+        target = 'shell:AppsFolder\\Claude_pzs8sxrjxfjjc!Claude'
+    except Exception:
         pass
 
-    # 2. 尝试 os.startfile 直接由系统 Explorer 唤起
-    exe = find_desktop_exe()
+    if not launched:
+        # 2. 尝试 os.startfile 直接由系统 Explorer 唤起
+        exe = find_desktop_exe()
+        try:
+            os.startfile(exe)
+            launched = True
+            target = exe
+        except Exception:
+            pass
+
+    if not launched:
+        # 3. 尝试 cmd /c start
+        try:
+            subprocess.Popen(['cmd.exe', '/c', 'start', '', exe], shell=False)
+            launched = True
+            target = exe
+        except Exception as e:
+            return False, str(e)
+
+    # 稍后激活窗口到前台
     try:
-        os.startfile(exe)
-        return True, exe
-    except Exception as e:
+        time.sleep(1.2)
+        activate_claude_window()
+    except Exception:
         pass
 
-    # 3. 尝试 cmd /c start
-    try:
-        subprocess.Popen(['cmd.exe', '/c', 'start', '', exe], shell=False)
-        return True, exe
-    except Exception as e:
-        return False, str(e)
+    return True, target
 
 
 def find_desktop_exe():
