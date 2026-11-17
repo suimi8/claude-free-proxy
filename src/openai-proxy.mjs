@@ -2874,20 +2874,65 @@ const server = http.createServer(async (req, res) => {
     }
 
     function parseImportLines(text) {
-      const lines = String(text || '').split(/\r?\n/);
+      const raw = String(text || '').trim();
+      if (!raw) return [];
+
+      // 1. 优先尝试整体解析为 JSON（支持整个 JSON 数组或单个 JSON 对象）
+      if ((raw.startsWith('[') && raw.endsWith(']')) || (raw.startsWith('{') && raw.endsWith('}'))) {
+        try {
+          const parsed = JSON.parse(raw);
+          const items = [];
+          const extractItem = it => {
+            if (!it) return;
+            if (typeof it === 'string') {
+              const m = /(sk-ant-sid02-[A-Za-z0-9_-]+|sk-ant-[A-Za-z0-9_-]+)/.exec(it.trim());
+              if (m) items.push({ sessionKey: m[1], label: '' });
+            } else if (typeof it === 'object') {
+              const sk = it.sessionKey || it.session_key || it.key || it.token || '';
+              if (sk && typeof sk === 'string' && sk.includes('sk-ant-')) {
+                const m = /(sk-ant-sid02-[A-Za-z0-9_-]+|sk-ant-[A-Za-z0-9_-]+)/.exec(sk.trim());
+                if (m) items.push({ sessionKey: m[1], label: String(it.label || it.name || it.remark || '').trim(), org: String(it.org || '').trim() });
+              }
+            }
+          };
+
+          if (Array.isArray(parsed)) {
+            for (const item of parsed) extractItem(item);
+            if (items.length) return items;
+          } else if (typeof parsed === 'object') {
+            const arr = parsed.accounts || parsed.keys || parsed.items || parsed.data || parsed.list;
+            if (Array.isArray(arr)) {
+              for (const item of arr) extractItem(item);
+              if (items.length) return items;
+            }
+            extractItem(parsed);
+            if (items.length) return items;
+          }
+        } catch { /* 不是合法完整 JSON，回退到按行解析 */ }
+      }
+
+      // 2. 按行解析（完美支持 JSONL 每行一个 JSON 对象、每行一个 sessionKey 纯文本、以及 Cookie 串）
+      const lines = raw.split(/\r?\n/);
       const items = [];
       for (const rawLine of lines) {
         const line = rawLine.trim();
         if (!line || line.startsWith('#') || line.startsWith('//')) continue;
+
+        // 尝试按 JSONL 单行解析
         if (line.startsWith('{') && line.endsWith('}')) {
           try {
             const obj = JSON.parse(line);
-            if (obj.sessionKey) {
-              items.push({ sessionKey: obj.sessionKey.trim(), label: obj.label?.trim() || '', org: obj.org?.trim() || '' });
-              continue;
+            const sk = obj.sessionKey || obj.session_key || obj.key || obj.token || '';
+            if (sk && typeof sk === 'string' && sk.includes('sk-ant-')) {
+              const m = /(sk-ant-sid02-[A-Za-z0-9_-]+|sk-ant-[A-Za-z0-9_-]+)/.exec(sk.trim());
+              if (m) {
+                items.push({ sessionKey: m[1], label: String(obj.label || obj.name || obj.remark || '').trim(), org: String(obj.org || '').trim() });
+                continue;
+              }
             }
           } catch {}
         }
+
         let sk = '';
         let label = '';
         if (line.includes('----')) {

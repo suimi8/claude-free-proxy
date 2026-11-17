@@ -825,11 +825,17 @@ export function createLoginManager(opts) {
               f.expiresAt = Math.max(f.expiresAt, Date.now() + timeoutMs);
             }
             // 把登录窗口提到最前，用户能立刻看到要验证的地方
-            try { await (await ensurePageCdp(f)).call('Page.bringToFront'); }
-            catch { /* 置顶失败不影响流程 */ }
+            try {
+              await (await ensurePageCdp(f)).call('Page.bringToFront');
+              focusBrowserWindow(f.proc?.pid);
+            } catch { /* 置顶失败不影响流程 */ }
           }
           f.needVerify = true;
-          f.message = VERIFY_HINT[kind] || `需要人工验证（${VERIFY_LABEL[kind] || kind}），到浏览器窗口完成后会自动继续`;
+          if (kind === 'email_link' && f.autoVerifying && f.autoVerifyMsg) {
+            f.message = f.autoVerifyMsg;
+          } else {
+            f.message = VERIFY_HINT[kind] || `需要人工验证（${VERIFY_LABEL[kind] || kind}），到浏览器窗口完成后会自动继续`;
+          }
         } else if (f.verify) {
           // 验证消失了 = 用户已完成，自动往下走（无需刷新/重启）
           f.verify = null;
@@ -896,6 +902,11 @@ export function createLoginManager(opts) {
         '--new-window',
         loginUrl,
       ];
+
+      const yesExt = path.join(ROOT, 'tools', 'extensions', 'yescaptcha');
+      if (fs.existsSync(path.join(yesExt, 'manifest.json'))) {
+        args.push(`--load-extension=${yesExt}`);
+      }
 
       const env = { ...process.env };
       if (process.platform === 'linux') {
@@ -969,28 +980,35 @@ export function createLoginManager(opts) {
             if (LIVE.has(f.state)) f.message = `未能自动填入邮箱（页面可能需要人工验证或加载较慢），可在浏览器窗口直接操作`;
             return;
           }
-          f.message = `已提交邮箱 ${f.autoEmail}，正在等待 Claude 验证邮件…`;
+          f.autoVerifying = true;
+          f.autoVerifyMsg = `已提交邮箱 ${f.autoEmail}，正在等待 Claude 验证邮件…`;
+          f.message = f.autoVerifyMsg;
           if (typeof verificationProvider === 'function') {
             try {
               const res = await verificationProvider(f.autoEmail, f, (msg) => {
-                if (LIVE.has(f.state)) f.message = msg;
+                f.autoVerifyMsg = `📨 ${msg}`;
+                if (LIVE.has(f.state)) f.message = f.autoVerifyMsg;
               });
               if (res?.magicLink) {
-                f.message = '收到 Magic Link，正在浏览器中自动跳转登录…';
+                f.autoVerifyMsg = '🔗 收到 Magic Link，正在浏览器中自动跳转登录…';
+                f.message = f.autoVerifyMsg;
                 console.log(`[login] ${f.id} 自动跳转 Magic Link: ${res.magicLink.slice(0, 60)}...`);
                 const pageCdp = await ensurePageCdp(f);
                 await pageCdp.call('Page.navigate', { url: res.magicLink });
               } else if (res?.code) {
-                f.message = `收到验证码 [${res.code}]，正在浏览器中自动输入…`;
+                f.autoVerifyMsg = `🔢 收到验证码 [${res.code}]，正在浏览器中自动输入…`;
+                f.message = f.autoVerifyMsg;
                 console.log(`[login] ${f.id} 自动输入验证码: ${res.code}`);
                 await fillCodeInClaude(f, res.code);
               }
             } catch (err) {
+              f.autoVerifying = false;
               console.warn(`[login] ${f.id} 自动接码提示: ${err.message}`);
-              if (LIVE.has(f.state)) f.message = `等待邮件中 (${err.message})，可在浏览器窗口完成`;
+              if (LIVE.has(f.state)) f.message = `等待邮件超时 (${err.message})，可在浏览器窗口手动完成`;
             }
           }
         }).catch(e => {
+          f.autoVerifying = false;
           console.warn(`[login] ${f.id} 自动提交邮箱异常: ${e.message}`);
           if (LIVE.has(f.state)) f.message = `自动填入邮箱异常: ${e.message}`;
         });

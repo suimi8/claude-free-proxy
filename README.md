@@ -160,7 +160,13 @@ python tools/desktop_session.py
 4. 登录完成后，后台自动捕获 `sessionKey`、`cf_clearance` 与配套 UA 并加入账号池。
 
 #### 模式三：批量导入 sessionKey 与购买成品账号
-- **批量导入**：在控制台点击 **「📥 批量导入」**，支持多格式批量粘贴导入（TXT 每行一个 / 邮箱----密码----sessionKey / JSON 数组），后台自动并发发现组织 Org 与备注入池。
+- **批量导入**：在控制台点击 **「📥 批量导入」**，支持多种纯 sessionKey 凭据格式自动解析与批量导入：
+  - 📝 **每行一个 sessionKey**（纯文本 TXT）
+  - 📦 **JSON 格式中自动获取 sessionKey**（支持单个 JSON 对象，如 `{"sessionKey": "sk-ant-..."}`）
+  - 📑 **JSON 数组中批量获取 sessionKey**（支持 JSON 数组，如 `[{"sessionKey": "..."}, ...]` 或 `["sk-ant-...", ...]`）
+  - 📄 **JSONL 格式中获取 sessionKey**（每行一个独立 JSON 对象）
+  - 🍪 **Cookie 串自动提取**（直接粘贴包含 `sessionKey=...` 的整段 Cookie）
+  > 💡 **特别说明**：**仅需提供 sessionKey 即可，绝不提供、也不需要任何邮箱和密码！** 后台将自动并发验证有效性、自动发现组织 Org 与备注入池。
 - **购买成品账号**：如果你没有现成的 Claude 账号或不想花费时间自建注册，可直接前往小店购买高质量稳定成品账号：
   👉 **[碎米的小店的小店 - 链动小铺](https://wzyp.cn/shop/8WRBPFIB)**（购买后获取 sessionKey 直接批量粘贴导入，秒级开启并发服务）
 

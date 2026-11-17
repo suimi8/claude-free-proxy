@@ -915,13 +915,14 @@
       <h3 style="margin:0">📥 批量导入 sessionKey</h3>
       <button class="btn sm" onclick="closeBatchImport()">✕</button>
     </div>
-    <p class="hint">每行一个 sessionKey。支持单 key、<code>备注,key</code>、<code>key----备注</code> 或直接粘贴含 sessionKey 的 Cookie 串（自动发现组织与备注）。</p>
+    <p class="hint">支持<b>纯 sessionKey</b>（无需且不提供邮箱密码）。支持每行一个、JSON 对象、JSON 数组、JSONL 格式或直接粘贴 Cookie（后台自动发现组织 Org 并入池）。</p>
     <div class="field">
-      <label>sessionKey 列表（每行一个）</label>
+      <label>sessionKey 凭据列表（每行一个 / JSON / JSON 数组 / JSONL）</label>
       <textarea id="fBatchText" style="width:100%;height:180px;font-family:monospace;font-size:12px;white-space:pre" placeholder="sk-ant-sid02-xxxxxxxx
-小号A,sk-ant-sid02-yyyyyyyy
-sk-ant-sid02-zzzzzzzz----小号B
-sessionKey=sk-ant-sid02-wwwwwwww; ..."></textarea>
+sk-ant-sid02-yyyyyyyy
+[ { &quot;sessionKey&quot;: &quot;sk-ant-sid02-zzzzzzzz&quot; } ]
+{ &quot;sessionKey&quot;: &quot;sk-ant-sid02-wwwwwwww&quot; }
+sessionKey=sk-ant-sid02-uuuuuuuu; ..."></textarea>
     </div>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;font-size:12px;color:var(--sub)">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
