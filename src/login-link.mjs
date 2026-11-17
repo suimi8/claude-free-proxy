@@ -26,7 +26,56 @@ const ROOT = path.resolve(HERE, '..');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
 
-function findBrowser() {
+export function getDefaultBrowserWindows() {
+  if (process.platform !== 'win32') return null;
+  try {
+    const raw = execSync('reg query "HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\http\\UserChoice" /v ProgId', {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2500,
+    });
+    const progMatch = raw.match(/ProgId\s+REG_SZ\s+(\S+)/);
+    if (!progMatch) return null;
+    const progId = progMatch[1];
+    const cmdRaw = execSync(`reg query "HKCR\\${progId}\\shell\\open\\command" /ve`, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2500,
+    });
+    const cmdMatch = cmdRaw.match(/REG_SZ\s+(.+)/);
+    if (!cmdMatch) return null;
+    const str = cmdMatch[1].trim();
+    const exeMatch = str.match(/^"([^"]+)"/) || str.match(/^(\S+)/);
+    const exe = exeMatch ? exeMatch[1] : null;
+    if (exe && fs.existsSync(exe)) return exe;
+  } catch {}
+  return null;
+}
+
+export function activateBrowserWindow(pid) {
+  if (process.platform !== 'win32') return;
+  const ps = `
+    $names = @('chrome', 'msedge', 'brave', 'chromium')
+    $procs = Get-Process $names -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }
+    if ($procs) {
+      $sig = '[DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow); [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);'
+      $type = Add-Type -MemberDefinition $sig -Name NativeAct -Namespace Win32 -PassThru -ErrorAction SilentlyContinue
+      foreach ($p in $procs) {
+        [Native.NativeAct]::ShowWindowAsync($p.MainWindowHandle, 9)
+        [Native.NativeAct]::SetForegroundWindow($p.MainWindowHandle)
+      }
+    }
+  `;
+  try {
+    spawn('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps], {
+      stdio: 'ignore',
+      windowsHide: true,
+    }).unref();
+  } catch {}
+}
+
+export function findBrowser(opts = {}) {
+  const preferDefault = typeof opts === 'boolean' ? opts : !!opts?.preferDefault;
   if (process.env.LOGIN_BROWSER && fs.existsSync(process.env.LOGIN_BROWSER)) {
     return process.env.LOGIN_BROWSER;
   }
@@ -61,6 +110,7 @@ function findBrowser() {
       '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
       '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
       '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
     ];
     for (const p of macPaths) {
       try { if (fs.existsSync(p)) return p; } catch {}
@@ -69,23 +119,42 @@ function findBrowser() {
   }
 
   // 3. Windows 平台
-  const edgePaths = [
-    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-  ];
+  const defaultBrowser = getDefaultBrowserWindows();
+
   const chromePaths = [
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+  ];
+  const edgePaths = [
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+    path.join(os.homedir(), 'AppData', 'Local', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
   ];
 
-  // 无条件 Chrome 优先（用户明确要求：不要用 Edge，像以前一样用 Chrome）。
-  // 系统默认浏览器跟随逻辑已移除——默认浏览器是 Edge 时会误拉 Edge，
-  // 导致 cf_clearance 绑定到 Edg UA。想用别的浏览器用 LOGIN_BROWSER 指定。
-  const order = [...chromePaths, ...edgePaths];
-  for (const p of order) {
-    try { if (fs.existsSync(p)) return p; } catch { /* noop */ }
+  // 如果优先系统默认浏览器且默认浏览器存在且为 Chromium 系
+  if (preferDefault && defaultBrowser && /chrome|edge|brave|chromium|vivaldi|360/i.test(defaultBrowser)) {
+    return defaultBrowser;
   }
-  throw new Error('找不到 Chrome/Edge，可用 LOGIN_BROWSER 环境变量指定浏览器 exe 路径');
+
+  // 优先检测 Chrome
+  for (const p of chromePaths) {
+    try { if (fs.existsSync(p)) return p; } catch {}
+  }
+
+  // 如果没有独立 Chrome，优先回退到系统默认浏览器（如 Edge、Brave 等）
+  if (defaultBrowser && /chrome|edge|brave|chromium|vivaldi|360/i.test(defaultBrowser)) {
+    return defaultBrowser;
+  }
+
+  // 再次回退到系统常见 Edge 路径
+  for (const p of edgePaths) {
+    try { if (fs.existsSync(p)) return p; } catch {}
+  }
+
+  if (defaultBrowser) return defaultBrowser;
+
+  throw new Error('找不到可用的浏览器（Chrome/Edge/默认浏览器），可用 LOGIN_BROWSER 环境变量指定浏览器 exe 路径');
 }
 
 const ALLOCATED_PORTS = new Set();
@@ -897,7 +966,9 @@ export function createLoginManager(opts) {
         '--no-first-run',
         '--no-default-browser-check',
         '--disable-blink-features=AutomationControlled',
-        '--disable-features=AutomationControlled,Translate,OptimizationHints',
+        '--disable-features=msStartupBoost,Translate,OptimizationHints',
+        '--disable-background-mode',
+        '--disable-backgrounding-occluded-windows',
         '--disable-infobars',
         '--new-window',
         loginUrl,
@@ -1826,7 +1897,7 @@ export async function openClaudeWebBrowser({ sessionKey, org = '', cookie = '', 
   if (!sessionKey || !sessionKey.startsWith('sk-ant-')) {
     throw new Error('无效的 sessionKey');
   }
-  const exe = findBrowser();
+  const exe = findBrowser({ preferDefault: true });
   const port = await freePort();
   const profile = path.join(os.tmpdir(), `claude-web-user-${Buffer.from(sessionKey).toString('hex').slice(-8)}`);
   fs.mkdirSync(profile, { recursive: true });
@@ -1848,6 +1919,9 @@ export async function openClaudeWebBrowser({ sessionKey, org = '', cookie = '', 
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-blink-features=AutomationControlled',
+    '--disable-features=msStartupBoost,Translate,OptimizationHints',
+    '--disable-background-mode',
+    '--disable-backgrounding-occluded-windows',
     '--new-window',
     'about:blank',
   ];
@@ -1857,9 +1931,14 @@ export async function openClaudeWebBrowser({ sessionKey, org = '', cookie = '', 
     args.push(`--load-extension=${yesExt}`);
   }
 
-  const env = { ...process.env };
-  const proc = spawn(exe, args, { stdio: 'ignore', windowsHide: false, env, detached: true });
+  const proc = spawn(exe, args, {
+    stdio: 'ignore',
+    windowsHide: false,
+    env: process.env,
+    detached: true,
+  });
   proc.unref();
+  const browserPid = proc.pid;
 
   // 等待 CDP 调试端口就绪
   const ver = await waitCdp(port, 25);
@@ -1933,7 +2012,8 @@ export async function openClaudeWebBrowser({ sessionKey, org = '', cookie = '', 
     await pageCdp.call('Page.navigate', { url: targetUrl }).catch(() => {});
 
     // 聚焦窗口拉到前台
-    focusBrowserWindow(proc?.pid);
+    activateBrowserWindow(browserPid);
+    focusBrowserWindow(browserPid);
   } catch (err) {
     console.warn(`[open-web] 设置 cookie 或导航异常: ${err.message}`);
   } finally {
@@ -1942,6 +2022,6 @@ export async function openClaudeWebBrowser({ sessionKey, org = '', cookie = '', 
     }
   }
 
-  return { ok: true, browser: path.basename(exe), pid: proc?.pid };
+  return { ok: true, browser: path.basename(exe), pid: browserPid };
 }
 

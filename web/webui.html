@@ -951,8 +951,8 @@ sessionKey=sk-ant-sid02-uuuuuuuu; ..."></textarea>
     <p class="hint" id="webLoginHint">使用当前账号直接在浏览器中登录官方 Claude.ai 网页端。</p>
     <div style="background:#f8fafc;border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px">
       <div style="font-weight:600;margin-bottom:6px">方式一：一键自动在浏览器中打开（最便捷）</div>
-      <div style="font-size:12px;color:var(--sub);margin-bottom:10px">自动调起本地 Chrome 浏览器，种入 sessionKey 并打开 claude.ai/new，保持窗口打开供您日常聊天使用。</div>
-      <button class="btn primary" id="btnWebLoginLaunch">🚀 直接在 Chrome 中打开并登录</button>
+      <div style="font-size:12px;color:var(--sub);margin-bottom:10px">自动调起系统默认浏览器（如 Edge、Chrome 等），写入 sessionKey 并打开 claude.ai/new，保持独立窗口供您日常使用。</div>
+      <button class="btn primary" id="btnWebLoginLaunch">🚀 在默认浏览器 / Chrome 中打开并登录</button>
     </div>
     <div style="background:#f8fafc;border:1px solid var(--line);border-radius:12px;padding:14px">
       <div style="font-weight:600;margin-bottom:6px">方式二：在您自己已开的主力浏览器中使用</div>
@@ -2486,7 +2486,7 @@ function openWebLogin(acct) {
   const script = `document.cookie="sessionKey=${sk}; domain=.claude.ai; path=/; max-age=31536000; Secure; SameSite=Lax"; location.href="https://claude.ai/new";`;
   $("#webLoginScript").value = script;
   $("#btnWebLoginLaunch").disabled = false;
-  $("#btnWebLoginLaunch").textContent = "🚀 直接在 Chrome 中打开并登录";
+  $("#btnWebLoginLaunch").textContent = "🚀 在默认浏览器 / Chrome 中打开并登录";
   $("#maskWebLogin").classList.add("on");
 }
 window.closeWebLogin = () => $("#maskWebLogin").classList.remove("on");
@@ -2508,7 +2508,7 @@ $("#btnWebLoginLaunch").onclick = async () => {
     toast("调起浏览器失败: " + ex.message, true);
   } finally {
     btn.disabled = false;
-    btn.textContent = "🚀 直接在 Chrome 中打开并登录";
+    btn.textContent = "🚀 在默认浏览器 / Chrome 中打开并登录";
   }
 };
 
