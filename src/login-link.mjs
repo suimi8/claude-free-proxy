@@ -974,21 +974,6 @@ export function createLoginManager(opts) {
         loginUrl,
       ];
 
-      const yesExt = path.join(ROOT, 'tools', 'extensions', 'yescaptcha');
-      if (fs.existsSync(path.join(yesExt, 'manifest.json'))) {
-        try {
-          const cfgPath = path.join(yesExt, 'config.js');
-          const key = (process.env.YESCAPTCHA_CLIENT_KEY || '').trim();
-          if (key && fs.existsSync(cfgPath)) {
-            let txt = fs.readFileSync(cfgPath, 'utf8');
-            if (txt.includes(`clientKey: ''`) || txt.includes(`clientKey: ""`)) {
-              txt = txt.replace(/clientKey:\s*['"]['"]/, `clientKey: '${key}'`);
-              fs.writeFileSync(cfgPath, txt, 'utf8');
-            }
-          }
-        } catch {}
-        args.push(`--load-extension=${yesExt}`);
-      }
 
       const env = { ...process.env };
       if (process.platform === 'linux') {
@@ -1937,10 +1922,6 @@ export async function openClaudeWebBrowser({ sessionKey, org = '', cookie = '', 
     'about:blank',
   ];
 
-  const yesExt = path.join(ROOT, 'tools', 'extensions', 'yescaptcha');
-  if (fs.existsSync(path.join(yesExt, 'manifest.json'))) {
-    args.push(`--load-extension=${yesExt}`);
-  }
 
   const proc = spawn(exe, args, {
     stdio: 'ignore',
