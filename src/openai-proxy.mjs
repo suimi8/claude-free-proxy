@@ -2825,6 +2825,7 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname.startsWith('/v1/accounts/')) {
       const rest = url.pathname.slice('/v1/accounts/'.length);
+      const id = rest;
 
       if (rest === 'refresh' && req.method === 'POST') {
         const ok = await refreshSession(true);
@@ -2838,7 +2839,52 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
-      const id = rest;
+      if (rest === 'lookup' && req.method === 'POST') {
+        // 凭据查询器：粘贴一条 sessionKey，返回它在账号池中的匹配信息；
+        // 池里没有时现场调 GET /api/organizations 发现 org（只读，不消耗额度）。
+        // 只回传「调用者已经持有的东西」——必须先拿到完整 sessionKey 才能命中，不构成新的泄露面。
+        const b = await readBody(req);
+        const sk = String(b.sessionKey || '').trim();
+        if (!sk) {
+          return json(res, 400, { error: { message: 'sessionKey is required', type: 'invalid_request_error' } });
+        }
+        const hit = POOL.accounts().find(x => x.sessionKey === sk);
+        if (hit) {
+          return json(res, 200, {
+            matched: true,
+            account: {
+              id: hit.id, label: hit.label, org: hit.org || '',
+              enabled: !!hit.enabled, source: hit.source || 'manual',
+            },
+          });
+        }
+        try {
+          const d = await discoverOrg(sk, b.base || undefined, b.ua || undefined);
+          return json(res, 200, { matched: false, org: d.org, name: d.name || '', plan: d.plan || '' });
+        } catch (e) {
+          return json(res, e.status || 502, { error: { message: `查询失败: ${e.message}`, type: 'proxy_error' } });
+        }
+      }
+
+      if (req.method === 'GET' && id.endsWith('/credentials')) {
+        // 完整凭据查询（sessionKey 明文 + org）：给 WebUI 的「密钥」按钮做复制/迁移用。
+        // 与 /v1/keys 同级安全：统一鉴权（Bearer）之外，还要求本机回环访问，局域网一律拒绝。
+        if (!isLoopbackReq(req)) {
+          return json(res, 403, { error: { message: '完整凭据只能在运行反代的机器上查询（需本机访问）', type: 'permission_error' } });
+        }
+        const acct = POOL.get(id.slice(0, -'/credentials'.length));
+        if (!acct) return json(res, 404, { error: { message: 'account not found', type: 'invalid_request_error' } });
+        return json(res, 200, {
+          id: acct.id,
+          label: acct.label,
+          sessionKey: acct.sessionKey || '',
+          org: acct.org || '',
+          base: acct.base || '',
+          ua: acct.ua || '',
+          enabled: !!acct.enabled,
+        });
+      }
+
       if (req.method === 'GET' && id.endsWith('/test')) {
         // 连通性测试：用该账号的 sessionKey 打一次 GET /api/organizations（不消耗对话额度）
         const acct = POOL.get(id.slice(0, -'/test'.length));
