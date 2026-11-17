@@ -287,7 +287,8 @@ function refreshSession(force = false) {
 function webHeaders(acct) {
   // sec-ch-ua 的版本号要和 UA 里的 Chrome 大版本一致 —— 不配套本身就是 CF 的一个风控信号
   const ua = acct.ua || DEFAULT_UA;
-  const major = (String(ua).match(/Chrome\/(\d+)/) || [])[1] || '140';
+  const major = (String(ua).match(/Chrome\/(\d+)/) || [])[1] || '131';
+  const cappedMajor = Math.min(+major || 131, 136);
   return {
     'cookie': acct.cookie || `sessionKey=${acct.sessionKey}`,
     'user-agent': ua,
@@ -296,7 +297,7 @@ function webHeaders(acct) {
     'content-type': 'application/json',
     'origin': acct.base || 'https://claude.ai',
     'referer': (acct.base || 'https://claude.ai') + '/',
-    'sec-ch-ua': `"Chromium";v="${major}", "Not?A_Brand";v="24"`,
+    'sec-ch-ua': `"Chromium";v="${cappedMajor}", "Not?A_Brand";v="24"`,
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Windows"',
     'sec-fetch-site': 'same-origin',
@@ -371,14 +372,16 @@ function clientGoneError() {
  * 回退 node fetch；伪装层自身网络失败也回退，绝不放大故障。 */
 const CURL_EXE = path.join(ROOT, 'tools', 'curl-impersonate', 'curl-impersonate.exe');
 const CURL_ENABLED = process.env.UPSTREAM_IMPERSONATE !== '0' && fs.existsSync(CURL_EXE);
-const CURL_PROFILES = ['chrome152', 'chrome151', 'chrome150', 'chrome146', 'chrome145', 'chrome142', 'chrome136', 'chrome133a', 'chrome131', 'chrome124', 'chrome123', 'chrome120', 'chrome119', 'chrome116', 'chrome110', 'chrome107', 'chrome104', 'chrome101', 'chrome100', 'chrome99'];
+const CURL_PROFILES = ['chrome136', 'chrome133a', 'chrome131', 'chrome124', 'chrome123', 'chrome120', 'chrome119', 'chrome116', 'chrome110'];
 /** 按账号 UA 的 Chrome 大版本选最接近（不超过）的指纹档位，缩小 TLS 版本与 UA 的错位 */
 function curlProfileFor(ua) {
   const major = +(String(ua).match(/Chrome\/(\d+)/) || [])[1] || 0;
+  // 超过 136 的超前版本在 CF 上会被判定为异常特征触发 challenge，封顶到已验证安全稳定的 136/131
+  const capped = Math.min(major || 131, 136);
   let best = null, bestN = -1;
   for (const p of CURL_PROFILES) {
     const n = +(/chrome(\d+)/.exec(p)?.[1] || 0);
-    if (major >= n && n > bestN) { best = p; bestN = n; }
+    if (capped >= n && n > bestN) { best = p; bestN = n; }
   }
   return best || 'chrome131';
 }
@@ -441,14 +444,28 @@ async function curlFetch(url, { method = 'GET', headers = {}, body = null, signa
           }
           return textPromise;
         },
+        json: async () => {
+          if (!textPromise) {
+            textPromise = new Promise((res2, rej2) => {
+              const chunks = [];
+              out.on('data', c => chunks.push(c));
+              out.on('end', () => res2(Buffer.concat(chunks).toString('utf8')));
+              out.on('error', rej2);
+            });
+          }
+          return JSON.parse(await textPromise);
+        },
         body: Readable.toWeb(out),
       });
     });
     out.on('drain', () => child.stdout.resume());
     child.stdout.on('end', () => out.end());
-    child.on('close', code => { out.end(); if (!headersDone) fail(`curl exit ${code} (no response headers)`); });
+    let errBuf = '';
+    child.stderr.on('data', c => { errBuf += c.toString('utf8'); });
+    child.on('close', code => { out.end(); if (!headersDone) fail(`curl exit ${code}${errBuf ? ': ' + errBuf.slice(0, 200) : ''} (no response headers)`); });
     if (body != null && method !== 'GET' && method !== 'HEAD') {
-      child.stdin.end(typeof body === 'string' ? body : Buffer.from(body));
+      const data = Buffer.isBuffer(body) ? body : typeof body === 'string' ? body : Buffer.from(String(body));
+      child.stdin.end(data);
     } else child.stdin.end();
   });
 }
@@ -671,16 +688,22 @@ async function uploadOne(acct, img, signal) {
     } catch {}
   }
   const headers = webHeaders(acct);
-  delete headers['content-type'];        // FormData 必须自带 multipart boundary
   headers['accept'] = '*/*';
   headers['referer'] = (acct.base || 'https://claude.ai') + '/new';
-  const form = new UndiciFormData();
-  form.append('file', new Blob([img.bytes], { type: img.mime }), img.name);
+
+  const boundary = `----WebKitFormBoundary${randomUUID().replace(/-/g, '')}`;
+  const head = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${img.name}"\r\nContent-Type: ${img.mime}\r\n\r\n`
+  );
+  const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+  const bodyBuffer = Buffer.concat([head, img.bytes, tail]);
+  headers['content-type'] = `multipart/form-data; boundary=${boundary}`;
+
   const r = await upstreamFetch(`${base}/api/${org}/upload`, {
-    method: 'POST', headers, body: form, signal,
+    method: 'POST', headers, body: bodyBuffer, signal,
   });
+  const txt = await r.text();
   if (!r.ok) {
-    const txt = await r.text();
     if (isChallenge(txt)) {
       throw Object.assign(new Error('cloudflare_challenge'), { kind: 'challenge', retryable: true, status: 403 });
     }
@@ -689,7 +712,7 @@ async function uploadOne(acct, img, signal) {
       { status: r.status, kind, retryable, resetsAt, reason });
   }
   let j;
-  try { j = await r.json(); } catch {
+  try { j = JSON.parse(txt); } catch {
     throw imgError('upload 响应不是 JSON', true, 502);
   }
   const uuid = j.file_uuid || j.uuid;
