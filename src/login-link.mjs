@@ -1692,3 +1692,113 @@ export function createCfVerifyManager(opts) {
     activeFlow: () => (active ? stateOf(active) : null),
   };
 }
+
+/**
+ * 一键打开并登录 Claude 官方网页端
+ * 启动一个独立 Chrome 窗口，通过 CDP 种入 sessionKey（及 cf_clearance/org），
+ * 然后直达 claude.ai/new，保持浏览器打开供用户日常使用。
+ */
+export async function openClaudeWebBrowser({ sessionKey, org = '', cookie = '', ua = '', targetUrl = 'https://claude.ai/new' }) {
+  if (!sessionKey || !sessionKey.startsWith('sk-ant-')) {
+    throw new Error('无效的 sessionKey');
+  }
+  const exe = findBrowser();
+  const port = await freePort();
+  const profile = path.join(os.tmpdir(), `claude-web-user-${Buffer.from(sessionKey).toString('hex').slice(-8)}`);
+  fs.mkdirSync(profile, { recursive: true });
+
+  const args = [
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${profile}`,
+    '--remote-allow-origins=*',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-blink-features=AutomationControlled',
+    '--new-window',
+    'about:blank',
+  ];
+
+  const env = { ...process.env };
+  const proc = spawn(exe, args, { stdio: 'ignore', windowsHide: false, env, detached: true });
+  proc.unref();
+
+  // 等待 CDP 调试端口就绪
+  const ver = await waitCdp(port, 25);
+  if (!ver?.webSocketDebuggerUrl) {
+    throw new Error('浏览器已启动，但调试端口连接超时');
+  }
+
+  // 连接页面 Target
+  let pageCdp = null;
+  for (let i = 0; i < 15; i++) {
+    try {
+      const list = await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(2000) })).json();
+      const page = list.find(t => t.type === 'page' && t.webSocketDebuggerUrl);
+      if (page) {
+        pageCdp = await CDP.connect(page.webSocketDebuggerUrl);
+        break;
+      }
+    } catch {}
+    await sleep(400);
+  }
+
+  if (!pageCdp) throw new Error('无法连接浏览器页面调试通道');
+
+  try {
+    await pageCdp.call('Page.enable');
+    await pageCdp.call('Page.addScriptToEvaluateOnNewDocument', {
+      source: `try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch {}`,
+    }).catch(() => {});
+
+    // 种入 sessionKey
+    await pageCdp.call('Network.setCookie', {
+      name: 'sessionKey',
+      value: sessionKey,
+      domain: '.claude.ai',
+      path: '/',
+      secure: true,
+      httpOnly: true,
+      sameSite: 'Lax',
+    });
+
+    // 如果有 cf_clearance，从 cookie 解析并种入
+    if (cookie) {
+      const cfMatch = /(?:^|;\s*)cf_clearance=([^;]+)/.exec(cookie);
+      if (cfMatch) {
+        await pageCdp.call('Network.setCookie', {
+          name: 'cf_clearance',
+          value: cfMatch[1],
+          domain: '.claude.ai',
+          path: '/',
+          secure: true,
+          httpOnly: true,
+          sameSite: 'None',
+        }).catch(() => {});
+      }
+    }
+
+    // 如果有 org，种入 lastActiveOrg
+    if (org) {
+      await pageCdp.call('Network.setCookie', {
+        name: 'lastActiveOrg',
+        value: org,
+        domain: '.claude.ai',
+        path: '/',
+        secure: true,
+        httpOnly: false,
+        sameSite: 'Lax',
+      }).catch(() => {});
+    }
+
+    // 导航到 targetUrl
+    await pageCdp.call('Page.navigate', { url: targetUrl }).catch(() => {});
+
+    // 聚焦窗口拉到前台
+    focusBrowserWindow(proc.pid);
+  } catch (err) {
+    console.warn(`[open-web] 设置 cookie 或导航异常: ${err.message}`);
+  }
+
+  return { ok: true, browser: path.basename(exe), pid: proc.pid };
+}
+

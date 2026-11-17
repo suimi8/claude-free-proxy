@@ -296,6 +296,7 @@
     <button class="btn" id="btnCfAll" title="对被 Cloudflare 拦截（cloudflare_challenge）的账号一键批量过验证：逐个弹出 Chrome 窗口（一次一个），手动过挑战后自动收新 cf_clearance + 配套 UA 入池并清冷却">🛡 批量过CF</button>
     <button class="btn" id="btnLookup" title="粘贴一条 sessionKey，查询它对应的账号与 org；未入池的 key 会现场向 claude.ai 查询（只读，不消耗额度）">🔎 查询密钥</button>
     <button class="btn" id="btnExportAll" title="一键复制所有账号的 sessionKey（每行一个）或直接导出为 txt 文本文件">📋 导出密钥</button>
+    <button class="btn" id="btnBatchImport" title="批量粘贴导入多个 sessionKey（支持多种格式，自动发现组织与备注）">📥 批量导入</button>
     <div class="grow"></div>
     <div class="cfg">
       <label>轮询</label>
@@ -656,6 +657,10 @@
       <code id="credsOrg" style="display:block;white-space:pre-wrap;word-break:break-all;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px;font-size:12px;min-height:20px"></code>
       <button class="mini" data-copy="#credsOrg" style="margin-top:6px">复制</button>
     </div>
+    <div style="display:flex;gap:8px;margin-top:14px;padding-top:12px;border-top:1px dashed var(--line);flex-wrap:wrap">
+      <button class="btn sm" id="btnCredsDesktop" title="一键写入官方 Claude 桌面端并启动">🖥️ 登录桌面端</button>
+      <button class="btn sm" id="btnCredsWeb" title="一键在 Chrome 浏览器中登录并打开">🌐 登录网页端</button>
+    </div>
     <div class="mrow">
       <button class="btn" onclick="closeCreds()">关闭</button>
     </div>
@@ -697,6 +702,65 @@
       <span id="exportCountInfo" style="font-size:12px;color:var(--sub)"></span>
       <div style="flex:1"></div>
       <button class="btn" onclick="closeExport()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 批量导入 sessionKey -->
+<div class="mask" id="maskBatchImport" style="z-index:75">
+  <div class="modal" style="max-width:580px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      <h3 style="margin:0">📥 批量导入 sessionKey</h3>
+      <button class="btn sm" onclick="closeBatchImport()">✕</button>
+    </div>
+    <p class="hint">每行一个 sessionKey。支持单 key、<code>备注,key</code>、<code>key----备注</code> 或直接粘贴含 sessionKey 的 Cookie 串（自动发现组织与备注）。</p>
+    <div class="field">
+      <label>sessionKey 列表（每行一个）</label>
+      <textarea id="fBatchText" style="width:100%;height:180px;font-family:monospace;font-size:12px;white-space:pre" placeholder="sk-ant-sid02-xxxxxxxx
+小号A,sk-ant-sid02-yyyyyyyy
+sk-ant-sid02-zzzzzzzz----小号B
+sessionKey=sk-ant-sid02-wwwwwwww; ..."></textarea>
+    </div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;font-size:12px;color:var(--sub)">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" id="fBatchSkipExisting" checked> 遇到已存在账号时跳过（不覆盖）
+      </label>
+      <span id="batchCountHint">已输入 0 行</span>
+    </div>
+    <div id="batchProgressBox" style="display:none;margin-bottom:12px;padding:10px 12px;background:#f8fafc;border:1px solid var(--line);border-radius:10px;font-size:12px">
+      <div id="batchProgressTitle" style="font-weight:600;margin-bottom:4px;color:var(--ink)">正在批量导入…</div>
+      <div id="batchProgressDetail" class="hsub"></div>
+    </div>
+    <div class="mrow">
+      <button class="btn" onclick="closeBatchImport()">取消</button>
+      <button class="btn primary" id="btnBatchStart">🚀 开始批量导入</button>
+    </div>
+  </div>
+</div>
+
+<!-- 网页端登录弹窗 / 脚本 -->
+<div class="mask" id="maskWebLogin" style="z-index:76">
+  <div class="modal" style="max-width:540px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      <h3 style="margin:0" id="webLoginTitle">🌐 登录 Claude 官方网页端</h3>
+      <button class="btn sm" onclick="closeWebLogin()">✕</button>
+    </div>
+    <p class="hint" id="webLoginHint">使用当前账号直接在浏览器中登录官方 Claude.ai 网页端。</p>
+    <div style="background:#f8fafc;border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px">
+      <div style="font-weight:600;margin-bottom:6px">方式一：一键自动在浏览器中打开（最便捷）</div>
+      <div style="font-size:12px;color:var(--sub);margin-bottom:10px">自动调起本地 Chrome 浏览器，种入 sessionKey 并打开 claude.ai/new，保持窗口打开供您日常聊天使用。</div>
+      <button class="btn primary" id="btnWebLoginLaunch">🚀 直接在 Chrome 中打开并登录</button>
+    </div>
+    <div style="background:#f8fafc;border:1px solid var(--line);border-radius:12px;padding:14px">
+      <div style="font-weight:600;margin-bottom:6px">方式二：在您自己已开的主力浏览器中使用</div>
+      <div style="font-size:12px;color:var(--sub);margin-bottom:8px">在您任意浏览器中打开 <a href="https://claude.ai" target="_blank" style="color:var(--blue)">claude.ai</a>，按 <b>F12</b> 打开控制台（Console），粘贴下方代码并按回车即可瞬间登录：</div>
+      <div class="field" style="margin-bottom:8px">
+        <textarea id="webLoginScript" style="width:100%;height:65px;font-family:monospace;font-size:11px" readonly></textarea>
+      </div>
+      <button class="btn sm" id="btnCopyWebScript">📋 复制控制台登录脚本</button>
+    </div>
+    <div class="mrow">
+      <button class="btn" onclick="closeWebLogin()">关闭</button>
     </div>
   </div>
 </div>
@@ -983,6 +1047,8 @@ function card(a) {
       <button class="btn sm" data-act="test">🧪 测试</button>
       <button class="btn sm" data-act="creds" title="查询该账号的完整 sessionKey 与 org，一键复制（仅限本机访问）">🔑 密钥</button>
       <button class="btn sm" data-act="edit">✏️ 备注</button>
+      <button class="btn sm" data-act="desktop" title="一键将该账号写入官方 Claude 桌面端并启动">🖥️ 桌面</button>
+      <button class="btn sm" data-act="web" title="一键在官方 Chrome 浏览器中登录并打开，或复制一键登录脚本">🌐 网页</button>
       <button class="btn sm" data-act="uncd" ${cdSec > 0 ? "" : "disabled"}>⏱ 清冷却</button>
       ${/cloudflare|challenge/i.test(a.last_error || "") ? `<button class="btn sm" data-act="cfpass" title="弹出一个无痕 Chrome 窗口（随机指纹，登录态只进内存不落盘），完成 Cloudflare 验证后自动把新 cf_clearance + 配套 UA 写回该账号并清冷却（不打码）">🛡 过CF</button>` : ""}
       <button class="btn sm danger" data-act="del">🗑</button>
@@ -1549,11 +1615,28 @@ $("#grid").addEventListener("click", async e => {
     // 完整凭据查询（sessionKey 明文 + org）：仅本机访问可用，后端会校验回环来源
     try {
       const r = await api("/v1/accounts/" + encodeURIComponent(id) + "/credentials");
+      CURRENT_CREDS = { id, ...r };
       $("#credsTitle").textContent = "🔑 凭据 · " + (r.label || r.id);
       $("#credsKey").textContent = r.sessionKey || "—（该账号没有 sessionKey，可能仅 Desktop cookie）";
       $("#credsOrg").textContent = r.org || "—";
       $("#maskCreds").classList.add("on");
     } catch (ex) { toast("🔑 " + ex.message, true); }
+  }
+  if (act === "desktop") {
+    e.target.disabled = true; const old = e.target.textContent; e.target.textContent = "启动中…";
+    try {
+      const r = await api("/v1/accounts/" + encodeURIComponent(id) + "/desktop-login", { method: "POST", body: "{}" });
+      toast(r.message || "✅ 官方 Claude 桌面端已成功启动并载入登录态！");
+    } catch (ex) { toast("🖥️ " + ex.message, true); }
+    finally { e.target.disabled = false; e.target.textContent = old; }
+  }
+  if (act === "web") {
+    e.target.disabled = true; const old = e.target.textContent; e.target.textContent = "加载中…";
+    try {
+      const r = await api("/v1/accounts/" + encodeURIComponent(id) + "/credentials");
+      openWebLogin({ id, ...r });
+    } catch (ex) { toast("🌐 " + ex.message, true); }
+    finally { e.target.disabled = false; e.target.textContent = old; }
   }
   if (act === "kyc") {
     e.target.disabled = true; const old = e.target.textContent; e.target.textContent = "查询中…";
@@ -1721,6 +1804,115 @@ $("#btnExportDownloadModal").onclick = () => {
 // 工具栏按钮：导出全部 Key
 $("#btnExportAll").onclick = () => openExportModal(null);
 
+let CURRENT_CREDS = null;
+$("#btnCredsDesktop").onclick = async () => {
+  if (!CURRENT_CREDS?.id) return;
+  const btn = $("#btnCredsDesktop");
+  btn.disabled = true; btn.textContent = "启动中…";
+  try {
+    const r = await api("/v1/accounts/" + encodeURIComponent(CURRENT_CREDS.id) + "/desktop-login", { method: "POST", body: "{}" });
+    toast(r.message || "✅ 官方 Claude 桌面端已启动并成功登录！");
+  } catch (ex) { toast("🖥️ " + ex.message, true); }
+  finally { btn.disabled = false; btn.textContent = "🖥️ 登录桌面端"; }
+};
+$("#btnCredsWeb").onclick = () => {
+  if (CURRENT_CREDS) openWebLogin(CURRENT_CREDS);
+};
+
+/* ---------------- 批量导入 sessionKey ---------------- */
+window.closeBatchImport = () => $("#maskBatchImport").classList.remove("on");
+$("#maskBatchImport").addEventListener("click", e => { if (e.target.id === "maskBatchImport") closeBatchImport(); });
+$("#btnBatchImport").onclick = () => {
+  $("#fBatchText").value = "";
+  $("#batchCountHint").textContent = "已输入 0 行";
+  $("#batchProgressBox").style.display = "none";
+  $("#btnBatchStart").disabled = false;
+  $("#btnBatchStart").textContent = "🚀 开始批量导入";
+  $("#maskBatchImport").classList.add("on");
+  $("#fBatchText").focus();
+};
+$("#fBatchText").addEventListener("input", () => {
+  const lines = $("#fBatchText").value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  $("#batchCountHint").textContent = "已输入 " + lines.length + " 行";
+});
+$("#btnBatchStart").onclick = async () => {
+  const text = $("#fBatchText").value.trim();
+  if (!text) return toast("请先输入至少一行 sessionKey", true);
+  const btn = $("#btnBatchStart");
+  btn.disabled = true;
+  btn.textContent = "正在导入…";
+  const box = $("#batchProgressBox");
+  box.style.display = "block";
+  $("#batchProgressTitle").textContent = "正在并发解析并自动发现组织 (Org)…";
+  $("#batchProgressDetail").textContent = "请稍候，这通常需要几秒到十几秒…";
+  try {
+    const skip = $("#fBatchSkipExisting").checked;
+    const r = await api("/v1/accounts/batch-import", {
+      method: "POST",
+      body: JSON.stringify({ text, onConflict: skip ? "skip" : "update" })
+    });
+    $("#batchProgressTitle").textContent = "✅ 批量导入完成！";
+    $("#batchProgressDetail").innerHTML = `共解析 <b>${r.total}</b> 条 ｜ 新增 <b>${r.imported}</b> ｜ 更新 <b>${r.updated}</b> ｜ 跳过 <b>${r.skipped}</b> ｜ 失败 <b>${r.failed}</b>`
+      + (r.errors?.length ? `<br><span style="color:var(--red)">失败示例: ${esc(r.errors[0].error)}</span>` : "");
+    toast(`批量导入完成：新增 ${r.imported}，更新 ${r.updated}，跳过 ${r.skipped}` + (r.failed ? `，失败 ${r.failed}` : ""), r.failed > 0);
+    await load(true);
+    btn.textContent = "导入完成";
+  } catch (ex) {
+    $("#batchProgressTitle").textContent = "❌ 导入失败";
+    $("#batchProgressDetail").textContent = ex.message;
+    toast(ex.message, true);
+    btn.disabled = false;
+    btn.textContent = "重试";
+  }
+};
+
+/* ---------------- 官方网页端一键登录 ---------------- */
+let WEB_LOGIN_ACCT = null;
+function openWebLogin(acct) {
+  WEB_LOGIN_ACCT = acct;
+  $("#webLoginTitle").textContent = "🌐 登录网页端 · " + (acct.label || acct.id);
+  const sk = acct.sessionKey || "";
+  const script = `document.cookie="sessionKey=${sk}; domain=.claude.ai; path=/; max-age=31536000; Secure; SameSite=Lax"; location.href="https://claude.ai/new";`;
+  $("#webLoginScript").value = script;
+  $("#btnWebLoginLaunch").disabled = false;
+  $("#btnWebLoginLaunch").textContent = "🚀 直接在 Chrome 中打开并登录";
+  $("#maskWebLogin").classList.add("on");
+}
+window.closeWebLogin = () => $("#maskWebLogin").classList.remove("on");
+$("#maskWebLogin").addEventListener("click", e => { if (e.target.id === "maskWebLogin") closeWebLogin(); });
+
+$("#btnWebLoginLaunch").onclick = async () => {
+  if (!WEB_LOGIN_ACCT) return;
+  const btn = $("#btnWebLoginLaunch");
+  btn.disabled = true;
+  btn.textContent = "正在调起浏览器…";
+  try {
+    const r = await api("/v1/accounts/" + encodeURIComponent(WEB_LOGIN_ACCT.id) + "/web-login", {
+      method: "POST",
+      body: "{}"
+    });
+    toast(r.message || "✅ 已成功打开浏览器并登录！");
+    closeWebLogin();
+  } catch (ex) {
+    toast("调起浏览器失败: " + ex.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🚀 直接在 Chrome 中打开并登录";
+  }
+};
+
+$("#btnCopyWebScript").onclick = async () => {
+  const v = $("#webLoginScript").value;
+  try {
+    await navigator.clipboard.writeText(v);
+    toast("控制台登录脚本已复制！在 claude.ai 页面按 F12 粘贴回车即可登录");
+  } catch {
+    $("#webLoginScript").select();
+    document.execCommand("copy");
+    toast("控制台登录脚本已复制！");
+  }
+};
+
 // 选择栏按钮：一键复制所选
 $("#btnCopySel").onclick = async () => {
   const ids = Array.from(S.sel);
@@ -1762,7 +1954,7 @@ document.addEventListener("click", e => {
 
 /* Esc 关闭弹层 */
 document.addEventListener("keydown", e => {
-  if (e.key === "Escape") { closeAcc(); closeCreds(); closeLookup(); closeExport(); if (document.activeElement !== $("#fApi")) showKey(false); }
+  if (e.key === "Escape") { closeAcc(); closeCreds(); closeLookup(); closeExport(); closeBatchImport(); closeWebLogin(); if (document.activeElement !== $("#fApi")) showKey(false); }
 });
 $("#maskAcc").addEventListener("click", e => { if (e.target.id === "maskAcc") closeAcc(); });
 

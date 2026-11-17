@@ -61,7 +61,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { Readable, PassThrough } from 'node:stream';
 import { AccountPool, discoverOrg, DEFAULT_UA, sleep } from './accounts.mjs';
-import { createLoginManager, createCfVerifyManager, loginPage } from './login-link.mjs';
+import { createLoginManager, createCfVerifyManager, loginPage, openClaudeWebBrowser } from './login-link.mjs';
 import { createConfigStore } from './config.mjs';
 import { probeQuota } from './quota-probe.mjs';
 import { checkKyc } from './kyc.mjs';
@@ -2823,9 +2823,216 @@ const server = http.createServer(async (req, res) => {
       return json(res, created ? 201 : 200, { created, account: maskAccount(account) });
     }
 
+    function openDesktopLogin(sessionKey, org = '', cookie = '') {
+      return new Promise((resolve, reject) => {
+        const script = path.join(ROOT, 'tools', 'desktop_login.py');
+        const args = [script, sessionKey];
+        if (org) args.push(org);
+        const proc = spawn('python', args, {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
+        });
+        let out = '';
+        let err = '';
+        proc.stdout.on('data', d => { out += d; });
+        proc.stderr.on('data', d => { err += d; });
+        proc.on('close', code => {
+          try {
+            const res = JSON.parse(out.trim());
+            if (res.ok) return resolve(res);
+            return reject(new Error(res.error || res.message || `exit code ${code}`));
+          } catch {
+            if (code === 0) resolve({ ok: true, message: out.trim() || '启动成功' });
+            else reject(new Error(err.trim() || out.trim() || `exit code ${code}`));
+          }
+        });
+        proc.on('error', reject);
+      });
+    }
+
+    function parseImportLines(text) {
+      const lines = String(text || '').split(/\r?\n/);
+      const items = [];
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#') || line.startsWith('//')) continue;
+        if (line.startsWith('{') && line.endsWith('}')) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj.sessionKey) {
+              items.push({ sessionKey: obj.sessionKey.trim(), label: obj.label?.trim() || '', org: obj.org?.trim() || '' });
+              continue;
+            }
+          } catch {}
+        }
+        let sk = '';
+        let label = '';
+        if (line.includes('----')) {
+          const parts = line.split('----').map(s => s.trim());
+          const skIdx = parts.findIndex(p => p.includes('sk-ant-'));
+          if (skIdx >= 0) {
+            sk = (/(sk-ant-sid02-[A-Za-z0-9_-]+|sk-ant-[A-Za-z0-9_-]+)/.exec(parts[skIdx]) || [])[0] || parts[skIdx];
+            label = parts.find((_, i) => i !== skIdx) || '';
+          }
+        } else if (line.includes(',') || line.includes('\t')) {
+          const parts = line.split(/[\t,]/).map(s => s.trim());
+          const skIdx = parts.findIndex(p => p.includes('sk-ant-'));
+          if (skIdx >= 0) {
+            sk = (/(sk-ant-sid02-[A-Za-z0-9_-]+|sk-ant-[A-Za-z0-9_-]+)/.exec(parts[skIdx]) || [])[0] || parts[skIdx];
+            label = parts.find((_, i) => i !== skIdx) || '';
+          }
+        } else {
+          const m = /(?:sessionKey=)?(sk-ant-sid02-[A-Za-z0-9_-]+|sk-ant-[A-Za-z0-9_-]+)/.exec(line);
+          if (m) {
+            sk = m[1];
+            const rem = line.replace(m[0], '').replace(/^[;,=\s]+|[;,=\s]+$/g, '').trim();
+            if (rem && !rem.includes('cf_clearance') && rem.length < 50) label = rem;
+          }
+        }
+        if (sk) {
+          items.push({ sessionKey: sk, label });
+        }
+      }
+      return items;
+    }
+
     if (url.pathname.startsWith('/v1/accounts/')) {
       const rest = url.pathname.slice('/v1/accounts/'.length);
       const id = rest;
+
+      if (rest === 'batch-import' && req.method === 'POST') {
+        if (!isLoopbackReq(req)) {
+          return json(res, 403, { error: { message: '批量导入凭据只能在运行反代的机器上操作（需本机访问）', type: 'permission_error' } });
+        }
+        let b;
+        try { b = await readBody(req); } catch { b = {}; }
+        let rawItems = [];
+        if (Array.isArray(b.items)) {
+          rawItems = b.items;
+        } else if (typeof b.text === 'string') {
+          rawItems = parseImportLines(b.text);
+        }
+        if (!rawItems.length) {
+          return json(res, 400, { error: { message: '未解析出任何有效的 sessionKey', type: 'invalid_request_error' } });
+        }
+        const onConflict = b.onConflict || 'update';
+        const seen = new Set();
+        const unique = [];
+        for (const it of rawItems) {
+          const k = String(it.sessionKey || '').trim();
+          if (!k || seen.has(k)) continue;
+          seen.add(k);
+          unique.push({ sessionKey: k, label: (it.label || '').trim(), org: (it.org || '').trim() });
+        }
+
+        const results = {
+          total: unique.length,
+          imported: 0,
+          updated: 0,
+          skipped: 0,
+          failed: 0,
+          accounts: [],
+          errors: [],
+        };
+
+        const CONCURRENCY = 4;
+        let idx = 0;
+        const workers = Array.from({ length: Math.min(CONCURRENCY, unique.length) }, async () => {
+          while (idx < unique.length) {
+            const item = unique[idx++];
+            const existing = POOL.accounts().find(a => a.sessionKey === item.sessionKey);
+            if (existing && onConflict === 'skip') {
+              results.skipped++;
+              results.accounts.push({ id: existing.id, label: existing.label, sessionKey: item.sessionKey, status: 'skipped' });
+              continue;
+            }
+            let org = item.org;
+            let name = '';
+            if (!org) {
+              try {
+                const d = await discoverOrg(item.sessionKey, UP.web_base || undefined, DEFAULT_UA);
+                org = d.org;
+                name = d.name || '';
+              } catch (e) {
+                results.failed++;
+                results.errors.push({ sessionKey: item.sessionKey.slice(0, 16) + '...', error: e.message });
+                continue;
+              }
+            }
+            const label = item.label || name || (existing ? existing.label : `账号 ${results.imported + results.updated + 1}`);
+            const { account, created } = POOL.add({
+              sessionKey: item.sessionKey,
+              label,
+              org,
+              source: 'batch_import',
+              enabled: true,
+            });
+            if (created) results.imported++;
+            else results.updated++;
+            results.accounts.push({ id: account.id, label: account.label, org: account.org, status: created ? 'created' : 'updated' });
+          }
+        });
+        await Promise.all(workers);
+        return json(res, 200, results);
+      }
+
+      if (rest.endsWith('/desktop-login') && req.method === 'POST') {
+        if (!isLoopbackReq(req)) {
+          return json(res, 403, { error: { message: '登录桌面端只能在运行反代的机器上操作（需本机访问）', type: 'permission_error' } });
+        }
+        const acctId = rest.slice(0, -'/desktop-login'.length);
+        let sk = '';
+        let org = '';
+        let cookie = '';
+        if (acctId && acctId !== 'open') {
+          const a = POOL.get(acctId);
+          if (!a) return json(res, 404, { error: { message: 'account not found', type: 'invalid_request_error' } });
+          sk = a.sessionKey;
+          org = a.org || '';
+          cookie = a.cookie || '';
+        } else {
+          const b = await readBody(req);
+          sk = b.sessionKey;
+          org = b.org || '';
+        }
+        if (!sk) return json(res, 400, { error: { message: 'sessionKey is required', type: 'invalid_request_error' } });
+        try {
+          const r = await openDesktopLogin(sk, org, cookie);
+          return json(res, 200, r);
+        } catch (e) {
+          return json(res, 500, { error: { message: `调起 Claude 桌面端失败: ${e.message}`, type: 'proxy_error' } });
+        }
+      }
+
+      if (rest.endsWith('/web-login') && req.method === 'POST') {
+        if (!isLoopbackReq(req)) {
+          return json(res, 403, { error: { message: '登录网页端只能在运行反代的机器上操作（需本机访问）', type: 'permission_error' } });
+        }
+        const acctId = rest.slice(0, -'/web-login'.length);
+        let sk = '';
+        let org = '';
+        let cookie = '';
+        let ua = '';
+        if (acctId && acctId !== 'open') {
+          const a = POOL.get(acctId);
+          if (!a) return json(res, 404, { error: { message: 'account not found', type: 'invalid_request_error' } });
+          sk = a.sessionKey;
+          org = a.org || '';
+          cookie = a.cookie || '';
+          ua = a.ua || '';
+        } else {
+          const b = await readBody(req);
+          sk = b.sessionKey;
+          org = b.org || '';
+        }
+        if (!sk) return json(res, 400, { error: { message: 'sessionKey is required', type: 'invalid_request_error' } });
+        try {
+          const r = await openClaudeWebBrowser({ sessionKey: sk, org, cookie, ua });
+          return json(res, 200, { ok: true, message: `已成功在 ${r.browser} 浏览器中打开官方网页端并登录！`, ...r });
+        } catch (e) {
+          return json(res, 500, { error: { message: `调起浏览器失败: ${e.message}`, type: 'proxy_error' } });
+        }
+      }
 
       if (rest === 'refresh' && req.method === 'POST') {
         const ok = await refreshSession(true);
