@@ -477,6 +477,7 @@ export function createLoginManager(opts) {
   sweepStaleProfiles();
 
   let verificationProvider = typeof opts.onAutoVerification === 'function' ? opts.onAutoVerification : null;
+  let accountBannedHandler = typeof opts.onAccountBanned === 'function' ? opts.onAccountBanned : null;
 
   const flows = new Map();
   let active = null;
@@ -952,6 +953,21 @@ export function createLoginManager(opts) {
           f.message = '登录成功，账号已自动加入账号池（含 cf_clearance 与匹配 UA）';
           break;
         } catch (e) {
+          const errMsg = String(e?.message || e || '');
+          if (/account_banned|permission_error/i.test(errMsg)) {
+            f.state = 'error';
+            f.error = 'account_banned';
+            f.message = `❌ 该账号已被官方封禁 (account_banned)，已停止捕获并自动删除该邮箱`;
+            console.warn(`[login] ${f.id} (${f.autoEmail || ''}) 账号已被封禁: ${errMsg}`);
+            if (typeof accountBannedHandler === 'function' && f.autoEmail) {
+              try {
+                await accountBannedHandler(f.autoEmail, f);
+              } catch (banErr) {
+                console.warn(`[login] 自动清理封禁邮箱异常: ${banErr.message}`);
+              }
+            }
+            break;
+          }
           // sessionKey 刚出现但组织校验未过：可能页面还在跳转，继续等
           f.state = 'waiting';
           f.message = `正在等待登录完成…（${e.message}）`;
@@ -1467,6 +1483,9 @@ export function createLoginManager(opts) {
     },
     registerVerificationProvider(fn) {
       verificationProvider = fn;
+    },
+    registerAccountBannedHandler(fn) {
+      accountBannedHandler = fn;
     },
   };
 }
