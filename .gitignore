@@ -9,6 +9,8 @@ web/webui.local.html
 .env
 .env.*
 !.env.example
+tools/extensions/
+*.crx
 
 # 抓包、会话与调试数据
 download.devtools
