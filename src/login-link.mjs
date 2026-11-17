@@ -431,140 +431,242 @@ export function createLoginManager(opts) {
     const cdp = await ensurePageCdp(flow);
     const start = Date.now();
     let retryCount = 0;
-    const maxRetries = 4;
+    const maxRetries = 5;
 
     while (Date.now() - start < 90000) {
       if (!LIVE.has(flow.state)) return false;
       try {
-        const prep = await cdp.call('Runtime.evaluate', {
+        // 1. 检查页面是否已进入验证码输入页 (code_view)
+        const checkCode = await cdp.call('Runtime.evaluate', {
           expression: `(() => {
+            const codeInput = document.querySelector('input#code, input[data-testid="code"], input[name*="code" i], cds-text-input input[name*="code" i]');
+            return !!codeInput;
+          })()`,
+          returnByValue: true,
+        }).catch(() => null);
+        if (checkCode?.result?.value) return true;
+
+        // 2. 查找邮箱输入框与登录按钮位置及状态
+        const findRes = await cdp.call('Runtime.evaluate', {
+          expression: `(() => {
+            // 自动关闭 Cookie 提示
             const consent = document.querySelector('[data-testid="consent-accept"]');
             if (consent && consent.offsetWidth && consent.offsetHeight) consent.click();
-            if (document.readyState !== 'complete') return { status: 'loading' };
 
-            const codeInput = document.querySelector('input#code, input[data-testid="code"], input[name*="code" i]');
-            if (codeInput) return { status: 'code_view' };
+            // 查找 input (优先用户指定的精确选择器)
+            let input = document.querySelector('input[data-testid="email"]')
+              || document.querySelector('input#email')
+              || document.querySelector('cds-text-input input')
+              || document.querySelector('input[type="email"]')
+              || document.querySelector('input[autocomplete="email"]')
+              || Array.from(document.querySelectorAll('input')).find(i => /email|mail|メール/i.test([i.placeholder, i.name, i.id, i.getAttribute('aria-label')].join(' ')));
+
+            if (!input) {
+              const cds = document.querySelector('cds-text-input');
+              if (cds && cds.shadowRoot) input = cds.shadowRoot.querySelector('input');
+            }
+
+            if (!input) return { status: 'no_input' };
+
+            // 查找 continue 按钮 (优先用户指定的精确选择器)
+            const btn = document.querySelector('button[data-testid="continue"]')
+              || document.querySelector('button[type="submit"][data-cds="Button"]')
+              || document.querySelector('button[type="submit"]')
+              || Array.from(document.querySelectorAll('button')).find(b => !/google|apple/i.test(b.innerText || '') && /メールで続ける|email|继续|continue|login|登录/i.test((b.innerText || '').trim()));
+
+            input.scrollIntoView({ block: 'center' });
+            const inRect = input.getBoundingClientRect();
+
+            let btnRect = null;
+            let btnDisabled = false;
+            if (btn) {
+              btn.scrollIntoView({ block: 'center' });
+              btnRect = btn.getBoundingClientRect();
+              btnDisabled = !!btn.disabled || btn.getAttribute('aria-disabled') === 'true';
+            }
 
             const bodyText = (document.body ? document.body.innerText : '') || '';
             const hasBrowserErr = /无法验证您的浏览器|Unable to verify your browser|ブラウザを確認できませんでした|確認できません/i.test(bodyText);
 
-            const inputs = Array.from(document.querySelectorAll('input'));
-            const input = document.querySelector('input[type="email"], input[name="email"], input#email')
-              || inputs.find(i => /email|mail|メール/i.test([i.placeholder, i.name, i.id, i.getAttribute('aria-label')].join(' ')))
-              || (inputs.length === 1 ? inputs[0] : null);
-            if (!input) return { status: 'no_input', hasBrowserErr };
-
-            input.focus();
-            if (input.value !== ${JSON.stringify(email)}) {
-              const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-              if (setter) {
-                setter.call(input, ${JSON.stringify(email)});
-              } else {
-                input.value = ${JSON.stringify(email)};
-              }
-              input.dispatchEvent(new Event('input', { bubbles: true }));
-              input.dispatchEvent(new Event('change', { bubbles: true }));
-              input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
-            }
-
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const btn = document.querySelector('button[data-testid="continue"]')
-              || document.querySelector('button[type="submit"]')
-              || buttons.find(b => !/google|apple/i.test(b.innerText || '') && /メールで続ける|email|继续|continue|login|登录/i.test((b.innerText || '').trim()));
-
-            if (!btn) return { status: 'no_btn', hasBrowserErr };
-            if (btn.disabled) return { status: 'btn_disabled', hasBrowserErr };
-
-            btn.scrollIntoView({ block: 'center' });
-            const rect = btn.getBoundingClientRect();
             return {
-              status: 'ready_to_click',
+              status: 'found',
+              inputVal: input.value || '',
+              inX: Math.round(inRect.left + inRect.width / 2),
+              inY: Math.round(inRect.top + inRect.height / 2),
+              hasBtn: !!btn,
+              btnDisabled,
+              btnX: btnRect ? Math.round(btnRect.left + btnRect.width / 2) : 0,
+              btnY: btnRect ? Math.round(btnRect.top + btnRect.height / 2) : 0,
               hasBrowserErr,
-              x: Math.round(rect.left + rect.width / 2),
-              y: Math.round(rect.top + rect.height / 2),
             };
           })()`,
           returnByValue: true,
-        });
+        }).catch(() => null);
 
-        const res = prep?.result?.value;
-        if (res?.status === 'code_view') {
+        const info = findRes?.result?.value;
+        if (!info || info.status === 'no_input') {
+          await sleep(1000);
+          continue;
+        }
+
+        // 3. 如果输入框内容不等于目标邮箱，使用 CDP 真实键入 + DOM 原型注入双保险
+        if (info.inputVal !== email) {
+          console.log(`[login] ${flow.id} 正在填入邮箱: ${email}`);
+          // A. 鼠标点击输入框聚焦
+          if (info.inX > 0 && info.inY > 0) {
+            await cdp.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: info.inX, y: info.inY, button: 'left', clickCount: 1, buttons: 1 }).catch(() => {});
+            await sleep(50);
+            await cdp.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: info.inX, y: info.inY, button: 'left', clickCount: 1, buttons: 0 }).catch(() => {});
+            await sleep(80);
+          }
+
+          // B. 全选清空现有内容 (Ctrl+A + Backspace)
+          await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', commands: ['selectAll'], key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 2 }).catch(() => {});
+          await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65 }).catch(() => {});
+          await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 }).catch(() => {});
+          await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 }).catch(() => {});
+          await sleep(50);
+
+          // C. 使用 CDP 原生 Input.insertText 真实输入（突破 React 与 cds-text-input 限制）
+          await cdp.call('Input.insertText', { text: email }).catch(() => {});
+          await sleep(100);
+
+          // D. 在 DOM 层同步设置并派发全套合成事件以确保 React 18+ 状态追踪完全同步
+          await cdp.call('Runtime.evaluate', {
+            expression: `(() => {
+              const input = document.querySelector('input[data-testid="email"]')
+                || document.querySelector('input#email')
+                || document.querySelector('cds-text-input input')
+                || document.querySelector('input[type="email"]')
+                || document.querySelector('input[autocomplete="email"]');
+              if (!input) return;
+
+              // 突破 React _valueTracker
+              const tracker = input._valueTracker;
+              if (tracker) tracker.setValue('');
+
+              const proto = window.HTMLInputElement.prototype;
+              const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+              if (setter) setter.call(input, ${JSON.stringify(email)});
+              else input.value = ${JSON.stringify(email)};
+
+              input.dispatchEvent(new Event('focus', { bubbles: true, composed: true }));
+              input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, composed: true, inputType: 'insertText', data: ${JSON.stringify(email)} }));
+              input.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: ${JSON.stringify(email)} }));
+              input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+              input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, composed: true }));
+              input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, composed: true }));
+            })()`,
+          }).catch(() => {});
+          await sleep(300);
+        }
+
+        // 4. 等待登录按钮变为可点击状态 (最多等 2.5 秒)
+        let btnReady = false;
+        let btnPos = { x: info.btnX, y: info.btnY };
+        const waitStart = Date.now();
+        while (Date.now() - waitStart < 2500) {
+          const btnCheck = await cdp.call('Runtime.evaluate', {
+            expression: `(() => {
+              const btn = document.querySelector('button[data-testid="continue"]')
+                || document.querySelector('button[type="submit"][data-cds="Button"]')
+                || document.querySelector('button[type="submit"]');
+              if (!btn) return null;
+              const disabled = !!btn.disabled || btn.getAttribute('aria-disabled') === 'true';
+              const rect = btn.getBoundingClientRect();
+              return {
+                disabled,
+                x: Math.round(rect.left + rect.width / 2),
+                y: Math.round(rect.top + rect.height / 2),
+              };
+            })()`,
+            returnByValue: true,
+          }).catch(() => null);
+
+          const bState = btnCheck?.result?.value;
+          if (bState && !bState.disabled) {
+            btnReady = true;
+            btnPos = { x: bState.x, y: bState.y };
+            break;
+          }
+          await sleep(200);
+        }
+
+        // 5. 点击提交按钮
+        if (info.hasBrowserErr) {
+          console.log(`[login] ${flow.id} 检测到「无法验证您的浏览器」，准备自动重试提交 (${retryCount + 1}/${maxRetries})...`);
+          flow.message = `页面提示「无法验证您的浏览器」，正在自动重试提交 (${retryCount + 1}/${maxRetries})…`;
+        }
+
+        if (btnPos.x > 0 && btnPos.y > 0) {
+          await cdp.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: btnPos.x, y: btnPos.y, buttons: 0 }).catch(() => {});
+          await sleep(60);
+          await cdp.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: btnPos.x, y: btnPos.y, button: 'left', clickCount: 1, buttons: 1 }).catch(() => {});
+          await sleep(80);
+          await cdp.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: btnPos.x, y: btnPos.y, button: 'left', clickCount: 1, buttons: 0 }).catch(() => {});
+        } else {
+          await cdp.call('Runtime.evaluate', {
+            expression: `(() => {
+              const btn = document.querySelector('button[data-testid="continue"]')
+                || document.querySelector('button[type="submit"][data-cds="Button"]')
+                || document.querySelector('button[type="submit"]');
+              if (btn && !btn.disabled) btn.click();
+              const form = btn ? btn.closest('form') : document.querySelector('form');
+              if (form && typeof form.requestSubmit === 'function') { try { form.requestSubmit(); } catch {} }
+            })()`,
+          }).catch(() => {});
+        }
+
+        // 6. 点击后观察页面状态 (跳转到验证码页、成功凭据、频率限制等)
+        const clickTime = Date.now();
+        let advanceDetected = false;
+        while (Date.now() - clickTime < 4500) {
+          await sleep(800);
+          const check = await cdp.call('Runtime.evaluate', {
+            expression: `(() => {
+              const bodyText = (document.body ? document.body.innerText : '') || '';
+              const codeInput = document.querySelector('input#code, input[data-testid="code"], input[name*="code" i], cds-text-input input[name*="code" i]');
+              const hasBrowserErr = /无法验证您的浏览器|Unable to verify your browser|ブラウザを確認できませんでした|確認できません/i.test(bodyText);
+              const isRateLimited = /試行回数が多|too_many_attempts|しばらくしてから再度お試し|尝试次数过多/i.test(bodyText);
+              return { hasCode: !!codeInput, hasBrowserErr, isRateLimited };
+            })()`,
+            returnByValue: true,
+          }).catch(() => null);
+
+          const st = check?.result?.value;
+          if (st?.hasCode) {
+            advanceDetected = true;
+            return true;
+          }
+          if (st?.isRateLimited) {
+            flow.message = '该邮箱触发了登录频率限制，请稍后再试或更换邮箱';
+            return false;
+          }
+          if (st?.hasBrowserErr) {
+            break;
+          }
+        }
+
+        if (advanceDetected) return true;
+
+        const cookies = await readCookies(flow).catch(() => []);
+        if (cookies.some(c => c.name === 'pendingLogin' && c.value && c.value !== 'false')) {
           return true;
         }
 
-        if (res?.status === 'ready_to_click') {
-          if (res.hasBrowserErr) {
-            console.log(`[login] ${flow.id} 检测到「无法验证您的浏览器」，准备自动重试点击提交 (第 ${retryCount + 1} 次)...`);
-            flow.message = `页面提示「无法验证您的浏览器」，正在自动重试提交 (${retryCount + 1}/${maxRetries})…`;
-          }
-
-          // 优先使用真实的 CDP 鼠标点击事件（isTrusted = true），避免被反爬机制标记为机器人
-          if (res.x > 0 && res.y > 0) {
-            await cdp.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: res.x, y: res.y, buttons: 0 }).catch(() => {});
-            await sleep(100);
-            await cdp.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: res.x, y: res.y, button: 'left', clickCount: 1, buttons: 1 }).catch(() => {});
-            await sleep(80);
-            await cdp.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: res.x, y: res.y, button: 'left', clickCount: 1, buttons: 0 }).catch(() => {});
-          } else {
-            await cdp.call('Runtime.evaluate', {
-              expression: `(() => {
-                const btn = document.querySelector('button[data-testid="continue"]')
-                  || document.querySelector('button[type="submit"]')
-                  || [...document.querySelectorAll('button')].find(b => !/google|apple/i.test(b.innerText || '') && /メールで続ける|email|继续|continue|login|登录/i.test((b.innerText || '').trim()));
-                if (btn && !btn.disabled) btn.click();
-              })()`,
-            }).catch(() => {});
-          }
-
-          // 点击后观察页面状态
-          const clickTime = Date.now();
-          let advanceDetected = false;
-          while (Date.now() - clickTime < 4500) {
-            await sleep(800);
-            const check = await cdp.call('Runtime.evaluate', {
-              expression: `(() => {
-                const bodyText = (document.body ? document.body.innerText : '') || '';
-                const codeInput = document.querySelector('input#code, input[data-testid="code"], input[name*="code" i]');
-                const hasBrowserErr = /无法验证您的浏览器|Unable to verify your browser|ブラウザを確認できませんでした|確認できません/i.test(bodyText);
-                const isRateLimited = /試行回数が多|too_many_attempts|しばらくしてから再度お試し|尝试次数过多/i.test(bodyText);
-                return { hasCode: !!codeInput, hasBrowserErr, isRateLimited };
-              })()`,
-              returnByValue: true,
-            }).catch(() => null);
-
-            const st = check?.result?.value;
-            if (st?.hasCode) {
-              advanceDetected = true;
-              return true;
-            }
-            if (st?.isRateLimited) {
-              flow.message = '该邮箱触发了登录频率限制，请稍后再试或更换邮箱';
-              return false;
-            }
-            if (st?.hasBrowserErr) {
-              break;
-            }
-          }
-
-          if (advanceDetected) return true;
-
-          const cookies = await readCookies(flow).catch(() => []);
-          if (cookies.some(c => c.name === 'pendingLogin' && c.value && c.value !== 'false')) {
-            return true;
-          }
-
-          retryCount++;
-          if (retryCount >= maxRetries) {
-            console.log(`[login] ${flow.id} 「无法验证您的浏览器」重试超限，重新加载登录页...`);
-            flow.message = '正在重载登录页并重试…';
-            await cdp.call('Page.reload').catch(() => {});
-            retryCount = 0;
-            await sleep(3000);
-          } else {
-            await sleep(2000);
-          }
+        retryCount++;
+        if (retryCount >= maxRetries) {
+          console.log(`[login] ${flow.id} 「无法验证您的浏览器」重试超限，重新加载登录页...`);
+          flow.message = '正在重载登录页并重试…';
+          await cdp.call('Page.reload').catch(() => {});
+          retryCount = 0;
+          await sleep(3000);
+        } else {
+          await sleep(2000);
         }
-      } catch {}
+      } catch (err) {
+        console.warn(`[login] ${flow.id} submitEmailToClaude 循环异常: ${err.message}`);
+      }
       await sleep(800);
     }
     return false;
