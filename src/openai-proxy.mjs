@@ -2866,6 +2866,53 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
+      if (rest === 'export') {
+        // 批量导出 sessionKey：给 WebUI 做一键复制 / TXT 导出用。
+        // 与 /v1/keys 同级安全：统一鉴权（Bearer）之外，还要求本机回环访问，局域网一律拒绝。
+        if (!isLoopbackReq(req)) {
+          return json(res, 403, { error: { message: '导出凭据只能在运行反代的机器上操作（需本机访问）', type: 'permission_error' } });
+        }
+        let body = {};
+        if (req.method === 'POST') {
+          try { body = await readBody(req); } catch {}
+        }
+        const format = body.format || url.searchParams.get('format') || 'json';
+        const onlyEnabled = body.enabled != null ? !!body.enabled : (url.searchParams.get('enabled') === '1');
+        let list = POOL.accounts();
+        if (onlyEnabled) list = list.filter(a => a.enabled);
+
+        const ids = body.ids || (url.searchParams.get('ids') ? url.searchParams.get('ids').split(',').map(s => s.trim()).filter(Boolean) : null);
+        if (Array.isArray(ids) && ids.length) {
+          const idSet = new Set(ids);
+          list = list.filter(a => idSet.has(a.id));
+        }
+
+        const keys = list.map(a => a.sessionKey).filter(Boolean);
+
+        if (format === 'txt') {
+          const txt = keys.join('\n');
+          res.writeHead(200, {
+            'content-type': 'text/plain; charset=utf-8',
+            'content-disposition': 'attachment; filename="claude-sessionkeys.txt"',
+            'content-length': Buffer.byteLength(txt, 'utf8'),
+          });
+          return res.end(txt);
+        }
+
+        return json(res, 200, {
+          total: list.length,
+          count: keys.length,
+          keys,
+          accounts: list.map(a => ({
+            id: a.id,
+            label: a.label,
+            sessionKey: a.sessionKey || '',
+            org: a.org || '',
+            enabled: !!a.enabled,
+          })),
+        });
+      }
+
       if (req.method === 'GET' && id.endsWith('/credentials')) {
         // 完整凭据查询（sessionKey 明文 + org）：给 WebUI 的「密钥」按钮做复制/迁移用。
         // 与 /v1/keys 同级安全：统一鉴权（Bearer）之外，还要求本机回环访问，局域网一律拒绝。

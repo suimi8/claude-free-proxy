@@ -294,6 +294,8 @@
     <button class="btn" id="btnQuotaAll" title="对所有账号主动查一次额度（每个账号消耗 1 条最小消息）">📊 刷新全部额度</button>
     <button class="btn" id="btnKycAll" title="查询所有账号各组织的 KYC 状态（只读接口，不消耗额度，结果缓存 5 分钟）">🪪 查全部 KYC</button>
     <button class="btn" id="btnCfAll" title="对被 Cloudflare 拦截（cloudflare_challenge）的账号一键批量过验证：逐个弹出 Chrome 窗口（一次一个），手动过挑战后自动收新 cf_clearance + 配套 UA 入池并清冷却">🛡 批量过CF</button>
+    <button class="btn" id="btnLookup" title="粘贴一条 sessionKey，查询它对应的账号与 org；未入池的 key 会现场向 claude.ai 查询（只读，不消耗额度）">🔎 查询密钥</button>
+    <button class="btn" id="btnExportAll" title="一键复制所有账号的 sessionKey（每行一个）或直接导出为 txt 文本文件">📋 导出密钥</button>
     <div class="grow"></div>
     <div class="cfg">
       <label>轮询</label>
@@ -312,6 +314,8 @@
     <label><input type="checkbox" id="selAll"> 全选</label>
     <span id="selInfo" class="hsub"></span>
     <div class="grow"></div>
+    <button class="btn sm" id="btnCopySel" style="display:none" title="一键复制所选账号的 sessionKey（每行一个）到剪贴板">📋 复制所选 Key</button>
+    <button class="btn sm" id="btnExportSel" style="display:none" title="将所选账号的 sessionKey 导出为 txt 文本文件（每行一个）">💾 导出所选 TXT</button>
     <button class="btn sm danger" id="btnDelSel" style="display:none">🗑 删除所选</button>
   </div>
 
@@ -639,6 +643,64 @@
   </div>
 </div>
 
+<!-- 凭据查询（单账号）：完整 sessionKey + org，仅本机可查 -->
+<div class="mask" id="maskCreds" style="z-index:75">
+  <div class="modal">
+    <h3 id="credsTitle">🔑 凭据</h3>
+    <p class="hint">仅供本机迁移 / 备份使用，请勿外传。局域网访问无法查询完整凭据。</p>
+    <div class="field"><label>sessionKey</label>
+      <code id="credsKey" style="display:block;white-space:pre-wrap;word-break:break-all;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px;font-size:12px;min-height:20px"></code>
+      <button class="mini" data-copy="#credsKey" style="margin-top:6px">复制</button>
+    </div>
+    <div class="field"><label>org</label>
+      <code id="credsOrg" style="display:block;white-space:pre-wrap;word-break:break-all;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px;font-size:12px;min-height:20px"></code>
+      <button class="mini" data-copy="#credsOrg" style="margin-top:6px">复制</button>
+    </div>
+    <div class="mrow">
+      <button class="btn" onclick="closeCreds()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 凭据查询器：sessionKey → 池内账号 / org -->
+<div class="mask" id="maskLookup" style="z-index:75">
+  <div class="modal">
+    <h3>🔎 查询 sessionKey / org</h3>
+    <p class="hint">粘贴完整 sessionKey：已在账号池中则返回匹配的账号与 org；未入池则现场向 claude.ai 查询其 org（只读接口，不消耗额度）。</p>
+    <div class="field"><label>sessionKey</label>
+      <textarea id="lookupKey" placeholder="sk-ant-sid01-……"></textarea></div>
+    <div id="lookupResult"></div>
+    <div class="mrow">
+      <button class="btn" onclick="closeLookup()">关闭</button>
+      <button class="btn primary" id="btnLookupGo">查询</button>
+    </div>
+  </div>
+</div>
+
+<!-- 批量导出 sessionKey -->
+<div class="mask" id="maskExport" style="z-index:75">
+  <div class="modal" style="max-width:620px">
+    <h3 id="exportTitle">📋 导出 sessionKey</h3>
+    <p class="hint">每行一个完整 sessionKey。支持一键复制到剪贴板，或直接导出下载为 txt 文本文件（仅限本机访问）。</p>
+    <div style="display:flex;gap:10px;margin-bottom:12px;align-items:center;flex-wrap:wrap">
+      <label style="font-size:12px;color:var(--sub);cursor:pointer;display:inline-flex;align-items:center;gap:4px">
+        <input type="checkbox" id="exportOnlyEnabled"> 仅已启用账号
+      </label>
+      <div style="flex:1"></div>
+      <button class="btn sm primary" id="btnExportCopyModal">📋 一键复制全部</button>
+      <button class="btn sm" id="btnExportDownloadModal">💾 导出为 TXT 文件</button>
+    </div>
+    <div class="field">
+      <textarea id="exportText" style="width:100%;height:280px;font-family:monospace;font-size:12px;white-space:pre;word-break:break-all;line-height:1.5;box-sizing:border-box" readonly placeholder="加载中..."></textarea>
+    </div>
+    <div class="mrow">
+      <span id="exportCountInfo" style="font-size:12px;color:var(--sub)"></span>
+      <div style="flex:1"></div>
+      <button class="btn" onclick="closeExport()">关闭</button>
+    </div>
+  </div>
+</div>
+
 <!-- API Key -->
 <div class="mask" id="maskKey" style="z-index:70">
   <div class="modal">
@@ -919,6 +981,7 @@ function card(a) {
       <button class="btn sm" data-act="quota" title="主动查额度：发 1 条最小消息取回上游利用率（会消耗一次极小的消息）">📊 查额度</button>
       <button class="btn sm" data-act="kyc" title="查询该账号各组织的 KYC 状态（只读接口，不消耗额度）">🪪 KYC</button>
       <button class="btn sm" data-act="test">🧪 测试</button>
+      <button class="btn sm" data-act="creds" title="查询该账号的完整 sessionKey 与 org，一键复制（仅限本机访问）">🔑 密钥</button>
       <button class="btn sm" data-act="edit">✏️ 备注</button>
       <button class="btn sm" data-act="uncd" ${cdSec > 0 ? "" : "disabled"}>⏱ 清冷却</button>
       ${/cloudflare|challenge/i.test(a.last_error || "") ? `<button class="btn sm" data-act="cfpass" title="弹出一个无痕 Chrome 窗口（随机指纹，登录态只进内存不落盘），完成 Cloudflare 验证后自动把新 cf_clearance + 配套 UA 写回该账号并清冷却（不打码）">🛡 过CF</button>` : ""}
@@ -941,6 +1004,8 @@ function renderCards() {
   const selN = S.sel.size;
   $("#selInfo").textContent = selN ? "已选 " + selN + " 个" : "";
   $("#btnDelSel").style.display = selN ? "" : "none";
+  if ($("#btnCopySel")) $("#btnCopySel").style.display = selN ? "" : "none";
+  if ($("#btnExportSel")) $("#btnExportSel").style.display = selN ? "" : "none";
   const visIds = list.map(a => a.id);
   $("#selAll").checked = visIds.length > 0 && visIds.every(id => S.sel.has(id));
 }
@@ -1480,6 +1545,16 @@ $("#grid").addEventListener("click", async e => {
     } catch (ex) { toast("❌ " + ex.message, true); }
     finally { e.target.disabled = false; e.target.textContent = old; }
   }
+  if (act === "creds") {
+    // 完整凭据查询（sessionKey 明文 + org）：仅本机访问可用，后端会校验回环来源
+    try {
+      const r = await api("/v1/accounts/" + encodeURIComponent(id) + "/credentials");
+      $("#credsTitle").textContent = "🔑 凭据 · " + (r.label || r.id);
+      $("#credsKey").textContent = r.sessionKey || "—（该账号没有 sessionKey，可能仅 Desktop cookie）";
+      $("#credsOrg").textContent = r.org || "—";
+      $("#maskCreds").classList.add("on");
+    } catch (ex) { toast("🔑 " + ex.message, true); }
+  }
   if (act === "kyc") {
     e.target.disabled = true; const old = e.target.textContent; e.target.textContent = "查询中…";
     try {
@@ -1531,6 +1606,152 @@ $("#grid").addEventListener("click", async e => {
   }
 });
 
+/* ---------------- 凭据查询（sessionKey / org） ---------------- */
+window.closeCreds = () => $("#maskCreds").classList.remove("on");
+window.closeLookup = () => $("#maskLookup").classList.remove("on");
+window.closeExport = () => $("#maskExport").classList.remove("on");
+$("#maskCreds").addEventListener("click", e => { if (e.target.id === "maskCreds") closeCreds(); });
+$("#maskLookup").addEventListener("click", e => { if (e.target.id === "maskLookup") closeLookup(); });
+$("#maskExport").addEventListener("click", e => { if (e.target.id === "maskExport") closeExport(); });
+$("#btnLookup").onclick = () => {
+  $("#lookupKey").value = ""; $("#lookupResult").innerHTML = "";
+  $("#maskLookup").classList.add("on"); $("#lookupKey").focus();
+};
+$("#btnLookupGo").onclick = async e => {
+  const b = e.currentTarget;
+  const sk = $("#lookupKey").value.trim();
+  if (!sk) { toast("请先粘贴完整 sessionKey", true); return; }
+  b.disabled = true; b.textContent = "查询中…";
+  try {
+    const r = await api("/v1/accounts/lookup", { method: "POST", body: JSON.stringify({ sessionKey: sk }) });
+    const box = $("#lookupResult");
+    if (r.matched) {
+      const a = r.account || {};
+      box.innerHTML = `<div class="acc" style="margin-top:12px"><div class="acc-top"><span class="acc-name">✅ 已在账号池中</span>${a.enabled ? "" : '<span class="chip err">已停用</span>'}</div>
+        <div class="meta"><span>备注 <b>${esc(a.label || "—")}</b></span><span>org <b>${esc(a.org || "—")}</b></span><span>来源 <b>${esc(a.source || "—")}</b></span></div></div>`;
+    } else {
+      box.innerHTML = `<div class="acc" style="margin-top:12px"><div class="acc-top"><span class="acc-name">🆕 未入池 · sessionKey 有效</span></div>
+        <div class="meta"><span>org <b>${esc(r.org || "—")}</b></span><span>名称 <b>${esc(r.name || "—")}</b></span><span>套餐 <b>${esc(r.plan || "—")}</b></span></div></div>`;
+    }
+  } catch (ex) {
+    $("#lookupResult").innerHTML = `<div class="errline" style="margin-top:12px">✖ ${esc(ex.message)}</div>`;
+  } finally { b.disabled = false; b.textContent = "查询"; }
+};
+
+/* ---------------- 批量导出 sessionKey ---------------- */
+let currentExportKeys = [];
+let currentExportTargetIds = null;
+
+async function fetchExportData(targetIds = null, onlyEnabled = false) {
+  let url = "/v1/accounts/export?format=json";
+  if (onlyEnabled) url += "&enabled=1";
+  if (targetIds && targetIds.length) url += "&ids=" + encodeURIComponent(targetIds.join(","));
+  return await api(url);
+}
+
+function downloadTxt(filename, text) {
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const u = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = u;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(u);
+}
+
+async function copyText(text, successMsg) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(successMsg);
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+    toast(successMsg);
+  }
+}
+
+async function openExportModal(targetIds = null) {
+  currentExportTargetIds = targetIds;
+  $("#maskExport").classList.add("on");
+  $("#exportText").value = "正在加载密钥列表…";
+  $("#exportCountInfo").textContent = "";
+  await refreshExportView();
+}
+
+async function refreshExportView() {
+  try {
+    const onlyEnabled = $("#exportOnlyEnabled").checked;
+    const r = await fetchExportData(currentExportTargetIds, onlyEnabled);
+    currentExportKeys = (r.keys || []).filter(Boolean);
+    $("#exportText").value = currentExportKeys.join("\n");
+    const count = currentExportKeys.length;
+    $("#exportTitle").textContent = currentExportTargetIds
+      ? `📋 导出所选 sessionKey (${count} 个)`
+      : `📋 导出全部 sessionKey (${count} 个)`;
+    $("#exportCountInfo").textContent = `共 ${count} 个有效 sessionKey（每行一个）`;
+  } catch (err) {
+    $("#exportText").value = "加载失败: " + err.message;
+    toast("❌ " + err.message, true);
+  }
+}
+
+$("#exportOnlyEnabled").addEventListener("change", () => refreshExportView());
+
+$("#btnExportCopyModal").onclick = async () => {
+  const txt = $("#exportText").value.trim();
+  if (!txt) return toast("没有可复制的 sessionKey", true);
+  await copyText(txt, `✅ 已复制 ${currentExportKeys.length} 个 sessionKey 到剪贴板（每行一个）！`);
+};
+
+$("#btnExportDownloadModal").onclick = () => {
+  const txt = $("#exportText").value.trim();
+  if (!txt) return toast("没有可导出的 sessionKey", true);
+  const now = new Date();
+  const dateStr = now.toISOString().slice(0, 10);
+  downloadTxt(`claude-sessionkeys-${dateStr}.txt`, txt);
+  toast(`💾 已导出 ${currentExportKeys.length} 个 sessionKey 为 TXT 文件！`);
+};
+
+// 工具栏按钮：导出全部 Key
+$("#btnExportAll").onclick = () => openExportModal(null);
+
+// 选择栏按钮：一键复制所选
+$("#btnCopySel").onclick = async () => {
+  const ids = Array.from(S.sel);
+  if (!ids.length) return toast("未勾选任何账号", true);
+  try {
+    const r = await fetchExportData(ids, false);
+    const keys = (r.keys || []).filter(Boolean);
+    if (!keys.length) return toast("所选账号没有有效 sessionKey", true);
+    await copyText(keys.join("\n"), `✅ 已复制所选 ${keys.length} 个 sessionKey 到剪贴板（每行一个）！`);
+  } catch (err) {
+    toast("❌ " + err.message, true);
+  }
+};
+
+// 选择栏按钮：直接导出所选 TXT
+$("#btnExportSel").onclick = async () => {
+  const ids = Array.from(S.sel);
+  if (!ids.length) return toast("未勾选任何账号", true);
+  try {
+    const r = await fetchExportData(ids, false);
+    const keys = (r.keys || []).filter(Boolean);
+    if (!keys.length) return toast("所选账号没有有效 sessionKey", true);
+    const now = new Date();
+    const dateStr = now.toISOString().slice(0, 10);
+    downloadTxt(`claude-sessionkeys-selected-${dateStr}.txt`, keys.join("\n"));
+    toast(`💾 已导出所选 ${keys.length} 个 sessionKey 为 TXT 文件！`);
+  } catch (err) {
+    toast("❌ " + err.message, true);
+  }
+};
+
 /* 复制按钮 */
 document.addEventListener("click", e => {
   const t = e.target.dataset && e.target.dataset.copy;
@@ -1541,7 +1762,7 @@ document.addEventListener("click", e => {
 
 /* Esc 关闭弹层 */
 document.addEventListener("keydown", e => {
-  if (e.key === "Escape") { closeAcc(); if (document.activeElement !== $("#fApi")) showKey(false); }
+  if (e.key === "Escape") { closeAcc(); closeCreds(); closeLookup(); closeExport(); if (document.activeElement !== $("#fApi")) showKey(false); }
 });
 $("#maskAcc").addEventListener("click", e => { if (e.target.id === "maskAcc") closeAcc(); });
 
