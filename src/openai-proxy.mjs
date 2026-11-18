@@ -778,6 +778,9 @@ function textOf(content) {
       return '';
     }).filter(Boolean).join('\n');
   }
+  if (typeof content === 'object') {
+    try { return JSON.stringify(content); } catch { return ''; }
+  }
   return '';
 }
 
@@ -795,7 +798,9 @@ function cleanTerminalNoise(text) {
   if (!text || typeof text !== 'string') return text;
   // 1. 去除 ANSI 颜色与终端控制码
   let s = text.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '');
-  // 2. 清理终端覆盖式进度条 (如 npm/pip 产生的海量 \r 重绘，只保留每行最后一次绘制)
+  // 2. 先将 Windows CRLF 规范化为 LF，避免行尾的 \r 导致整行被 slice 吞噬
+  s = s.replace(/\r\n/g, '\n');
+  // 3. 清理终端覆盖式进度条 (如 npm/pip 产生的海量 \r 重绘，只保留每行最后一次绘制)
   if (s.includes('\r')) {
     s = s.split('\n').map(l => {
       const idx = l.lastIndexOf('\r');
@@ -3540,6 +3545,88 @@ const server = http.createServer(async (req, res) => {
       });
       return json(res, 200, { ok: true, batch: LOGIN.cancelBatch() });
     }
+
+    // YesCaptcha 插件与打码配置
+    if (url.pathname === '/v1/yescaptcha/config') {
+      const extDir = path.resolve(ROOT, 'tools', 'extensions', 'yescaptcha');
+      const installed = fs.existsSync(path.join(extDir, 'manifest.json'));
+
+      if (req.method === 'GET') {
+        const curSettings = KEYS.settings() || {};
+        const key = curSettings.yescaptchaClientKey || curSettings.yescaptchaKey || process.env.YESCAPTCHA_CLIENT_KEY || '';
+        const enabled = curSettings.yescaptchaEnabled !== false && (curSettings.yescaptchaEnabled === true || !!key);
+        return json(res, 200, {
+          ok: true,
+          installed,
+          extDir,
+          clientKey: key,
+          hasKey: !!key,
+          enabled: curSettings.yescaptchaEnabled !== false,
+        });
+      }
+
+      if (req.method === 'POST') {
+        let body = {};
+        try { body = await readBody(req); } catch {}
+        const curSettings = KEYS.settings() || {};
+        const clientKey = (body.clientKey !== undefined ? String(body.clientKey) : (curSettings.yescaptchaClientKey || '')).trim();
+        const enabled = body.enabled !== undefined ? !!body.enabled : (curSettings.yescaptchaEnabled !== false);
+        KEYS.updateSettings({
+          yescaptchaClientKey: clientKey,
+          yescaptchaKey: clientKey,
+          yescaptchaEnabled: enabled,
+        });
+
+        // 同步更新扩展包的 config.js
+        if (installed) {
+          try {
+            const cfgJsPath = path.join(extDir, 'config.js');
+            if (fs.existsSync(cfgJsPath)) {
+              let js = fs.readFileSync(cfgJsPath, 'utf8');
+              if (clientKey) {
+                js = js.replace(/clientKey:\s*['"][^'"]*['"]/, `clientKey: '${clientKey}'`);
+              }
+              js = js.replace(/isOpenCloudflare:\s*false/, 'isOpenCloudflare: true');
+              js = js.replace(/isAutoClickCheckBox:\s*false/, 'isAutoClickCheckBox: true');
+              js = js.replace(/isAutoSubmit:\s*false/, 'isAutoSubmit: true');
+              fs.writeFileSync(cfgJsPath, js, 'utf8');
+            }
+          } catch (e) {
+            console.warn('[yescaptcha] 同步更新扩展 config.js 失败:', e.message);
+          }
+        }
+
+        // 测试 Key 连通性并获取余额
+        let balanceInfo = null;
+        if (clientKey) {
+          try {
+            const bRes = await fetch('https://api.yescaptcha.com/getBalance', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ clientKey }),
+              signal: AbortSignal.timeout(6000),
+            });
+            const bData = await bRes.json();
+            if (bData.errorId === 0) {
+              balanceInfo = { balance: bData.balance };
+            } else {
+              balanceInfo = { error: bData.errorDescription || 'Key 无效' };
+            }
+          } catch (be) {
+            balanceInfo = { error: '连接打码服务器超时: ' + be.message };
+          }
+        }
+
+        return json(res, 200, {
+          ok: true,
+          message: enabled ? 'YesCaptcha 智能打码已开启！' : 'YesCaptcha 智能打码已关闭（后续登录将使用纯净浏览器）',
+          clientKey,
+          enabled,
+          installed,
+          balanceInfo,
+        });
+      }
+    }
     if (url.pathname === '/v1/login' && req.method === 'POST') {
       const host = req.headers.host || `127.0.0.1:${PORT}`;
       let body = {};
@@ -3557,6 +3644,11 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname.startsWith('/v1/login/')) {
       const rest = url.pathname.slice('/v1/login/'.length);
+      if (rest.endsWith('/focus') && req.method === 'POST') {
+        const id = rest.slice(0, -'/focus'.length);
+        const r = await LOGIN.focus(id);
+        return json(res, r.ok ? 200 : 400, r);
+      }
       if (rest.endsWith('/cancel') && req.method === 'POST') {
         const s = LOGIN.cancel(rest.slice(0, -'/cancel'.length));
         return s ? json(res, 200, s)

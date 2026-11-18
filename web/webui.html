@@ -330,6 +330,7 @@
     <button class="btn" id="btnLookup" title="粘贴一条 sessionKey，查询它对应的账号与 org；未入池的 key 会现场向 claude.ai 查询（只读，不消耗额度）">🔎 查询密钥</button>
     <button class="btn" id="btnExportAll" title="一键复制所有账号的 sessionKey（每行一个）或直接导出为 txt 文本文件">📋 导出密钥</button>
     <button class="btn" id="btnBatchImport" title="批量粘贴导入多个 sessionKey（支持多种格式，自动发现组织与备注）">📥 批量导入</button>
+    <button class="btn" id="btnLiandongModal" style="border-color:#f59e0b;color:#d97706;font-weight:600" title="打开链动小铺卡密库存上传管理">🛒 链动小铺</button>
     <div class="grow"></div>
     <div class="cfg">
       <label>轮询</label>
@@ -350,6 +351,7 @@
     <div class="grow"></div>
     <button class="btn sm" id="btnCopySel" style="display:none" title="一键复制所选账号的 sessionKey（每行一个）到剪贴板">📋 复制所选 Key</button>
     <button class="btn sm" id="btnExportSel" style="display:none" title="将所选账号的 sessionKey 导出为 txt 文本文件（每行一个）">💾 导出所选 TXT</button>
+    <button class="btn sm" id="btnUploadLiandongSel" style="display:none;background:#f59e0b;border-color:#f59e0b;color:#fff;font-weight:600" title="将所选账号的 sessionKey 一键上传到链动小铺库存">🛒 上传所选到小铺</button>
     <button class="btn sm danger" id="btnDelSel" style="display:none">🗑 删除所选</button>
   </div>
 
@@ -699,6 +701,34 @@
         </details>
       </div>
 
+      <!-- YesCaptcha 扩展智能打码配置卡片 -->
+      <div id="boxYesCaptchaConfig" style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:9px 12px;margin-bottom:12px;font-size:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-weight:700;color:#92400e;user-select:none">
+              <input type="checkbox" id="ckEnableYesCaptcha" style="width:16px;height:16px;cursor:pointer;accent-color:#d97706">
+              🧩 启用 YesCaptcha 智能打码
+            </label>
+            <span id="badgeYesCaptchaStatus" style="font-size:11px;padding:1px 6px;border-radius:4px;background:#fef3c7;color:#b45309">
+              检测中...
+            </span>
+            <span id="txtYesCaptchaBalance" style="font-size:11px;color:#059669;font-weight:600"></span>
+          </div>
+          <div style="font-size:11px;color:#b45309">
+            可选功能：开启后自动调用插件过验证，关闭则不挂载插件（纯净浏览器模式）
+          </div>
+        </div>
+        <div id="secYesCaptchaBody" style="display:flex;align-items:center;gap:8px;margin-top:6px">
+          <input type="password" id="inputYesCaptchaKey" placeholder="在此粘贴 YesCaptcha ClientKey (如：680a6b728b...)" style="flex:1;padding:5px 8px;border:1px solid #fcd34d;border-radius:6px;font-size:12px;background:#fff;font-family:monospace">
+          <button class="btn sm" id="btnToggleYesCaptchaKeyMask" type="button" style="padding:4px 8px;font-size:11px">👁️ 显示</button>
+          <button class="btn sm" id="btnSaveYesCaptchaKey" type="button" style="padding:4px 10px;font-size:11px;background:#f59e0b;color:#fff;border-color:#f59e0b;font-weight:600">💾 保存并测试余额</button>
+          <button class="btn sm" id="btnCopyYesCaptchaToBrowser" type="button" title="复制 ClientKey 到剪贴板，用于粘贴到浏览器右上角插件" style="padding:4px 8px;font-size:11px">📋 复制Key</button>
+        </div>
+        <div id="tipYesCaptchaGuide" style="margin-top:5px;font-size:11px;color:#78350f;display:flex;align-items:center;justify-content:space-between">
+          <span>💡 提示：勾选启用后批量登录自动注入并过人机验证；取消勾选则使用纯净原生浏览器，不消耗打码余额。</span>
+        </div>
+      </div>
+
       <!-- 控制参数与操作栏 -->
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px">
         <div style="display:flex;align-items:center;gap:8px">
@@ -728,14 +758,14 @@
         <div style="width:100%;height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden;margin-bottom:8px">
           <div id="batchProgressBar" style="width:0%;height:100%;background:linear-gradient(90deg,#6366f1,#10b981);transition:width .3s"></div>
         </div>
-        <div style="max-height:170px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;background:#fff">
+        <div style="max-height:280px;overflow-y:auto;border:1px solid var(--line);border-radius:6px;background:#fff">
           <table style="width:100%;border-collapse:collapse;font-size:11.5px;text-align:left">
-            <thead style="background:#f1f5f9;position:sticky;top:0;color:#475569">
+            <thead style="background:#f1f5f9;position:sticky;top:0;color:#475569;z-index:2">
               <tr>
-                <th style="padding:5px 8px;width:36px">#</th>
-                <th style="padding:5px 8px;width:170px">邮箱</th>
-                <th style="padding:5px 8px;width:80px">状态</th>
-                <th style="padding:5px 8px">实时进展与凭据</th>
+                <th style="padding:6px 8px;width:36px">#</th>
+                <th style="padding:6px 8px;width:170px">邮箱</th>
+                <th style="padding:6px 8px;width:80px">状态</th>
+                <th style="padding:6px 8px">实时进展 / 过验证链接与操作</th>
               </tr>
             </thead>
             <tbody id="batchTableBody">
@@ -964,6 +994,139 @@ sessionKey=sk-ant-sid02-uuuuuuuu; ..."></textarea>
     </div>
     <div class="mrow">
       <button class="btn" onclick="closeWebLogin()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 链动小铺库存上传弹窗 -->
+<div class="mask" id="maskLiandong" style="z-index:77">
+  <div class="modal" style="width:96%;max-width:1080px;max-height:92vh;overflow-y:auto">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      <h3 style="margin:0;display:flex;align-items:center;gap:6px">🛒 链动小铺 · 商户管理与加库存</h3>
+      <button class="btn sm" onclick="closeLiandongModal()">✕</button>
+    </div>
+    <p class="hint">支持商户登录自动保存、手动输入 Cookie、获取所有商品及一键加库存（本地私有·不进Git）。</p>
+
+    <!-- 商户身份状态 / 登录区 -->
+    <div style="background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div style="font-weight:600;font-size:12.5px;display:flex;align-items:center;gap:6px">
+          <span>👤 商户登录状态</span>
+          <span id="ldModalLoginBadge" class="badge" style="background:rgba(16,185,129,0.15);color:#059669;font-size:11px;padding:2px 8px;border-radius:4px">检查中</span>
+        </div>
+        <button class="btn sm" id="btnToggleLdLoginArea" type="button" style="padding:2px 10px;font-size:11.5px">切换账号 / 登录</button>
+      </div>
+
+      <!-- 登录表单 -->
+      <div id="ldModalLoginForm" style="display:none;padding:12px;background:#fff;border:1px solid var(--line);border-radius:8px;margin-bottom:8px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px">
+          <div>
+            <label style="font-size:11.5px;color:var(--sub);margin-bottom:3px;display:block">商户账号 / 手机号</label>
+            <input type="text" id="ldLoginUser" style="width:100%;font-size:12px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;box-sizing:border-box" placeholder="suimi8">
+          </div>
+          <div>
+            <label style="font-size:11.5px;color:var(--sub);margin-bottom:3px;display:block">登录密码</label>
+            <input type="password" id="ldLoginPwd" style="width:100%;font-size:12px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;box-sizing:border-box" placeholder="商户密码">
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn sm primary" id="btnDoLdModalLogin" type="button">🔐 立即登录并自动保存</button>
+          <span id="ldModalLoginTip" style="font-size:11.5px;color:var(--sub)"></span>
+        </div>
+      </div>
+
+      <!-- 登录信息卡片 -->
+      <div id="ldModalUserInfo" style="font-size:12.5px;color:var(--ink)">
+        <span id="ldModalUserName" style="font-weight:600">正在读取商户信息...</span>
+        <span id="ldModalUserDetails" style="color:var(--sub);margin-left:6px"></span>
+      </div>
+    </div>
+
+    <!-- 目标商品选择与库存实时展示 -->
+    <div style="background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <label style="font-weight:600;font-size:12.5px">📦 选择加库存的目标商品（获取所有商品信息）</label>
+        <button class="btn sm" id="btnRefreshLdGoods" type="button" style="padding:2px 10px;font-size:11.5px">⟳ 刷新商品列表</button>
+      </div>
+      <select id="ldSelGoods" style="width:100%;max-width:100%;font-size:13px;padding:9px 12px;border:1px solid var(--line);border-radius:6px;margin-bottom:8px;box-sizing:border-box;background:#fff;cursor:pointer;line-height:1.4">
+        <option value="">正在获取商品列表...</option>
+      </select>
+      <div id="ldGoodsInfoPill" style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:#fff;border:1px solid var(--line);border-radius:8px;font-size:12.5px;flex-wrap:wrap;gap:8px">
+        <div style="max-width:70%">
+          <div style="font-weight:600;color:var(--ink);word-break:break-all;line-height:1.4" id="ldPillFullName">-</div>
+          <div style="font-size:12px;color:var(--sub);margin-top:3px;display:flex;gap:10px;flex-wrap:wrap">
+            <span>商品ID: <code id="ldPillId" style="color:#2563eb;font-weight:600">-</code></span>
+            <span>单价: <b id="ldPillPrice" style="color:#d97706">-</b> 元</span>
+            <span>累计销售: <span id="ldPillSellCount">-</span> 件</span>
+          </div>
+        </div>
+        <div style="text-align:right">
+          <span style="font-size:12px;color:var(--sub)">当前可用库存: </span>
+          <b id="ldPillStock" style="color:#059669;font-size:19px;margin-left:4px">0</b> 件
+        </div>
+      </div>
+    </div>
+
+    <!-- 高级与手动设置（折叠） -->
+    <details style="margin-bottom:12px;font-size:12px;color:var(--sub)">
+      <summary style="cursor:pointer;color:var(--blue);font-weight:500">⚙️ 展开商户高级设置 / 兼容手动输入 Cookie</summary>
+      <div style="margin-top:8px;padding:12px 14px;background:#f8fafc;border:1px solid var(--line);border-radius:8px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px">
+          <div>
+            <label style="font-size:11px;color:var(--sub);margin-bottom:2px;display:block">商户 Token (merchant-token)</label>
+            <input type="text" id="ldCfgToken" style="width:100%;font-size:12px;padding:5px 8px;border:1px solid var(--line);border-radius:6px;box-sizing:border-box">
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--sub);margin-bottom:2px;display:block">插入位置</label>
+            <select id="ldCfgFirst" style="width:100%;font-size:12px;padding:5px 8px;border:1px solid var(--line);border-radius:6px;box-sizing:border-box">
+              <option value="0">末尾追加 (first = 0)</option>
+              <option value="1">首部插入 (first = 1)</option>
+            </select>
+          </div>
+        </div>
+        <div style="margin-bottom:8px">
+          <label style="font-size:11px;color:var(--sub);margin-bottom:2px;display:block">防爬 / Session Cookie (支持直接粘贴覆盖最新 Cookie)</label>
+          <textarea id="ldCfgCookie" style="width:100%;height:50px;font-size:11px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;resize:vertical;box-sizing:border-box" placeholder="粘贴包含 ssxmod_itna 的 Cookie..."></textarea>
+        </div>
+        <div style="display:flex;justify-content:flex-end">
+          <button class="btn sm" id="btnSaveLiandongCfgModal" type="button">💾 保存手动配置</button>
+        </div>
+      </div>
+    </details>
+
+    <!-- 卡密来源与预览 -->
+    <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn sm primary" id="tabLdSourceSel" type="button">已选账号 (<span id="ldSelCount">0</span>)</button>
+      <button class="btn sm" id="tabLdSourceAll" type="button">账号池全部有效账号</button>
+      <button class="btn sm" id="tabLdSourceCustom" type="button">手动输入 / 粘贴</button>
+      <div style="flex:1"></div>
+      <span style="font-size:11.5px;color:#059669;display:flex;align-items:center;gap:4px">
+        <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#10b981"></span>
+        自动本地去重，小铺服务端自动排重入库
+      </span>
+    </div>
+
+    <!-- 去重就绪提示条 -->
+    <div id="ldCompareBanner" style="display:none;align-items:center;justify-content:space-between;padding:8px 12px;border-radius:8px;font-size:12px;margin-bottom:8px;line-height:1.4">
+      <div id="ldCompareBannerText" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"></div>
+      <button class="btn sm" id="btnReCompareLdInventory" type="button" style="padding:2px 8px;font-size:11px;white-space:nowrap;margin-left:8px">⟳ 重新去重提取</button>
+    </div>
+
+    <div class="field" style="margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+        <label id="ldContentLabel" style="font-size:12.5px;font-weight:600">待上传卡密内容 (已自动本地去重，每行一个 sessionKey)</label>
+        <span id="ldContentLinesTip" style="font-size:11.5px;color:var(--sub)">共 0 行</span>
+      </div>
+      <textarea id="ldUploadContent" style="width:100%;height:160px;font-family:monospace;font-size:12px;line-height:1.45;padding:10px;border:1px solid var(--line);border-radius:8px;box-sizing:border-box" placeholder="sk-ant-sid02-..."></textarea>
+    </div>
+
+    <div id="ldResultBox" style="display:none;margin-bottom:12px;padding:10px 14px;border-radius:8px;font-size:12.5px"></div>
+
+    <div class="mrow">
+      <span id="ldStatusTip" style="font-size:12px;color:var(--sub)"></span>
+      <div style="flex:1"></div>
+      <button class="btn" onclick="closeLiandongModal()">关闭</button>
+      <button class="btn primary" id="btnLiandongUploadGo" style="background:#f59e0b;border-color:#f59e0b;color:#fff;font-weight:600;padding:8px 20px;font-size:13.5px">🚀 确认添加库存到小铺</button>
     </div>
   </div>
 </div>
@@ -1279,6 +1442,7 @@ function renderCards() {
   $("#btnDelSel").style.display = selN ? "" : "none";
   if ($("#btnCopySel")) $("#btnCopySel").style.display = selN ? "" : "none";
   if ($("#btnExportSel")) $("#btnExportSel").style.display = selN ? "" : "none";
+  if ($("#btnUploadLiandongSel")) $("#btnUploadLiandongSel").style.display = selN ? "" : "none";
   const visIds = list.map(a => a.id);
   $("#selAll").checked = visIds.length > 0 && visIds.every(id => S.sel.has(id));
 }
@@ -1583,6 +1747,7 @@ function openLogin() {
   $("#maskLogin").classList.add("on");
   switchLoginTab(LOGIN_TAB || "batch");
   loadMaoMailboxes();
+  loadYesCaptchaConfig();
   api("/v1/login/batch").then(res => {
     if (res.ok && res.batch && res.batch.status === "running") {
       if ($("#btnBatchCancel")) $("#btnBatchCancel").style.display = "inline-flex";
@@ -1844,18 +2009,261 @@ function renderBatchDashboard(b) {
     const sec = it.endedAt ? Math.round((it.endedAt - it.startedAt) / 1000) + "s"
       : (it.startedAt ? Math.round((Date.now() - it.startedAt) / 1000) + "s" : "—");
 
-    const detail = it.account ? `已入池: org ${esc(it.account.org ? it.account.org.slice(0, 8) : '✓')}` : esc(it.message || '—');
+    let actionHtml = "";
+    const isLive = it.state === "starting" || it.state === "waiting" || it.state === "capturing";
+    const flowId = it.flowId || "";
+    const verifyLink = it.link || (flowId ? `${location.origin}/login/${flowId}` : "");
+
+    if (it.account) {
+      actionHtml = `<div style="color:#16a34a;font-weight:600;display:flex;align-items:center;gap:6px">
+        <span>✅ 验证通过，已成功入池！</span>
+        <code style="font-size:11px;color:#2563eb;background:#eff6ff;padding:1px 5px;border-radius:3px">org: ${esc(it.account.org ? it.account.org.slice(0, 8) + '...' : '✓')}</code>
+      </div>`;
+    } else if (isLive && flowId) {
+      const isVerifyWaiting = !!it.needVerify || (it.verify && it.verify !== 'none') || /人工验证|需要.*验证|完成.*验证|hCaptcha|Cloudflare|我是人类/i.test(it.message || "");
+      const btns = [];
+
+      // 真正需要人工过验证时，才显示验证与置顶按钮！平时自动进行时不打扰
+      if (isVerifyWaiting) {
+        // 1. 验证直达 / 置顶按钮
+        btns.push(`
+          <button class="btn sm" type="button" onclick="focusVerifyFlow('${flowId}', '${esc(it.email)}')" style="background:#fef3c7;border:1px solid #f59e0b;color:#b45309;font-weight:600;padding:2px 8px;font-size:11px;cursor:pointer;border-radius:4px;display:inline-flex;align-items:center;gap:3px">
+            🎯 点击去过验证 (置顶窗口)
+          </button>
+        `);
+
+        // 2. 专属验证链接 (免鉴权打开)
+        btns.push(`
+          <a href="${verifyLink}" target="_blank" class="btn sm" style="padding:2px 8px;font-size:11px;color:#2563eb;text-decoration:none;background:#eff6ff;border:1px solid #bfdbfe;border-radius:4px;display:inline-flex;align-items:center;gap:3px">
+            🔗 网页验证链接 ↗
+          </a>
+        `);
+
+        // 3. 复制链接
+        btns.push(`
+          <button class="btn sm" type="button" onclick="copyVerifyLink('${verifyLink}')" style="padding:2px 6px;font-size:10.5px;color:var(--sub);border:1px solid var(--line);border-radius:4px">
+            复制链接
+          </button>
+        `);
+      }
+
+      // 如果有邮件 Magic Link，单独醒目展示直达
+      if (it.magicLink) {
+        btns.push(`
+          <div style="width:100%;margin-top:3px;display:flex;align-items:center;gap:6px">
+            <span style="font-size:11px;color:#059669;font-weight:600">📨 邮件 Magic Link:</span>
+            <a href="${esc(it.magicLink)}" target="_blank" style="font-size:11px;color:#2563eb;font-weight:600;text-decoration:underline">点击直接登录 ↗</a>
+            <button class="btn sm" type="button" onclick="openMagicLinkInFlow('${flowId}', '${esc(it.magicLink)}')" style="padding:1px 6px;font-size:10.5px;color:#059669;border:1px solid #10b981;border-radius:4px">
+              🚀 注入此窗口
+            </button>
+          </div>
+        `);
+      }
+
+      if (btns.length > 0) {
+        actionHtml = `<div style="margin-top:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">${btns.join('')}</div>`;
+      }
+    }
 
     return `<tr style="border-bottom:1px solid #f1f5f9">
-      <td style="padding:4px 8px;color:var(--sub)">${it.index}</td>
-      <td style="padding:4px 8px;font-family:monospace;font-weight:600">${esc(it.email)}</td>
-      <td style="padding:4px 8px">${stTag}</td>
-      <td style="padding:4px 8px" title="${esc(it.message || '')}">
-        <span style="color:#334155">${detail}</span>
-        <span style="font-size:10.5px;color:var(--sub);margin-left:6px">${sec}</span>
+      <td style="padding:6px 8px;color:var(--sub)">${it.index}</td>
+      <td style="padding:6px 8px;font-family:monospace;font-weight:600">${esc(it.email)}</td>
+      <td style="padding:6px 8px">${stTag}</td>
+      <td style="padding:6px 8px">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <span style="color:#334155;word-break:break-all">${esc(it.message || '—')}</span>
+          <span style="font-size:10.5px;color:var(--sub);margin-left:8px;white-space:nowrap">${sec}</span>
+        </div>
+        ${actionHtml}
       </td>
     </tr>`;
   }).join("");
+}
+
+window.focusVerifyFlow = async function(flowId, email) {
+  if (!flowId) return;
+  toast(`正在唤醒并置顶「${email || flowId}」验证窗口…`);
+  try {
+    const res = await api(`/v1/login/${flowId}/focus`, { method: "POST", body: "{}" });
+    if (res.ok) {
+      toast(`🎯 已将「${email || flowId}」窗口置顶，请在弹出的浏览器中完成验证！`);
+    } else {
+      toast(`提示: ${res.message || "未能置顶窗口"}`, true);
+    }
+  } catch (e) {
+    console.warn("focus error:", e);
+  }
+  // 同时打开该 flow 的专属控制页供用户交互
+  window.open(`/login/${flowId}`, '_blank');
+};
+
+window.copyVerifyLink = function(link) {
+  if (!link) return;
+  navigator.clipboard.writeText(link).then(() => toast("已复制验证链接: " + link)).catch(() => toast(link));
+};
+
+window.openMagicLinkInFlow = async function(flowId, magicLink) {
+  if (!flowId || !magicLink) return;
+  toast("正在向登录窗口注入 Magic Link…");
+  try {
+    const res = await api(`/login/${flowId}/goto`, {
+      method: "POST",
+      body: JSON.stringify({ url: magicLink })
+    });
+    if (res.ok) {
+      toast("🚀 已注入 Magic Link，正在继续捕获凭据！");
+    } else {
+      toast("注入失败: " + (res.message || "未知错误"), true);
+    }
+  } catch (e) {
+    toast("注入失败: " + e.message, true);
+  }
+};
+
+// --------------------------------------------- YesCaptcha 插件与打码配置前端逻辑
+async function loadYesCaptchaConfig() {
+  try {
+    const res = await api("/v1/yescaptcha/config");
+    if (res.ok) {
+      if ($("#inputYesCaptchaKey")) $("#inputYesCaptchaKey").value = res.clientKey || "";
+      const isEnabled = res.enabled !== false;
+      if ($("#ckEnableYesCaptcha")) $("#ckEnableYesCaptcha").checked = isEnabled;
+      const badge = $("#badgeYesCaptchaStatus");
+      if (badge) {
+        if (!isEnabled) {
+          badge.style.background = "#f1f5f9";
+          badge.style.color = "#64748b";
+          badge.textContent = "已关闭打码";
+        } else if (res.hasKey) {
+          badge.style.background = "#dcfce7";
+          badge.style.color = "#15803d";
+          badge.textContent = "已启用打码";
+        } else {
+          badge.style.background = "#fee2e2";
+          badge.style.color = "#dc2626";
+          badge.textContent = "未配置 ClientKey";
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("读取 YesCaptcha 配置失败:", err);
+  }
+}
+
+async function saveYesCaptchaConfig() {
+  const key = ($("#inputYesCaptchaKey")?.value || "").trim();
+  const enabled = $("#ckEnableYesCaptcha") ? $("#ckEnableYesCaptcha").checked : true;
+  const btn = $("#btnSaveYesCaptchaKey");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "正在测试...";
+  }
+  try {
+    const res = await api("/v1/yescaptcha/config", {
+      method: "POST",
+      body: JSON.stringify({ clientKey: key, enabled }),
+    });
+    if (res.ok) {
+      const badge = $("#badgeYesCaptchaStatus");
+      const balSpan = $("#txtYesCaptchaBalance");
+      if (!enabled) {
+        if (badge) {
+          badge.style.background = "#f1f5f9";
+          badge.style.color = "#64748b";
+          badge.textContent = "已关闭打码";
+        }
+        toast("⚪ YesCaptcha 智能打码已关闭（后续登录将启动纯净原生浏览器）");
+      } else if (res.balanceInfo?.balance != null) {
+        if (badge) {
+          badge.style.background = "#dcfce7";
+          badge.style.color = "#15803d";
+          badge.textContent = "授权有效";
+        }
+        if (balSpan) {
+          balSpan.textContent = `(账户余额: ￥${res.balanceInfo.balance})`;
+        }
+        toast(`✅ YesCaptcha 配置成功！余额: ￥${res.balanceInfo.balance}`);
+      } else if (res.balanceInfo?.error) {
+        if (badge) {
+          badge.style.background = "#fee2e2";
+          badge.style.color = "#dc2626";
+          badge.textContent = "Key 校验失败";
+        }
+        if (balSpan) balSpan.textContent = `(${res.balanceInfo.error})`;
+        toast(`⚠️ Key 保存成功但校验报错: ${res.balanceInfo.error}`, true);
+      } else {
+        if (badge) {
+          badge.style.background = "#dcfce7";
+          badge.style.color = "#15803d";
+          badge.textContent = key ? "已保存启用" : "未配置Key";
+        }
+        toast("✅ YesCaptcha 配置已保存！");
+      }
+    } else {
+      toast("保存失败: " + (res.error || "未知错误"), true);
+    }
+  } catch (e) {
+    toast("请求异常: " + e.message, true);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "💾 保存并测试余额";
+    }
+  }
+}
+
+if ($("#ckEnableYesCaptcha")) {
+  $("#ckEnableYesCaptcha").onchange = async () => {
+    const enabled = $("#ckEnableYesCaptcha").checked;
+    const key = ($("#inputYesCaptchaKey")?.value || "").trim();
+    try {
+      const res = await api("/v1/yescaptcha/config", {
+        method: "POST",
+        body: JSON.stringify({ clientKey: key, enabled }),
+      });
+      if (res.ok) {
+        toast(enabled ? "✅ 已启用 YesCaptcha 智能打码" : "⚪ 已关闭智能打码（后续登录将使用纯净原生浏览器）");
+        const badge = $("#badgeYesCaptchaStatus");
+        if (badge) {
+          if (!enabled) {
+            badge.style.background = "#f1f5f9";
+            badge.style.color = "#64748b";
+            badge.textContent = "已关闭打码";
+          } else {
+            badge.style.background = "#dcfce7";
+            badge.style.color = "#15803d";
+            badge.textContent = key ? "已启用打码" : "未配置Key";
+          }
+        }
+      }
+    } catch (e) {
+      toast("切换打码开关失败: " + e.message, true);
+    }
+  };
+}
+
+if ($("#btnSaveYesCaptchaKey")) {
+  $("#btnSaveYesCaptchaKey").onclick = saveYesCaptchaConfig;
+}
+if ($("#btnCopyYesCaptchaToBrowser")) {
+  $("#btnCopyYesCaptchaToBrowser").onclick = () => {
+    const key = ($("#inputYesCaptchaKey")?.value || "").trim();
+    if (!key) return toast("请先输入或配置 ClientKey", true);
+    copyText(key, "✅ 已复制 ClientKey！请点击浏览器右上角插件图标粘贴消除红字提示");
+  };
+}
+if ($("#btnToggleYesCaptchaKeyMask")) {
+  $("#btnToggleYesCaptchaKeyMask").onclick = () => {
+    const input = $("#inputYesCaptchaKey");
+    if (!input) return;
+    if (input.type === "password") {
+      input.type = "text";
+      $("#btnToggleYesCaptchaKeyMask").textContent = "🙈 隐藏";
+    } else {
+      input.type = "password";
+      $("#btnToggleYesCaptchaKeyMask").textContent = "👁️ 显示";
+    }
+  };
 }
 
 if ($("#btnBatchStart")) {
@@ -2190,6 +2598,7 @@ $("#grid").addEventListener("click", async e => {
     $("#btnDelSel").style.display = S.sel.size ? "" : "none";
     if ($("#btnCopySel")) $("#btnCopySel").style.display = S.sel.size ? "" : "none";
     if ($("#btnExportSel")) $("#btnExportSel").style.display = S.sel.size ? "" : "none";
+    if ($("#btnUploadLiandongSel")) $("#btnUploadLiandongSel").style.display = S.sel.size ? "" : "none";
     return;
   }
   if (e.target.classList.contains("en")) {
@@ -2554,6 +2963,396 @@ $("#btnExportSel").onclick = async () => {
     toast("❌ " + err.message, true);
   }
 };
+
+// --------------------------------------------- 链动小铺库存上传前端逻辑
+let LD_CURRENT_SOURCE = 'sel'; // 'sel' | 'all' | 'custom'
+let LD_GOODS_LIST = [];
+
+function updateLdContentLinesTip() {
+  const txt = $("#ldUploadContent") ? $("#ldUploadContent").value : "";
+  const lines = txt.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  if ($("#ldContentLinesTip")) $("#ldContentLinesTip").textContent = `共 ${lines.length} 行`;
+}
+
+if ($("#ldUploadContent")) {
+  $("#ldUploadContent").oninput = updateLdContentLinesTip;
+}
+
+function updateLdGoodsPill() {
+  const selId = Number($("#ldSelGoods")?.value);
+  const item = LD_GOODS_LIST.find(g => Number(g.id) === selId);
+  const pill = $("#ldGoodsInfoPill");
+  if (!pill) return;
+  if (!item) {
+    pill.style.display = "none";
+    return;
+  }
+  pill.style.display = "flex";
+  if ($("#ldPillFullName")) $("#ldPillFullName").textContent = item.name;
+  if ($("#ldPillId")) $("#ldPillId").textContent = item.id;
+  if ($("#ldPillPrice")) $("#ldPillPrice").textContent = item.price;
+  if ($("#ldPillSellCount")) $("#ldPillSellCount").textContent = item.sellCount ?? 0;
+  if ($("#ldPillStock")) $("#ldPillStock").textContent = item.stockCount ?? 0;
+}
+
+if ($("#ldSelGoods")) {
+  $("#ldSelGoods").onchange = () => {
+    updateLdGoodsPill();
+  };
+}
+
+async function loadLiandongModalGoods(selectedId) {
+  const sel = $("#ldSelGoods");
+  if (!sel) return;
+  sel.innerHTML = '<option value="">正在获取商品列表...</option>';
+  try {
+    const res = await api("/v1/liandong/goods");
+    if (res.ok && Array.isArray(res.list)) {
+      LD_GOODS_LIST = res.list;
+      sel.innerHTML = "";
+      if (!LD_GOODS_LIST.length) {
+        sel.innerHTML = '<option value="">未找到任何商品</option>';
+        if ($("#ldGoodsInfoPill")) $("#ldGoodsInfoPill").style.display = "none";
+        return;
+      }
+      LD_GOODS_LIST.forEach(g => {
+        const opt = document.createElement("option");
+        opt.value = g.id;
+        opt.textContent = `[ID: ${g.id}] ${g.name} — 库存: ${g.stockCount}件 / ￥${g.price}`;
+        opt.title = `${g.name} (商品ID: ${g.id}, 当前库存: ${g.stockCount} 件, 单价: ${g.price} 元)`;
+        if (selectedId && Number(selectedId) === Number(g.id)) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      updateLdGoodsPill();
+    } else {
+      sel.innerHTML = `<option value="">获取商品失败: ${res.error || "未登录或Token失效"}</option>`;
+    }
+  } catch (e) {
+    sel.innerHTML = `<option value="">请求异常: ${e.message}</option>`;
+  }
+}
+
+if ($("#btnRefreshLdGoods")) {
+  $("#btnRefreshLdGoods").onclick = () => loadLiandongModalGoods($("#ldSelGoods")?.value);
+}
+
+if ($("#btnToggleLdLoginArea")) {
+  $("#btnToggleLdLoginArea").onclick = () => {
+    const f = $("#ldModalLoginForm");
+    if (f) f.style.display = f.style.display === "none" ? "block" : "none";
+  };
+}
+
+if ($("#btnDoLdModalLogin")) {
+  $("#btnDoLdModalLogin").onclick = async () => {
+    const u = ($("#ldLoginUser")?.value || "").trim();
+    const p = ($("#ldLoginPwd")?.value || "").trim();
+    const tip = $("#ldModalLoginTip");
+    const btn = $("#btnDoLdModalLogin");
+    if (!u || !p) return toast("请输入商户账号和密码", true);
+
+    btn.disabled = true;
+    if (tip) { tip.style.color = "var(--sub)"; tip.textContent = "正在登录链动小铺..."; }
+
+    try {
+      const res = await api("/v1/liandong/login", {
+        method: "POST",
+        body: JSON.stringify({ username: u, password: p }),
+      });
+      if (res.ok) {
+        toast("🎉 链动小铺登录成功！凭据与商品已自动保存");
+        if (tip) { tip.style.color = "#059669"; tip.textContent = "✓ 登录成功"; }
+        if ($("#ldModalLoginForm")) $("#ldModalLoginForm").style.display = "none";
+        await loadLiandongModalConfig();
+      } else {
+        toast("❌ " + (res.error || "登录失败"), true);
+        if (tip) { tip.style.color = "#dc2626"; tip.textContent = "✗ " + (res.error || "登录失败"); }
+      }
+    } catch (e) {
+      toast("❌ " + e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+
+async function loadLiandongModalConfig() {
+  try {
+    const res = await api("/v1/liandong/config");
+    if (res.ok && res.config) {
+      const cfg = res.config;
+      if ($("#ldCfgToken")) $("#ldCfgToken").value = cfg.merchantToken || "";
+      if ($("#ldCfgFirst")) $("#ldCfgFirst").value = String(cfg.first ?? 0);
+      if ($("#ldCfgCookie")) $("#ldCfgCookie").value = cfg.cookie || "";
+      if ($("#ldLoginUser") && cfg.username) $("#ldLoginUser").value = cfg.username;
+
+      // 渲染商户身份
+      const badge = $("#ldModalLoginBadge");
+      const name = $("#ldModalUserName");
+      const details = $("#ldModalUserDetails");
+
+      if (cfg.userInfo) {
+        if (badge) { badge.style.background = "rgba(16,185,129,0.15)"; badge.style.color = "#059669"; badge.textContent = "✓ 已登录"; }
+        if (name) name.textContent = `👤 ${cfg.userInfo.nickname || cfg.userInfo.username || "商户用户"}`;
+        if (details) details.textContent = `(ID: ${cfg.userInfo.id || "-"}, 账号: ${cfg.userInfo.username || "-"})`;
+      } else if (cfg.merchantToken) {
+        if (badge) { badge.style.background = "rgba(59,130,246,0.15)"; badge.style.color = "#2563eb"; badge.textContent = "Token 有效"; }
+        if (name) name.textContent = "👤 已配置商户 Token";
+        if (details) details.textContent = `(${cfg.merchantToken.slice(0, 8)}...)`;
+      } else {
+        if (badge) { badge.style.background = "rgba(148,163,184,0.15)"; badge.style.color = "#94a3b8"; badge.textContent = "未登录"; }
+        if (name) name.textContent = "尚未登录链动小铺商户";
+        if (details) details.textContent = "请点击右侧「登录」或在下方输入 Token";
+      }
+
+      // 获取所有商品列表
+      await loadLiandongModalGoods(cfg.goodsId);
+    }
+  } catch (err) {
+    console.warn("加载链动小铺配置失败:", err);
+  }
+}
+
+async function saveLiandongModalConfig() {
+  const tip = $("#ldStatusTip");
+  if (tip) tip.textContent = "正在保存配置…";
+  try {
+    const payload = {
+      merchantToken: ($("#ldCfgToken")?.value || "").trim(),
+      goodsId: Number($("#ldSelGoods")?.value) || undefined,
+      first: Number($("#ldCfgFirst")?.value) || 0,
+      cookie: ($("#ldCfgCookie")?.value || "").trim(),
+    };
+    const res = await api("/v1/liandong/config/save", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      toast("✅ 链动小铺配置保存成功！");
+      if (tip) tip.textContent = "✓ 配置已保存";
+      await loadLiandongModalGoods(payload.goodsId);
+    } else {
+      toast("❌ " + (res.error || "保存失败"), true);
+      if (tip) tip.textContent = "✗ 保存失败: " + (res.error || "未知");
+    }
+  } catch (e) {
+    toast("❌ " + e.message, true);
+  }
+}
+if ($("#btnSaveLiandongCfgModal")) $("#btnSaveLiandongCfgModal").onclick = saveLiandongModalConfig;
+
+async function doLdInventoryCompareAndFill(explicitKeys = null) {
+  const box = $("#ldUploadContent");
+  const banner = $("#ldCompareBanner");
+  const bannerText = $("#ldCompareBannerText");
+
+  let keys = [];
+  if (Array.isArray(explicitKeys)) {
+    keys = explicitKeys;
+  } else if (LD_CURRENT_SOURCE === "sel") {
+    const ids = Array.from(S.sel);
+    if (!ids.length) {
+      if (box) box.value = "";
+      updateLdContentLinesTip();
+      if (banner) banner.style.display = "none";
+      return;
+    }
+    try {
+      const r = await fetchExportData(ids, false);
+      keys = (r.keys || []).filter(Boolean);
+    } catch (e) {
+      if (box) box.value = "读取所选账号失败: " + e.message;
+      return;
+    }
+  } else if (LD_CURRENT_SOURCE === "all") {
+    try {
+      const r = await fetchExportData(null, true);
+      keys = (r.keys || []).filter(Boolean);
+    } catch (e) {
+      if (box) box.value = "读取全部有效账号失败: " + e.message;
+      return;
+    }
+  } else {
+    // 手动输入模式：从编辑框现有内容提取
+    const curVal = box ? box.value : "";
+    keys = curVal.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  }
+
+  // 本地去重清洗
+  const rawCount = keys.length;
+  keys = Array.from(new Set(keys.map(k => String(k || '').trim()).filter(Boolean)));
+
+  if (!keys.length) {
+    if (box) box.value = "";
+    updateLdContentLinesTip();
+    if (banner) banner.style.display = "none";
+    return;
+  }
+
+  if (box) {
+    box.value = keys.join("\n");
+    updateLdContentLinesTip();
+  }
+
+  if (banner) {
+    banner.style.display = "flex";
+    banner.style.background = "#f0fdf4";
+    banner.style.border = "1px solid #bbf7d0";
+    banner.style.color = "#15803d";
+    const dupNotice = rawCount > keys.length ? `（已过滤 ${rawCount - keys.length} 个重复项）` : "";
+    bannerText.innerHTML = `<span>✅ <b>已就绪 ${keys.length} 个账号 SessionKey${dupNotice}</b>，已自动本地去重。点击下方「🚀 确认添加库存到小铺」平台将自动排重入库！</span>`;
+  }
+}
+
+async function switchLdSourceTab(type) {
+  LD_CURRENT_SOURCE = type;
+  const tabSel = $("#tabLdSourceSel");
+  const tabAll = $("#tabLdSourceAll");
+  const tabCustom = $("#tabLdSourceCustom");
+  const box = $("#ldUploadContent");
+  const label = $("#ldContentLabel");
+  const resBox = $("#ldResultBox");
+  const banner = $("#ldCompareBanner");
+  const bannerText = $("#ldCompareBannerText");
+  if (resBox) resBox.style.display = "none";
+
+  tabSel?.classList.remove("primary");
+  tabAll?.classList.remove("primary");
+  tabCustom?.classList.remove("primary");
+
+  if (type === "sel") {
+    tabSel?.classList.add("primary");
+    if (label) label.textContent = "已勾选账号 (已自动本地去重)：";
+    box.readOnly = false;
+    const ids = Array.from(S.sel);
+    if (!ids.length) {
+      box.value = "";
+      updateLdContentLinesTip();
+      if (banner) banner.style.display = "none";
+      return toast("未勾选任何账号，已清空内容", true);
+    }
+    await doLdInventoryCompareAndFill();
+  } else if (type === "all") {
+    tabAll?.classList.add("primary");
+    if (label) label.textContent = "账号池全部有效账号 (已自动本地去重)：";
+    box.readOnly = false;
+    await doLdInventoryCompareAndFill();
+  } else {
+    tabCustom?.classList.add("primary");
+    if (label) label.textContent = "手动输入 / 粘贴 sessionKey（每行一个）：";
+    box.readOnly = false;
+    box.focus();
+    updateLdContentLinesTip();
+    if (banner) {
+      banner.style.display = "flex";
+      banner.style.background = "#f8fafc";
+      banner.style.border = "1px solid #e2e8f0";
+      banner.style.color = "#64748b";
+      bannerText.innerHTML = `<span>✍️ 手动输入模式：粘贴或输入卡密后，点击右侧「重新去重提取」可自动完成本地去重。</span>`;
+    }
+  }
+}
+
+if ($("#tabLdSourceSel")) $("#tabLdSourceSel").onclick = () => switchLdSourceTab("sel");
+if ($("#tabLdSourceAll")) $("#tabLdSourceAll").onclick = () => switchLdSourceTab("all");
+if ($("#tabLdSourceCustom")) $("#tabLdSourceCustom").onclick = () => switchLdSourceTab("custom");
+if ($("#btnReCompareLdInventory")) $("#btnReCompareLdInventory").onclick = () => doLdInventoryCompareAndFill();
+
+async function openLiandongModal(defaultSource = "sel") {
+  const selN = S.sel.size;
+  if ($("#ldSelCount")) $("#ldSelCount").textContent = selN;
+  if ($("#ldResultBox")) $("#ldResultBox").style.display = "none";
+  if ($("#ldStatusTip")) $("#ldStatusTip").textContent = "";
+  $("#maskLiandong").classList.add("on");
+  await loadLiandongModalConfig();
+  if (defaultSource === "sel" && !selN) {
+    defaultSource = "all";
+  }
+  await switchLdSourceTab(defaultSource);
+}
+
+function closeLiandongModal() {
+  $("#maskLiandong").classList.remove("on");
+}
+
+if ($("#btnLiandongModal")) $("#btnLiandongModal").onclick = () => openLiandongModal("sel");
+if ($("#btnUploadLiandongSel")) $("#btnUploadLiandongSel").onclick = () => openLiandongModal("sel");
+
+if ($("#btnLiandongUploadGo")) {
+  $("#btnLiandongUploadGo").onclick = async () => {
+    const btn = $("#btnLiandongUploadGo");
+    const tip = $("#ldStatusTip");
+    const resBox = $("#ldResultBox");
+    const content = ($("#ldUploadContent")?.value || "").trim();
+    const token = ($("#ldCfgToken")?.value || "").trim();
+    const goodsId = Number($("#ldSelGoods")?.value);
+    const first = Number($("#ldCfgFirst")?.value) || 0;
+    const cookie = ($("#ldCfgCookie")?.value || "").trim();
+
+    if (!goodsId) return toast("请选择要加库存的目标商品", true);
+    if (!content) return toast("待上传卡密内容不能为空（可能所选账号已全部在库）", true);
+
+    btn.disabled = true;
+    if (tip) tip.textContent = "正在上传到链动小铺库存…";
+    if (resBox) resBox.style.display = "none";
+
+    try {
+      const payload = {
+        content,
+        merchantToken: token,
+        goodsId,
+        first,
+        cookie,
+      };
+      const res = await api("/v1/liandong/upload", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) {
+        toast("🎉 " + (res.msg || "卡密库存添加成功！"));
+        if (tip) tip.textContent = "✓ 加库存完成";
+        if (resBox) {
+          resBox.style.display = "block";
+          resBox.style.background = "rgba(16, 185, 129, 0.15)";
+          resBox.style.color = "#059669";
+          resBox.style.border = "1px solid rgba(16, 185, 129, 0.3)";
+          const newStockInfo = res.goodsInfo ? `<br><b>📦 该商品最新可用库存: ${res.goodsInfo.stockCount} 件</b>` : "";
+          resBox.innerHTML = `<b>🎉 加库存成功！</b><br>${res.msg || "添加成功"}${newStockInfo}<br><span style="font-size:11.5px;color:var(--sub)">本次已入库 ${res.uploadedCount} 张卡密</span>`;
+        }
+        // 自动更新商品列表与库存数值
+        await loadLiandongModalGoods(goodsId);
+        // 上传完成后清空输入框并显示完成提示
+        if (box) {
+          box.value = "";
+          updateLdContentLinesTip();
+        }
+        if (banner) {
+          banner.style.display = "flex";
+          banner.style.background = "#f0fdf4";
+          banner.style.border = "1px solid #bbf7d0";
+          banner.style.color = "#15803d";
+          bannerText.innerHTML = `<span>🎉 <b>添加库存完成！</b> 本次已上传卡密入库，商品库存已自动刷新。</span>`;
+        }
+      } else {
+        toast("❌ " + (res.error || res.msg || "添加库存失败"), true);
+        if (tip) tip.textContent = "✗ 加库存失败";
+        if (resBox) {
+          resBox.style.display = "block";
+          resBox.style.background = "rgba(239, 68, 68, 0.15)";
+          resBox.style.color = "#dc2626";
+          resBox.style.border = "1px solid rgba(239, 68, 68, 0.3)";
+          resBox.innerHTML = `<b>❌ 添加库存失败</b><br>${res.error || res.msg || "未知错误"}`;
+        }
+      }
+    } catch (err) {
+      toast("❌ " + err.message, true);
+      if (tip) tip.textContent = "✗ 错误: " + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
 
 /* 复制按钮 */
 document.addEventListener("click", e => {

@@ -27,6 +27,14 @@ proxy.err.log
 
 # 依赖与临时构建目录
 node_modules/
+scripts/
+tests/check_*
+tests/do_*
+tests/fill_*
+tests/shot.*
+tests/test_concurrent.*
+tests/test_fill_cage.*
+tests/test_tab.*
 __pycache__/
 *.py[cod]
 *$py.class

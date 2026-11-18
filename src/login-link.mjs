@@ -80,28 +80,29 @@ export function findBrowser(opts = {}) {
     return process.env.LOGIN_BROWSER;
   }
 
-  // 1. Linux 平台
+  // 1. Linux 平台（虚拟机环境优先使用自带的 Chromium，不优先使用 Google Chrome）
   if (process.platform === 'linux') {
     const linuxPaths = [
-      '/usr/bin/google-chrome',
-      '/usr/bin/google-chrome-stable',
       '/usr/bin/chromium',
       '/usr/bin/chromium-browser',
+      '/usr/lib/chromium/chromium',
       '/snap/bin/chromium',
       '/usr/bin/microsoft-edge',
       '/usr/bin/microsoft-edge-stable',
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
     ];
     for (const p of linuxPaths) {
       try { if (fs.existsSync(p)) return p; } catch {}
     }
     try {
-      const found = execSync('which google-chrome chromium chromium-browser microsoft-edge edge 2>/dev/null', {
+      const found = execSync('which chromium chromium-browser microsoft-edge edge google-chrome 2>/dev/null', {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
       }).trim().split(/\r?\n/).map(s => s.trim()).filter(Boolean)[0];
       if (found && fs.existsSync(found)) return found;
     } catch {}
-    throw new Error('找不到 Chrome/Chromium/Edge，可用 LOGIN_BROWSER 环境变量指定浏览器路径');
+    throw new Error('找不到系统自带的 Chromium 浏览器，可用 LOGIN_BROWSER 环境变量指定浏览器路径');
   }
 
   // 2. macOS 平台
@@ -203,15 +204,24 @@ async function waitCdp(port, timeoutSec, flow = null) {
  * 这里用 PowerShell + user32 把窗口恢复出来并置前（Windows 专属，内存执行，不落盘临时脚本）。
  */
 function focusBrowserWindow(pid) {
-  if (process.platform !== 'win32') return;
-  const ps = `$TargetPid = ${pid || 0}; Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class Win32Focus {[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);[DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);}' -ErrorAction SilentlyContinue; $d = (Get-Date).AddSeconds(12); while ((Get-Date) -lt $d) { $p = $null; if ($TargetPid -gt 0) { $p = Get-Process -Id $TargetPid -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1; }; if (-not $p) { $p = Get-Process -Name chrome, msedge -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -Last 1; }; if ($p) { [Win32Focus]::ShowWindow($p.MainWindowHandle, 9) | Out-Null; [Win32Focus]::BringWindowToTop($p.MainWindowHandle) | Out-Null; [Win32Focus]::SetForegroundWindow($p.MainWindowHandle) | Out-Null; exit 0; }; Start-Sleep -Milliseconds 400; }; exit 1;`;
-  try {
-    const b64 = Buffer.from(ps, 'utf16le').toString('base64');
-    spawn('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', b64], {
-      stdio: 'ignore',
-      windowsHide: true,
-    });
-  } catch {}
+  if (process.platform === 'win32') {
+    const ps = `$TargetPid = ${pid || 0}; Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class Win32Focus {[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);[DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);}' -ErrorAction SilentlyContinue; $d = (Get-Date).AddSeconds(12); while ((Get-Date) -lt $d) { $p = $null; if ($TargetPid -gt 0) { $p = Get-Process -Id $TargetPid -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1; }; if (-not $p) { $p = Get-Process -Name chrome, msedge -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -Last 1; }; if ($p) { [Win32Focus]::ShowWindow($p.MainWindowHandle, 9) | Out-Null; [Win32Focus]::BringWindowToTop($p.MainWindowHandle) | Out-Null; [Win32Focus]::SetForegroundWindow($p.MainWindowHandle) | Out-Null; exit 0; }; Start-Sleep -Milliseconds 400; }; exit 1;`;
+    try {
+      const b64 = Buffer.from(ps, 'utf16le').toString('base64');
+      spawn('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', b64], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+    } catch {}
+  } else if (process.platform === 'linux') {
+    try {
+      const targetPid = pid ? Number(pid) : 0;
+      const shCmd = targetPid > 0
+        ? `wids=$(xdotool search --all --pid ${targetPid} 2>/dev/null); for w in $wids; do xdotool windowactivate --sync "$w" 2>/dev/null; xdotool windowraise "$w" 2>/dev/null; done; xdotool search --onlyvisible --class chromium windowactivate 2>/dev/null || true`
+        : `xdotool search --onlyvisible --class chromium windowactivate 2>/dev/null || true`;
+      spawn('sh', ['-c', shCmd], { stdio: 'ignore', env: process.env });
+    } catch {}
+  }
 }
 
 /** 极简 CDP 客户端（浏览器级 target） */
@@ -260,8 +270,117 @@ class CDP {
   close() { try { this.ws.close(); } catch { /* noop */ } }
 }
 
+/** 检测是否处于 Claude Cage 虚拟机原生环境 */
+export function isCageBrowserAvailable() {
+  if (process.platform !== 'linux') return false;
+  try {
+    return fs.existsSync('/etc/claude-cage/browser-control.json');
+  } catch {
+    return false;
+  }
+}
+
+function getCageControlConfig() {
+  try {
+    return JSON.parse(fs.readFileSync('/etc/claude-cage/browser-control.json', 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+async function cageApi(endpoint, data = null) {
+  const cfg = getCageControlConfig();
+  if (!cfg?.token) throw new Error('Cage 控制凭据不可用');
+  const body = data ? JSON.stringify(data) : null;
+  const res = await fetch(`http://127.0.0.1:18500${endpoint}`, {
+    method: data ? 'POST' : 'GET',
+    headers: {
+      'Authorization': `Bearer ${cfg.token}`,
+      ...(body ? { 'Content-Type': 'application/json' } : {})
+    },
+    body: body || undefined,
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Cage API ${endpoint} 失败: ${res.status} ${errText}`);
+  }
+  return await res.json();
+}
+
+/** 包装 Cage 原生浏览器 Tab 为标准 CDP 对象，全套 DOM 自动化、跳转与凭据捕获直接兼容复用 */
+class CageCdp {
+  constructor(tabId) {
+    this.tabId = tabId;
+    this.ws = { readyState: 1 };
+  }
+  async call(method, params = {}) {
+    if (method === 'Page.navigate') {
+      await cageApi('/navigate', { id: this.tabId, url: params.url });
+      return {};
+    }
+    if (method === 'Page.reload') {
+      await cageApi('/reload', { id: this.tabId });
+      return {};
+    }
+    if (method === 'Page.bringToFront') {
+      await cageApi('/activate', { id: this.tabId });
+      return {};
+    }
+    if (method === 'Input.insertText') {
+      await cageApi('/insert-text', { id: this.tabId, text: params.text });
+      return {};
+    }
+    if (method === 'Input.dispatchKeyEvent') {
+      if (params.key === 'Enter' || params.code === 'Enter') {
+        try { execSync('env DISPLAY=:77 xdotool key Return', { stdio: 'ignore' }); } catch {}
+      }
+      return {};
+    }
+    if (method === 'Input.dispatchMouseEvent') {
+      return {};
+    }
+    if (method === 'Runtime.evaluate') {
+      return { result: { value: null } };
+    }
+    if (method === 'Storage.getCookies' || method === 'Network.getCookies' || method === 'Network.getAllCookies') {
+      const list = await cageApi('/cookies', { id: this.tabId, mode: 'list', scope: 'site' }).catch(() => null);
+      if (!list?.cookies) return { cookies: [] };
+      const cookies = [];
+      for (const c of list.cookies) {
+        if (c.name === 'sessionKey' || c.name === 'cf_clearance' || c.name === 'lastActiveOrg' || c.name === '__cf_bm' || c.name === '_cfuvid') {
+          try {
+            const detail = await cageApi('/cookies', { id: this.tabId, mode: 'details', cookieKey: c.key });
+            cookies.push({ ...c, value: detail?.value || '' });
+          } catch {
+            cookies.push({ ...c, value: '' });
+          }
+        } else {
+          cookies.push(c);
+        }
+      }
+      return { cookies };
+    }
+    return {};
+  }
+  close() {}
+}
+
 /** 取回 claude.ai 域下的全部 cookie（含 HttpOnly） */
 async function readCookies(flow) {
+  if (flow.isCage && flow.tabId) {
+    const list = await cageApi('/cookies', { id: flow.tabId, mode: 'list', scope: 'site' }).catch(() => null);
+    if (!list?.cookies) return [];
+    return await Promise.all(list.cookies.map(async c => {
+      if (c.value) return c;
+      if (!c.key) return c;
+      try {
+        const detail = await cageApi('/cookies', { id: flow.tabId, mode: 'details', cookieKey: c.key });
+        return { ...c, value: detail?.value || '' };
+      } catch {
+        return { ...c, value: '' };
+      }
+    }));
+  }
   // 1) 页面级 Network.getCookies（限定 claude.ai）——无痕窗口的独立内存 jar
   //    只有页面级会话能看到，浏览器级读的是默认 jar（恒空）
   try {
@@ -294,6 +413,7 @@ function claudeCookies(cookies) {
 
 /** 取回/复用「页面级」CDP 连接（DOM 检测与跳转都用它） */
 async function ensurePageCdp(flow, loginUrl = 'https://claude.ai/login') {
+  if (flow.isCage && flow.pageCdp) return flow.pageCdp;
   if (flow.pageCdp && flow.pageCdp.ws.readyState === 1) return flow.pageCdp;
   let page = null;
   // 多次轮询探测可用 page target
@@ -361,7 +481,9 @@ const VERIFY_EXPR = `(() => {
   if (frames.some(f => src(f).indexOf('hcaptcha.com') >= 0)) return 'hcaptcha';
   if (Array.prototype.slice.call(document.querySelectorAll('.h-captcha,#hcaptcha-container,[data-hcaptcha-widget-id]')).some(vis)) return 'hcaptcha';
   if (frames.some(f => src(f).indexOf('challenges.cloudflare.com') >= 0)) return 'cloudflare';
-  if (String(document.title || '').toLowerCase().indexOf('just a moment') === 0) return 'cloudflare';
+  if (document.querySelector('div#challenge-stage, div#turnstile-wrapper, div[class*="cf-turnstile"], div#cf-turnstile, [data-turnstile]')) return 'cloudflare';
+  const title = String(document.title || '').toLowerCase();
+  if (/just a moment|少しお待ちください|安全を確認|请稍候|checking your browser|attention required/i.test(title)) return 'cloudflare';
   if (frames.some(f => src(f).indexOf('recaptcha') >= 0)) return 'recaptcha';
   const bodyText = (document.body ? document.body.innerText : '') || '';
   if (/无法验证您的浏览器|Unable to verify your browser|ブラウザを確認できませんでした|確認できません/i.test(bodyText)) return 'browser_not_verified';
@@ -377,6 +499,95 @@ const VERIFY_EXPR = `(() => {
   });
   if (codePending) return 'email_code';
   return null;
+})()`;
+
+/** 自动处理新账号欢迎引导 (Onboarding / 姓名 / 18岁勾选 / Continue) */
+const ONBOARDING_EXPR = `(() => {
+  try {
+    // 只有在明确处于 onboarding 路径，或者页面存在欢迎引导专属特征时才执行！
+    const path = window.location.pathname || '';
+    const bodyText = (document.body ? document.body.innerText : '') || '';
+    const isOnboarding = path.includes('onboarding') || /what should we call you|how should claude call you|お名前|お呼びすれば|18歳以上/i.test(bodyText);
+    if (!isOnboarding) return false;
+
+    let acted = false;
+    // 1. 查找姓名输入框
+    const nameInp = document.querySelector('input[name*="name" i], input[data-testid*="name" i], input[placeholder*="name" i], input[placeholder*="お名前" i], input[placeholder*="名前" i], input[placeholder*="名字" i]');
+    if (nameInp && !nameInp.value) {
+      const defName = 'User_' + Math.random().toString(36).slice(2, 6);
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      if (setter) setter.call(nameInp, defName);
+      else nameInp.value = defName;
+      nameInp.dispatchEvent(new Event('input', { bubbles: true }));
+      nameInp.dispatchEvent(new Event('change', { bubbles: true }));
+      acted = true;
+    }
+
+    // 2. 查找 18 岁 / 条款确认勾选框
+    const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+    for (const cb of checkboxes) {
+      if (!cb.checked) {
+        cb.click();
+        cb.checked = true;
+        cb.dispatchEvent(new Event('change', { bubbles: true }));
+        acted = true;
+      }
+    }
+
+    // 3. 查找 Continue / 同意 / 続行 / Acknowledge / Next 按钮（严禁点击 Google / Apple 登录按钮！）
+    const btns = Array.from(document.querySelectorAll('button'));
+    const contBtn = btns.find(b => {
+      if (b.disabled) return false;
+      const t = (b.innerText || b.textContent || '').trim().toLowerCase();
+      if (/google|apple/i.test(t)) return false;
+      return /continue|get started|続行|同意|次へ|acknowledge|agree/i.test(t);
+    });
+    if (contBtn) {
+      contBtn.click();
+      acted = true;
+    }
+    return acted;
+  } catch (e) {
+    return false;
+  }
+})()`;
+
+/** 检测页面是否命中致命阻断（账号封禁、禁用、无法完成登录），命中时立即拉黑销毁邮箱并切换下一个 */
+const BANNED_OR_BLOCKED_EXPR = `(() => {
+  try {
+    const text = (document.body ? document.body.innerText : '') || '';
+    // 1. 账号已被官方禁用 / 停用 / 封禁 (アカウントが無効化されています / Your account has been disabled)
+    if (/アカウントが無効化|アカウントが停止|アカウント停止|無効化されました/i.test(text)) {
+      return { matched: true, reason: 'account_disabled', label: '账号已被官方禁用 (アカウントが無効化されています)' };
+    }
+    if (/account.*has been disabled|account.*disabled|account.*suspended/i.test(text)) {
+      return { matched: true, reason: 'account_disabled', label: '账号已被官方禁用 (Account has been disabled)' };
+    }
+    if (/账号已被禁用|账户已被禁用|账号已被停用|账户已被停用/i.test(text)) {
+      return { matched: true, reason: 'account_disabled', label: '账号已被官方禁用' };
+    }
+    if (document.querySelector('a[href*="8241253-trust-and-safety-warnings-and-appeals"]')) {
+      return { matched: true, reason: 'account_disabled', label: '账号已被官方禁用 (Trust & Safety Appeals)' };
+    }
+
+    // 2. 登录受阻 / 无法完成登录 (サインインを完了できませんでした / Unable to complete sign in)
+    if (/サインインを完了できませんでした|別のブラウザからサインインをお試し/i.test(text)) {
+      return { matched: true, reason: 'signin_failed', label: '登录受阻（サインインを完了できませんでした）' };
+    }
+    if (/unable to complete sign in|could not complete sign in|try signing in from a different browser|try signing in from another browser/i.test(text)) {
+      return { matched: true, reason: 'signin_failed', label: '登录受阻（Unable to complete sign in）' };
+    }
+    if (/无法完成登录|请尝试从其他浏览器登录/i.test(text)) {
+      return { matched: true, reason: 'signin_failed', label: '登录受阻（无法完成登录）' };
+    }
+    if (document.querySelector('a[href*="9015913-how-to-get-support"]')) {
+      return { matched: true, reason: 'signin_failed', label: '登录受阻（无法完成登录）' };
+    }
+
+    return { matched: false };
+  } catch (e) {
+    return { matched: false };
+  }
 })()`;
 
 const VERIFY_LABEL = {
@@ -409,7 +620,10 @@ async function detectVerify(f, cookies) {
     if (typeof v === 'string' && v) return v;
   } catch { /* 页面导航中/读取失败：当作无验证，下一轮再判 */ }
   // 魔法链接已发出（send_magic_link 成功）：等用户查收邮件
-  if (cookies?.some(c => c.name === 'pendingLogin' && c.value && c.value !== 'false')) return 'email_link';
+  // 注意：若已经收到并跳转 magicLink 或收到 emailCode，不应再标记为 email_link 阻碍交互验证判断
+  if (!f.magicLink && !f.emailCode && cookies?.some(c => c.name === 'pendingLogin' && c.value && c.value !== 'false')) {
+    return 'email_link';
+  }
   return null;
 }
 
@@ -498,6 +712,8 @@ export function createLoginManager(opts) {
       need_verify: !!f.needVerify,
       verify: f.verify || null,
       verify_label: f.verify ? (VERIFY_LABEL[f.verify] || f.verify) : null,
+      magicLink: f.magicLink || null,
+      emailCode: f.emailCode || null,
     };
   }
 
@@ -513,7 +729,7 @@ export function createLoginManager(opts) {
   const VERIFY_QUEUE = [];
 
   function isInteractiveVerify(kind) {
-    return kind === 'hcaptcha' || kind === 'recaptcha' || kind === 'cloudflare' || kind === 'browser_not_verified' || kind === 'email_code';
+    return kind === 'hcaptcha' || kind === 'recaptcha' || kind === 'cloudflare' || kind === 'browser_not_verified';
   }
 
   function tryAcquireVerifyLock(flow, kind) {
@@ -568,7 +784,67 @@ export function createLoginManager(opts) {
     }
   }
 
+  /* Cage 虚拟机独占输入锁：防止多账号并发时在同一个 X11 屏幕互相抢焦点打架 */
+  let cageInputQueue = Promise.resolve();
+  function acquireCageInputLock() {
+    let release;
+    const p = new Promise(resolve => { release = resolve; });
+    const cur = cageInputQueue;
+    cageInputQueue = cur.then(() => p);
+    return cur.then(() => release);
+  }
+
   async function submitEmailToClaude(flow, email) {
+    if (flow.isCage) {
+      console.log(`[login] ${flow.id} [Cage] 等待输入锁以填入邮箱: ${email}`);
+      const release = await acquireCageInputLock();
+      try {
+        console.log(`[login] ${flow.id} [Cage] 正在激活标签页 ${flow.tabId} 并填入邮箱: ${email}`);
+        await cageApi('/activate', { id: flow.tabId }).catch(() => {});
+        
+        // 激活 Chromium 顶层窗口
+        try {
+          const winList = execSync('DISPLAY=:77 xdotool search --class Chromium 2>/dev/null', { encoding: 'utf8' }).trim().split(/\s+/).filter(Boolean);
+          const winId = winList.pop();
+          if (winId) execSync(`DISPLAY=:77 xdotool windowactivate ${winId}`, { stdio: 'ignore' });
+        } catch {}
+
+        // 首个或无痕标签页冷启动渲染耗时较长（等待 React 组件和输入框完全挂载，避开白屏/加载圆环状态）
+        await sleep(4000);
+
+        // 精准聚焦邮箱输入框 (x=413, y=709，对应 1614x994 全屏视口居中输入框)
+        execSync('DISPLAY=:77 xdotool mousemove 413 709 click 1', { stdio: 'ignore' });
+        await sleep(200);
+
+        // 关闭可能弹出的浏览器历史邮箱推荐悬浮窗
+        execSync('DISPLAY=:77 xdotool key Escape', { stdio: 'ignore' });
+        await sleep(100);
+
+        // 全选清空输入框，防止残留字符
+        execSync('DISPLAY=:77 xdotool key ctrl+a BackSpace', { stdio: 'ignore' });
+        await sleep(150);
+
+        // 键入邮箱文本
+        execSync(`DISPLAY=:77 xdotool type --delay 25 ${JSON.stringify(email)}`, { stdio: 'ignore' });
+        await sleep(400);
+
+        // 表单内直接按回车提交
+        execSync('DISPLAY=:77 xdotool key Return', { stdio: 'ignore' });
+        await sleep(350);
+
+        // 双重保险：精准点击「メールで続ける」按钮 (x=413, y=797)
+        execSync('DISPLAY=:77 xdotool mousemove 413 797 mousedown 1 sleep 0.1 mouseup 1', { stdio: 'ignore' });
+        console.log(`[login] ${flow.id} [Cage] 已在 Cage 窗口内精准填入邮箱并提交`);
+        await sleep(800);
+        return true;
+      } catch (err) {
+        console.warn(`[login] ${flow.id} [Cage] 填入提交异常: ${err.message}`);
+        return false;
+      } finally {
+        release();
+      }
+    }
+
     const cdp = await ensurePageCdp(flow);
     const start = Date.now();
     let retryCount = 0;
@@ -601,12 +877,14 @@ export function createLoginManager(opts) {
             const consent = document.querySelector('[data-testid="consent-accept"]');
             if (consent && consent.offsetWidth && consent.offsetHeight) consent.click();
 
-            // 查找 input (优先用户指定的精确选择器)
+            // 查找 input (精确匹配用户提供的 input: <input id="email" data-testid="email" type="email" autocomplete="email" dir="ltr" aria-label="メール" placeholder="メールアドレスを入力" required="">)
             let input = document.querySelector('input[data-testid="email"]')
               || document.querySelector('input#email')
+              || document.querySelector('input[placeholder="メールアドレスを入力"]')
+              || document.querySelector('input[aria-label="メール"]')
+              || document.querySelector('input[autocomplete="email"]')
               || document.querySelector('cds-text-input input')
               || document.querySelector('input[type="email"]')
-              || document.querySelector('input[autocomplete="email"]')
               || Array.from(document.querySelectorAll('input')).find(i => /email|mail|メール/i.test([i.placeholder, i.name, i.id, i.getAttribute('aria-label')].join(' ')));
 
             if (!input) {
@@ -616,8 +894,9 @@ export function createLoginManager(opts) {
 
             if (!input) return { status: 'no_input' };
 
-            // 查找 continue 按钮 (优先用户指定的精确选择器)
+            // 查找 continue 按钮 (精确匹配用户提供的 button: <button type="submit" data-testid="continue" aria-describedby="si-legal-line" data-cds="Button" data-variant="primary" data-size="lg"><span data-submit-label="email">メールで続ける</span></button>)
             const btn = document.querySelector('button[data-testid="continue"]')
+              || document.querySelector('[data-submit-label="email"]')?.closest('button')
               || document.querySelector('button[type="submit"][data-cds="Button"]')
               || document.querySelector('button[type="submit"]')
               || Array.from(document.querySelectorAll('button')).find(b => !/google|apple/i.test(b.innerText || '') && /メールで続ける|email|继续|continue|login|登录/i.test((b.innerText || '').trim()));
@@ -684,9 +963,11 @@ export function createLoginManager(opts) {
             expression: `(() => {
               const input = document.querySelector('input[data-testid="email"]')
                 || document.querySelector('input#email')
+                || document.querySelector('input[placeholder="メールアドレスを入力"]')
+                || document.querySelector('input[aria-label="メール"]')
+                || document.querySelector('input[autocomplete="email"]')
                 || document.querySelector('cds-text-input input')
-                || document.querySelector('input[type="email"]')
-                || document.querySelector('input[autocomplete="email"]');
+                || document.querySelector('input[type="email"]');
               if (!input) return;
 
               // 突破 React _valueTracker
@@ -711,22 +992,17 @@ export function createLoginManager(opts) {
 
         // 4. 等待登录按钮变为可点击状态 (最多等 2.5 秒)
         let btnReady = false;
-        let btnPos = { x: info.btnX, y: info.btnY };
         const waitStart = Date.now();
         while (Date.now() - waitStart < 2500) {
           const btnCheck = await cdp.call('Runtime.evaluate', {
             expression: `(() => {
               const btn = document.querySelector('button[data-testid="continue"]')
+                || document.querySelector('[data-submit-label="email"]')?.closest('button')
                 || document.querySelector('button[type="submit"][data-cds="Button"]')
                 || document.querySelector('button[type="submit"]');
               if (!btn) return null;
               const disabled = !!btn.disabled || btn.getAttribute('aria-disabled') === 'true';
-              const rect = btn.getBoundingClientRect();
-              return {
-                disabled,
-                x: Math.round(rect.left + rect.width / 2),
-                y: Math.round(rect.top + rect.height / 2),
-              };
+              return { disabled };
             })()`,
             returnByValue: true,
           }).catch(() => null);
@@ -734,36 +1010,41 @@ export function createLoginManager(opts) {
           const bState = btnCheck?.result?.value;
           if (bState && !bState.disabled) {
             btnReady = true;
-            btnPos = { x: bState.x, y: bState.y };
             break;
           }
           await sleep(200);
         }
 
-        // 5. 点击提交按钮
+        // 5. 点击提交按钮（优先 DOM 原生事件精确点击与表单提交，绝不使用易受缩放偏移影响的绝对坐标点击，彻底避免误触 Google 登录）
         if (info.hasBrowserErr) {
           console.log(`[login] ${flow.id} 检测到「无法验证您的浏览器」，准备自动重试提交 (${retryCount + 1}/${maxRetries})...`);
           flow.message = `页面提示「无法验证您的浏览器」，正在自动重试提交 (${retryCount + 1}/${maxRetries})…`;
         }
 
-        if (btnPos.x > 0 && btnPos.y > 0) {
-          await cdp.call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: btnPos.x, y: btnPos.y, buttons: 0 }).catch(() => {});
-          await sleep(60);
-          await cdp.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: btnPos.x, y: btnPos.y, button: 'left', clickCount: 1, buttons: 1 }).catch(() => {});
-          await sleep(80);
-          await cdp.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: btnPos.x, y: btnPos.y, button: 'left', clickCount: 1, buttons: 0 }).catch(() => {});
-        } else {
-          await cdp.call('Runtime.evaluate', {
-            expression: `(() => {
-              const btn = document.querySelector('button[data-testid="continue"]')
-                || document.querySelector('button[type="submit"][data-cds="Button"]')
-                || document.querySelector('button[type="submit"]');
-              if (btn && !btn.disabled) btn.click();
-              const form = btn ? btn.closest('form') : document.querySelector('form');
-              if (form && typeof form.requestSubmit === 'function') { try { form.requestSubmit(); } catch {} }
-            })()`,
-          }).catch(() => {});
-        }
+        await cdp.call('Runtime.evaluate', {
+          expression: `(() => {
+            const btn = document.querySelector('button[data-testid="continue"]')
+              || document.querySelector('[data-submit-label="email"]')?.closest('button')
+              || document.querySelector('button[type="submit"][data-cds="Button"]')
+              || document.querySelector('button[type="submit"]')
+              || Array.from(document.querySelectorAll('button')).find(b => !/google|apple/i.test(b.innerText || '') && /メールで続ける|email|继续|continue|login|登录/i.test((b.innerText || '').trim()));
+            if (!btn) return false;
+            btn.removeAttribute('disabled');
+            btn.removeAttribute('aria-disabled');
+            const emailSpan = btn.querySelector('[data-submit-label="email"]') || btn.querySelector('[data-cds-button-label]');
+            if (emailSpan) emailSpan.click();
+            btn.click();
+            const form = btn.closest('form') || document.querySelector('form');
+            if (form && typeof form.requestSubmit === 'function') {
+              try { form.requestSubmit(btn); } catch { form.requestSubmit(); }
+            }
+            return true;
+          })()`,
+        }).catch(() => {});
+
+        // 同时在输入框派发 Enter 键双重保底
+        await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }).catch(() => {});
+        await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }).catch(() => {});
 
         // 6. 点击后观察页面状态 (跳转到验证码页、成功凭据、频率限制等)
         const clickTime = Date.now();
@@ -776,12 +1057,26 @@ export function createLoginManager(opts) {
               const codeInput = document.querySelector('input#code, input[data-testid="code"], input[name*="code" i], cds-text-input input[name*="code" i]');
               const hasBrowserErr = /无法验证您的浏览器|Unable to verify your browser|ブラウザを確認できませんでした|確認できません/i.test(bodyText);
               const isRateLimited = /試行回数が多|too_many_attempts|しばらくしてから再度お試し|尝试次数过多/i.test(bodyText);
-              return { hasCode: !!codeInput, hasBrowserErr, isRateLimited };
+              const fatalErr = (() => {
+                if (/アカウントが無効化|アカウントが停止|アカウント停止|無効化されました/i.test(bodyText)) return '账号已被官方禁用 (アカウントが無効化されています)';
+                if (/account.*has been disabled|account.*disabled|account.*suspended/i.test(bodyText)) return '账号已被官方禁用 (Account has been disabled)';
+                if (/账号已被禁用|账户已被禁用|账号已被停用|账户已被停用/i.test(bodyText)) return '账号已被官方禁用';
+                if (document.querySelector('a[href*="8241253-trust-and-safety-warnings-and-appeals"]')) return '账号已被官方禁用 (Trust & Safety Appeals)';
+                if (/サインインを完了できませんでした|別のブラウザからサインインをお試し|Unable to complete sign in|Could not complete sign in|Try signing in from a different browser|Try signing in from another browser|无法完成登录|请尝试从其他浏览器登录/i.test(bodyText) || !!document.querySelector('a[href*="9015913-how-to-get-support"]')) return '登录受阻（サインインを完了できませんでした / 无法完成登录）';
+                return null;
+              })();
+              return { hasCode: !!codeInput, hasBrowserErr, isRateLimited, fatalErr };
             })()`,
             returnByValue: true,
           }).catch(() => null);
 
           const st = check?.result?.value;
+          if (st?.fatalErr) {
+            flow.isSigninFailed = true;
+            flow.fatalReason = st.fatalErr;
+            flow.message = `❌ ${st.fatalErr}，已停止捕获并自动拉黑删除该邮箱`;
+            return false;
+          }
           if (st?.hasCode) {
             advanceDetected = true;
             return true;
@@ -821,6 +1116,27 @@ export function createLoginManager(opts) {
   }
 
   async function fillCodeInClaude(flow, code) {
+    if (flow.isCage) {
+      const release = await acquireCageInputLock();
+      try {
+        await cageApi('/activate', { id: flow.tabId }).catch(() => {});
+        await sleep(500);
+        try {
+          const winList = execSync('DISPLAY=:77 xdotool search --class Chromium 2>/dev/null', { encoding: 'utf8' }).trim().split(/\s+/).filter(Boolean);
+          const winId = winList.pop();
+          if (winId) execSync(`DISPLAY=:77 xdotool windowactivate ${winId}`, { stdio: 'ignore' });
+        } catch {}
+        await sleep(300);
+        execSync(`DISPLAY=:77 xdotool type --delay 30 ${JSON.stringify(String(code).trim())} key Return`, { stdio: 'ignore' });
+        return true;
+      } catch (e) {
+        console.warn(`[login] ${flow.id} [Cage] 自动输入验证码异常: ${e.message}`);
+        return false;
+      } finally {
+        release();
+      }
+    }
+
     try {
       const cdp = await ensurePageCdp(flow);
       const digits = String(code).trim().split('');
@@ -835,7 +1151,7 @@ export function createLoginManager(opts) {
               inp.dispatchEvent(new Event('change', { bubbles: true }));
             });
             const btn = document.querySelector('button[type="submit"]')
-              || [...document.querySelectorAll('button')].find(b => /continue|验证|verify/i.test(b.innerText || ''));
+              || [...document.querySelectorAll('button')].find(b => !/google|apple/i.test(b.innerText || '') && /continue|验证|verify/i.test(b.innerText || ''));
             if (btn && !btn.disabled) btn.click();
             return true;
           }
@@ -853,7 +1169,7 @@ export function createLoginManager(opts) {
             single.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
             const btn = document.querySelector('button[data-testid="continue"]')
               || document.querySelector('button[type="submit"]')
-              || [...document.querySelectorAll('button')].find(b => /continue|验证|verify|確認/i.test(b.innerText || ''));
+              || [...document.querySelectorAll('button')].find(b => !/google|apple/i.test(b.innerText || '') && /continue|验证|verify|確認/i.test(b.innerText || ''));
             if (btn && !btn.disabled) {
               btn.click();
             } else {
@@ -877,6 +1193,10 @@ export function createLoginManager(opts) {
 
   function cleanup(f) {
     releaseVerifyLock(f);
+    if (f.isCage && f.tabId) {
+      cageApi('/close', { id: f.tabId }).catch(() => {});
+      f.tabId = null;
+    }
     if (f.port) ALLOCATED_PORTS.delete(f.port);
     try { f.pageCdp?.close(); } catch { /* noop */ }
     try { f.cdp?.close(); } catch { /* noop */ }
@@ -906,7 +1226,19 @@ export function createLoginManager(opts) {
     let lastHint = '';
     let consecutiveFails = 0;
     while (Date.now() < f.expiresAt && f.state !== 'cancelled' && f.state !== 'closed') {
-      if (f.proc && (f.proc.exitCode !== null || f.proc.killed)) {
+      if (f.isCage) {
+        try {
+          const tabsRes = await cageApi('/tabs');
+          const exists = tabsRes.tabs?.some(t => t.id === f.tabId);
+          if (!exists) {
+            console.log(`[login] ${f.id} Cage 浏览器标签页已关闭，停止轮询`);
+            f.state = 'closed';
+            f.message = '登录标签页已被关闭，请点击下方「重新发起登录」重新打开';
+            if (active === f) active = null;
+            break;
+          }
+        } catch { /* cageApi temporary error, ignore */ }
+      } else if (f.proc && (f.proc.exitCode !== null || f.proc.killed)) {
         console.log(`[login] ${f.id} 浏览器进程已关闭，停止轮询`);
         f.state = 'closed';
         f.message = '登录浏览器窗口已被关闭，请点击下方「重新发起登录」重新打开';
@@ -974,6 +1306,51 @@ export function createLoginManager(opts) {
         }
       } else if (f.state !== 'capturing') {
         f.state = 'waiting';
+
+        // 关键检测：检查页面是否出现「アカウントが無効化されています / 账号禁用」或「サインインを完了できませんでした / 无法完成登录」致命阻断
+        let fatalCheck = null;
+        try {
+          const pageCdp = await ensurePageCdp(f);
+          const chk = await pageCdp.call('Runtime.evaluate', {
+            expression: BANNED_OR_BLOCKED_EXPR,
+            returnByValue: true,
+          }).catch(() => null);
+          fatalCheck = chk?.result?.value;
+        } catch {}
+
+        if (fatalCheck?.matched) {
+          f.state = 'error';
+          f.error = fatalCheck.reason || 'account_banned';
+          f.message = `❌ ${fatalCheck.label}，已停止捕获并自动拉黑删除该邮箱`;
+          console.warn(`[login] ${f.id} (${f.autoEmail || ''}) 检测到致命阻断：${fatalCheck.label}，判定为不可用邮箱，执行拉黑销毁并切换下一个`);
+          if (typeof accountBannedHandler === 'function' && f.autoEmail) {
+            try {
+              await accountBannedHandler(f.autoEmail, f);
+            } catch (banErr) {
+              console.warn(`[login] 自动清理封禁/受阻邮箱异常: ${banErr.message}`);
+            }
+          }
+          if (f._batchItem) {
+            f._batchItem.state = 'error';
+            f._batchItem.error = f.error;
+            f._batchItem.message = f.message;
+          }
+          break;
+        }
+
+        // 尝试自动推进新账号 Onboarding 引导（输入姓名、勾选18岁条款、点击继续）
+        try {
+          const pageCdp = await ensurePageCdp(f);
+          const onboardRes = await pageCdp.call('Runtime.evaluate', {
+            expression: ONBOARDING_EXPR,
+            returnByValue: true,
+          }).catch(() => null);
+          if (onboardRes?.result?.value) {
+            console.log(`[login] ${f.id} 自动推进新账号 Onboarding 引导流程`);
+            f.message = '检测到新账号欢迎流程，已自动填入姓名与确认条款，正在进入主界面…';
+          }
+        } catch {}
+
         // —— 人工验证检测：需要用户介入时把话说清楚，用户完成后自动继续捕获 ——
         const kind = await detectVerify(f, cookies);
         if (kind) {
@@ -1003,7 +1380,7 @@ export function createLoginManager(opts) {
               f.message = `⏳ 验证码排队等待中：当前正在处理 ${holder} 的验证码，请勿抢占，完成后将自动切换到此窗口…`;
             }
           } else {
-            if (kind === 'email_link' && f.autoVerifying && f.autoVerifyMsg) {
+            if ((kind === 'email_link' || kind === 'email_code') && f.autoVerifying && f.autoVerifyMsg) {
               f.message = f.autoVerifyMsg;
             } else {
               f.message = VERIFY_HINT[kind] || `需要人工验证（${VERIFY_LABEL[kind] || kind}），到浏览器窗口完成后会自动继续`;
@@ -1057,6 +1434,96 @@ export function createLoginManager(opts) {
 
   async function run(f) {
     try {
+      // 虚拟机专属：如果处于 Claude Cage 虚拟机环境，使用 Cage 原生浏览器（在 Cage 标签页中打开），不调用外部独立 Chrome
+      if (isCageBrowserAvailable()) {
+        f.isCage = true;
+        f.browser = 'Cage 原生浏览器';
+        console.log(`[login] ${f.id} 检测到 Cage 虚拟机环境，正在 Cage 原生浏览器中打开登录标签页...`);
+        const tab = await cageApi('/new', { url: loginUrl, incognito: true });
+        f.tabId = tab.id;
+        f.pageCdp = new CageCdp(f.tabId);
+        f.cdp = f.pageCdp;
+        await f.pageCdp.call('Page.bringToFront');
+        f.state = 'waiting';
+        f.message = `已在 Cage 原生浏览器中打开登录标签页，正在自动填入邮箱…`;
+
+        if (f.autoEmail) {
+          f.message = `已在 Cage 原生浏览器中打开登录标签页，正在自动填入邮箱 ${f.autoEmail}…`;
+          submitEmailToClaude(f, f.autoEmail).then(async ok => {
+            console.log(`[login] ${f.id} 自动提交邮箱 ${f.autoEmail} 结果: ${ok}`);
+            if (!ok) {
+              if (f.isSigninFailed) {
+                f.state = 'error';
+                f.error = 'signin_failed';
+                f.message = '❌ 登录受阻（サインインを完了できませんでした / 无法完成登录），已停止捕获并自动拉黑删除该邮箱';
+                console.warn(`[login] ${f.id} (${f.autoEmail || ''}) 提交邮箱后页面提示无法完成登录，执行拉黑销毁`);
+                if (typeof accountBannedHandler === 'function' && f.autoEmail) {
+                  try { await accountBannedHandler(f.autoEmail, f); } catch {}
+                }
+                if (f._batchItem) {
+                  f._batchItem.state = 'error';
+                  f._batchItem.error = 'signin_failed';
+                  f._batchItem.message = f.message;
+                }
+                cleanup(f);
+                return;
+              }
+              if (LIVE.has(f.state)) f.message = `未能自动填入邮箱（页面可能需要人工验证或加载较慢），可在标签页直接操作`;
+              return;
+            }
+            f.autoVerifying = true;
+            f.autoVerifyMsg = `已提交邮箱 ${f.autoEmail}，正在等待 Claude 验证邮件…`;
+            if (LIVE.has(f.state)) f.message = f.autoVerifyMsg;
+            if (typeof verificationProvider === 'function') {
+              try {
+                console.log(`[login] ${f.id} 正在启动自动接码监听 (邮箱: ${f.autoEmail})...`);
+                const res = await verificationProvider(f.autoEmail, f, (msg) => {
+                  f.autoVerifyMsg = `📨 ${msg}`;
+                  if (LIVE.has(f.state)) f.message = f.autoVerifyMsg;
+                });
+                if (res?.magicLink) {
+                  f.magicLink = res.magicLink;
+                  if (f._batchItem) f._batchItem.magicLink = res.magicLink;
+                  f.autoVerifyMsg = '🔗 收到 Magic Link，正在浏览器中自动跳转登录…';
+                  f.message = f.autoVerifyMsg;
+                  console.log(`[login] ${f.id} 自动跳转 Magic Link: ${res.magicLink.slice(0, 60)}...`);
+                  await f.pageCdp.call('Page.navigate', { url: res.magicLink });
+                  await f.pageCdp.call('Page.bringToFront');
+                } else if (res?.code) {
+                  f.emailCode = res.code;
+                  if (f._batchItem) f._batchItem.emailCode = res.code;
+                  f.autoVerifyMsg = `🔢 收到验证码 [${res.code}]，正在浏览器中自动输入…`;
+                  f.message = f.autoVerifyMsg;
+                  console.log(`[login] ${f.id} 自动输入验证码: ${res.code}`);
+                  await fillCodeInClaude(f, res.code);
+                }
+              } catch (vErr) {
+                f.autoVerifying = false;
+                console.warn(`[login] ${f.id} 自动接码提示: ${vErr.message}`);
+                await releaseVerifyLock(f);
+                if (f._batchItem) {
+                  f.state = 'error';
+                  f.error = 'timeout';
+                  f.message = `❌ 接码超时 (${vErr.message})，自动跳过此邮箱并继续排队`;
+                  f._batchItem.state = 'timeout';
+                  f._batchItem.message = f.message;
+                  cleanup(f);
+                  return;
+                }
+                f.autoVerifyMsg = `自动接码失败：${vErr.message}，可在页面手动输入`;
+                if (LIVE.has(f.state)) f.message = f.autoVerifyMsg;
+              }
+            }
+          }).catch(e => {
+            console.warn(`[login] ${f.id} 自动填入邮箱发生异常:`, e.message);
+          });
+        }
+
+        await captureLoop(f);
+        return;
+      }
+
+      // 以下为真机（Windows / macOS / 普通 Linux）标准独立 Chrome 浏览器启动逻辑
       const exe = findBrowser();
       f.browser = path.basename(exe);
       console.log(`[login] ${f.id} 正在启动登录浏览器: ${exe}`);
@@ -1071,7 +1538,6 @@ export function createLoginManager(opts) {
         '--remote-allow-origins=*',
         '--no-first-run',
         '--no-default-browser-check',
-        '--disable-blink-features=AutomationControlled',
         '--disable-features=msStartupBoost,Translate,OptimizationHints',
         '--disable-background-mode',
         '--disable-backgrounding-occluded-windows',
@@ -1079,6 +1545,51 @@ export function createLoginManager(opts) {
         '--new-window',
         loginUrl,
       ];
+
+      // 自动挂载并配置 YesCaptcha Assistant 浏览器打码扩展（打码功能可选开启）
+      const extDir = path.resolve(ROOT, 'tools', 'extensions', 'yescaptcha');
+      let isYesCaptchaEnabled = false;
+
+      if (fs.existsSync(path.join(extDir, 'manifest.json'))) {
+        try {
+          const cfgP = path.join(ROOT, 'config.json');
+          let cfgObj = {};
+          if (fs.existsSync(cfgP)) {
+            try { cfgObj = JSON.parse(fs.readFileSync(cfgP, 'utf8')); } catch {}
+          }
+          const settings = cfgObj.settings || {};
+          let yKey = (settings.yescaptchaClientKey || settings.yescaptchaKey || process.env.YESCAPTCHA_CLIENT_KEY || '').trim();
+
+          // 可选开启判定：显式设为 false 时绝不挂载；有 key 且未显式关闭（或显式设为 true）才启用
+          isYesCaptchaEnabled = settings.yescaptchaEnabled === true || (settings.yescaptchaEnabled !== false && !!yKey);
+
+          if (isYesCaptchaEnabled) {
+            const cfgJsPath = path.join(extDir, 'config.js');
+            if (fs.existsSync(cfgJsPath)) {
+              let js = fs.readFileSync(cfgJsPath, 'utf8');
+              if (yKey) {
+                js = js.replace(/clientKey:\s*['"][^'"]*['"]/, `clientKey: '${yKey}'`);
+              }
+              js = js.replace(/isOpenCloudflare:\s*false/, 'isOpenCloudflare: true');
+              js = js.replace(/isAutoClickCheckBox:\s*false/, 'isAutoClickCheckBox: true');
+              js = js.replace(/isAutoSubmit:\s*false/, 'isAutoSubmit: true');
+              fs.writeFileSync(cfgJsPath, js, 'utf8');
+              if (yKey) {
+                console.log(`[login] ${f.id} [智能打码已开启] 已注入 YesCaptcha 授权 (ClientKey: ${yKey.slice(0, 6)}...)`);
+              }
+            }
+          }
+        } catch (e) {
+          console.warn(`[login] ${f.id} 配置 YesCaptcha 异常:`, e.message);
+        }
+
+        if (isYesCaptchaEnabled) {
+          args.unshift(`--load-extension=${extDir}`, `--disable-extensions-except=${extDir}`);
+          console.log(`[login] ${f.id} [智能打码已开启] 浏览器已自动挂载 YesCaptcha Assistant 扩展插件`);
+        } else {
+          console.log(`[login] ${f.id} [智能打码未开启] 启动纯净原生浏览器（不挂载打码扩展插件）`);
+        }
+      }
 
 
       const env = { ...process.env };
@@ -1091,7 +1602,6 @@ export function createLoginManager(opts) {
           } catch {}
           if (!env.DISPLAY) env.DISPLAY = ':77';
         }
-        args.unshift('--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu');
       }
 
       f.proc = spawn(exe, args, { stdio: 'ignore', windowsHide: false, env });
@@ -1150,6 +1660,22 @@ export function createLoginManager(opts) {
         submitEmailToClaude(f, f.autoEmail).then(async ok => {
           console.log(`[login] ${f.id} 自动提交邮箱 ${f.autoEmail} 结果: ${ok}`);
           if (!ok) {
+            if (f.isSigninFailed) {
+              f.state = 'error';
+              f.error = 'signin_failed';
+              f.message = '❌ 登录受阻（サインインを完了できませんでした / 无法完成登录），已停止捕获并自动拉黑删除该邮箱';
+              console.warn(`[login] ${f.id} (${f.autoEmail || ''}) 提交邮箱后页面提示无法完成登录，执行拉黑销毁`);
+              if (typeof accountBannedHandler === 'function' && f.autoEmail) {
+                try { await accountBannedHandler(f.autoEmail, f); } catch {}
+              }
+              if (f._batchItem) {
+                f._batchItem.state = 'error';
+                f._batchItem.error = 'signin_failed';
+                f._batchItem.message = f.message;
+              }
+              cleanup(f);
+              return;
+            }
             if (LIVE.has(f.state)) f.message = `未能自动填入邮箱（页面可能需要人工验证或加载较慢），可在浏览器窗口直接操作`;
             return;
           }
@@ -1163,12 +1689,18 @@ export function createLoginManager(opts) {
                 if (LIVE.has(f.state)) f.message = f.autoVerifyMsg;
               });
               if (res?.magicLink) {
+                f.magicLink = res.magicLink;
+                if (f._batchItem) f._batchItem.magicLink = res.magicLink;
                 f.autoVerifyMsg = '🔗 收到 Magic Link，正在浏览器中自动跳转登录…';
                 f.message = f.autoVerifyMsg;
                 console.log(`[login] ${f.id} 自动跳转 Magic Link: ${res.magicLink.slice(0, 60)}...`);
                 const pageCdp = await ensurePageCdp(f);
                 await pageCdp.call('Page.navigate', { url: res.magicLink });
+                await pageCdp.call('Page.bringToFront').catch(() => {});
+                focusBrowserWindow(f.proc?.pid);
               } else if (res?.code) {
+                f.emailCode = res.code;
+                if (f._batchItem) f._batchItem.emailCode = res.code;
                 f.autoVerifyMsg = `🔢 收到验证码 [${res.code}]，正在浏览器中自动输入…`;
                 f.message = f.autoVerifyMsg;
                 console.log(`[login] ${f.id} 自动输入验证码: ${res.code}`);
@@ -1177,6 +1709,16 @@ export function createLoginManager(opts) {
             } catch (err) {
               f.autoVerifying = false;
               console.warn(`[login] ${f.id} 自动接码提示: ${err.message}`);
+              await releaseVerifyLock(f);
+              if (f._batchItem) {
+                f.state = 'error';
+                f.error = 'timeout';
+                f.message = `❌ 接码超时 (${err.message})，自动跳过此邮箱并继续排队`;
+                f._batchItem.state = 'timeout';
+                f._batchItem.message = f.message;
+                cleanup(f);
+                return;
+              }
               if (LIVE.has(f.state)) f.message = `等待邮件超时 (${err.message})，可在浏览器窗口手动完成`;
             }
           }
@@ -1224,6 +1766,11 @@ export function createLoginManager(opts) {
         state: x.state,
         message: x.message,
         flowId: x.flowId,
+        link: x.link || (x.flowId ? `${baseUrl}/login/${x.flowId}` : null),
+        needVerify: !!x.needVerify,
+        verify: x.verify || null,
+        magicLink: x.magicLink || null,
+        emailCode: x.emailCode || null,
         account: x.account,
         startedAt: x.startedAt,
         endedAt: x.endedAt,
@@ -1343,6 +1890,11 @@ export function createLoginManager(opts) {
         if (f.state !== 'starting') item.state = f.state;
         if (f.message) item.message = f.message;
         if (f.account) item.account = f.account;
+        item.link = f.link;
+        item.needVerify = !!f.needVerify;
+        item.verify = f.verify || null;
+        if (f.magicLink) item.magicLink = f.magicLink;
+        if (f.emailCode) item.emailCode = f.emailCode;
         if (!LIVE.has(f.state) || batch._cancelled) {
           clearInterval(syncTimer);
         }
@@ -1469,6 +2021,42 @@ export function createLoginManager(opts) {
       } catch (e) {
         return { ok: false, message: '跳转失败：' + (e.message || String(e)) };
       }
+    },
+
+    /** 唤醒并置顶指定登录窗口，并将人机验证焦点切换为此账号 */
+    async focus(id) {
+      const f = flows.get(id);
+      if (!f || !LIVE.has(f.state)) return { ok: false, message: '登录流程不存在或已结束' };
+
+      // 1. 将人机验证互斥锁强制切换为此账号，允许用户自由逐一处理任意账号的验证码
+      VERIFY_LOCK.holderId = f.id;
+      VERIFY_LOCK.holderEmail = f.autoEmail || f.id;
+      VERIFY_LOCK.kind = f.verify || 'verify';
+      VERIFY_LOCK.acquiredAt = Date.now();
+      f._verifyFocused = true;
+      f.expiresAt = Math.max(f.expiresAt, Date.now() + timeoutMs); // 延长超时时间防中断
+
+      // 2. CDP / 浏览器激活页面到最前
+      try {
+        const cdp = await ensurePageCdp(f);
+        await cdp.call('Page.bringToFront');
+      } catch {}
+
+      // 3. 操作系统级别窗口置顶激活 (Cage 环境无需系统级窗口置顶，仅真机调用)
+      if (!f.isCage) {
+        focusBrowserWindow(f.proc?.pid);
+      }
+
+      return {
+        ok: true,
+        message: f.isCage
+          ? `已切换到 Cage 原生浏览器中「${f.autoEmail || f.id}」的登录标签页！`
+          : `已将「${f.autoEmail || f.id}」的登录窗口置顶到前台！`,
+        link: f.link,
+        magicLink: f.magicLink || null,
+        emailCode: f.emailCode || null,
+        verify: f.verify || null,
+      };
     },
 
     /** 多邮箱并发批量登录 */
@@ -1725,8 +2313,7 @@ export function createCfVerifyManager(opts) {
         '--remote-allow-origins=*',
         '--no-first-run',
         '--no-default-browser-check',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-features=AutomationControlled,Translate,OptimizationHints',
+        '--disable-features=Translate,OptimizationHints',
         '--disable-infobars',
         `--window-size=${fsize[0]},${fsize[1]}`,
         `--accept-lang=${flang}`,
@@ -1743,7 +2330,6 @@ export function createCfVerifyManager(opts) {
           } catch {}
           if (!env.DISPLAY) env.DISPLAY = ':77';
         }
-        args.unshift('--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu');
       }
 
       f.proc = spawn(exe, args, { stdio: 'ignore', windowsHide: false, env });
@@ -2027,7 +2613,6 @@ export async function openClaudeWebBrowser({ sessionKey, org = '', cookie = '', 
     '--remote-allow-origins=*',
     '--no-first-run',
     '--no-default-browser-check',
-    '--disable-blink-features=AutomationControlled',
     '--disable-features=msStartupBoost,Translate,OptimizationHints',
     '--disable-background-mode',
     '--disable-backgrounding-occluded-windows',
