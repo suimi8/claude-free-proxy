@@ -310,15 +310,10 @@ for chunk in response:
 </details>
 
 <details>
-<summary><b>Q: 如果我没有多余的账号，或者不想繁琐自建注册怎么办？</b></summary>
+<summary><b>Q: 如何获取更多账号凭据？</b></summary>
 
-本项目完全开源开放，支持任意合规来源的账号 sessionKey。如果您缺乏多账号资源、或希望快速获取稳定即用的成品账号，可按社区规范参考下方 Base64 编码信息获取支持通道：
-
-```text
-# Linux.do 社区合规 Base64 凭据通道：
-aHR0cHM6Ly93enlwLmNuL3Nob3AvOFdSQlBGSUI=
-```
-*(使用终端命令 `echo "aHR0cHM6Ly93enlwLmNuL3Nob3AvOFdSQlBGSUI=" | base64 -d` 或在线解码工具获取链接，购买后仅提供 sessionKey，支持一键批量复制导入)*
+本项目推荐优先使用您自己的个人账号（通过桌面端一键解密或 WebUI 链接登录，完全免费）。  
+如果您缺少多账号环境或仅用于临时开发测试，可参考作者提供的应急备用通道（Base64：`aHR0cHM6Ly93enlwLmNuL3Nob3AvOFdSQlBGSUI=`），获取后直接将 `sessionKey` 复制到控制台「批量导入」即可。
 </details>
 
 ---
@@ -327,6 +322,12 @@ aHR0cHM6Ly93enlwLmNuL3Nob3AvOFdSQlBGSUI=
 
 1. **隐私安全**：本项目恪守本地化原则，`.gitignore` 默认强力屏蔽所有 `.env`、`accounts.json`、`config.json`、`upstream.json`、`*.log`，严防用户凭据外泄。
 2. **开源免责**：本项目仅供计算机技术研究与学习交流使用。使用者应自行对使用行为负责，请在遵守当地法律法规及第三方平台服务条款的前提下合理使用。
+
+---
+
+## 💖 致谢 (Acknowledgements)
+
+特别致谢 **[LINUX DO](https://linux.do/)** 社区以及各位热心佬友们在技术探索、逆向分析与高可用架构讨论中提供的宝贵经验、无私分享与灵感启发！
 
 ---
 
