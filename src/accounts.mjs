@@ -316,28 +316,35 @@ export class AccountPool {
       }
     }
 
+    // 优先选择近期没有 429 / 限频记录的绝对健康账号
+    const nonRateLimited = list.filter(a => !hasRecentRateLimit(a));
+    const effectiveList = nonRateLimited.length ? nonRateLimited : list;
+
     let pick;
     if (this.data.strategy === 'least-loaded') {
-      pick = list.slice().sort((x, y) => {
+      pick = effectiveList.slice().sort((x, y) => {
         const x429 = hasRecentRateLimit(x) ? 1 : 0;
         const y429 = hasRecentRateLimit(y) ? 1 : 0;
         if (x429 !== y429) return x429 - y429;
+        const rx = quotaRemaining(x) ?? 1;
+        const ry = quotaRemaining(y) ?? 1;
+        if (Math.abs(rx - ry) > 0.1) return ry - rx;
         return (loadScore(x) - loadScore(y)) || (x.stats.lastUsedAt - y.stats.lastUsedAt);
       })[0];
     } else if (this.data.strategy === 'optimal') {
-      pick = selectOptimalAccount(list, exclude, preferredId, {
+      pick = selectOptimalAccount(effectiveList, exclude, preferredId, {
         perAccountConcurrency: this.data.perAccountConcurrency,
       });
     } else {
-      // round-robin：从上次停下的位置往后找第一个可用的
-      const ids = new Set(list.map(a => a.id));
+      // round-robin：优先在健康列表中循环
+      const ids = new Set(effectiveList.map(a => a.id));
       const n = this.data.accounts.length;
       for (let i = 0; i < n; i++) {
         const idx = (this.rr + i) % n;
         const a = this.data.accounts[idx];
         if (ids.has(a.id)) { pick = a; this.rr = (idx + 1) % n; break; }
       }
-      pick = pick || list[0];
+      pick = pick || effectiveList[0];
     }
 
     if (!pick) return null;
@@ -397,6 +404,8 @@ export class AccountPool {
       cur.exhaustedUntil = until;
       cur.exhaustedReason = extra.reason || 'quota';
       cur.exhaustedAt = Date.now();
+      cur.last429At = Date.now();
+      cur.lastRateLimitAt = Date.now();
       cur.cooldownUntil = Math.max(cur.cooldownUntil || 0, until);
       ms = Math.max(0, until - Date.now());
       console.warn(`[pool] ${cur.label} 配额用尽(${cur.exhaustedReason}) -> 列入 429 耗尽池，`
@@ -503,6 +512,7 @@ export class AccountPool {
       if (input.ua) a.ua = input.ua;
       if (input.cookie) a.cookie = input.cookie;
       if (input.base) a.base = input.base;
+      if (input.email) a.email = input.email;
       a.enabled = true;
       a.failStreak = 0;
       a.streaks = {};
@@ -518,6 +528,7 @@ export class AccountPool {
       sessionKey: sk,
       cookie: input.cookie || '',
       org: input.org || '',
+      email: input.email || '',
       base: input.base || DEFAULT_BASE,
       ua: input.ua || DEFAULT_UA,
       enabled: true,

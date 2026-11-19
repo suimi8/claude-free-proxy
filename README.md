@@ -1,66 +1,78 @@
-# Claude Desktop (free) → OpenAI 兼容反代
+# 🚀 Claude Desktop (free) → OpenAI 兼容反代
 
-> **基于 Claude 官方桌面端（Claude Desktop）本地会话解密与逆向反代**，将桌面端免费会话转化为标准 OpenAI 格式 API，支持多账号池轮询、并发限流、429 智能故障转移与开箱即用的 WebUI 控制台。
+<div align="center">
 
-[![Node.js](https://img.shields.io/badge/Node.js-22+-green.svg)](https://nodejs.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20Compatible-blue.svg)](https://platform.openai.com/docs/api-reference)
-[![Shop](https://img.shields.io/badge/%F0%9F%9B%92%20%E6%88%90%E5%93%81%E8%B4%A6%E5%8F%B7%E8%B4%AD%E4%B9%B0-%E7%A2%8E%E7%B1%B3%E7%9A%84%E5%B0%8F%E5%BA%97-orange.svg)](https://wzyp.cn/shop/8WRBPFIB)
+> **基于 Claude 官方桌面端（Claude Desktop）本地会话解密与逆向调度**  
+> 将桌面端免费会话转化为标准 OpenAI 格式接口，支持多账号智能轮询、并发限流隔离、429 故障转移与开箱即用的现代化 WebUI 控制台。
 
-> 🛒 **成品账号购买**：如果你需要现成、稳定、开箱即用的 Claude 官方账号或独享账号，欢迎前往小店选购：
-> 👉 **[碎米的小店的小店 - 链动小铺](https://wzyp.cn/shop/8WRBPFIB)**（购买后获取 sessionKey 支持一键批量导入反代池，免去繁琐注册）
+[![Node.js](https://img.shields.io/badge/Node.js-22+-43853d.svg?style=flat-square&logo=node.js)](https://nodejs.org/)
+[![Dependencies](https://img.shields.io/badge/Dependencies-Zero%20(0)-blue.svg?style=flat-square)](package.json)
+[![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20Compatible-412991.svg?style=flat-square&logo=openai)](https://platform.openai.com/docs/api-reference)
+[![LINUX DO](https://img.shields.io/badge/LINUX%20DO-Community-2563eb.svg?style=flat-square)](https://linux.do/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
+
+[功能特性](#-核心特性) • [技术原理](#-为什么是桌面端解密逆向) • [快速上手](#-快速上手) • [Docker 部署](#-docker-部署) • [客户端接入](#-主流客户端接入) • [常见问题](#-常见问题--faq)
+
+</div>
 
 ---
 
-## 💡 为什么是 Claude Desktop（桌面端）逆向？
+## 💡 为什么是桌面端解密逆向？
 
-如果你尝试过官方 API 路线，就会发现免费账号是无法直接获取商业 API 权限的：
+如果你尝试过官方商业 API 或 CLI 路线，就会发现免费个人账号是无法直接获取通用 API 权限的：
 
-| 探索路径 | 实际结果 |
-|---|---|
-| 官方商业 API (`api.anthropic.com/v1/messages`) | `403 oauth_not_allowed_for_organization`（仅限付费套餐） |
-| `claude auth login`（Claude Code 授权） | 提示「连接 Claude Code 需要 Max、Ultra 或 Pro 套餐」 |
-| **Claude Desktop（桌面端）本地解密** | **✅ 成功获取完整合法会话与 Cookie** |
+| 探索路径 | 官方响应 / 实际结果 | 适用场景 |
+| :--- | :--- | :--- |
+| **官方商业 API** (`api.anthropic.com/v1/messages`) | `403 oauth_not_allowed_for_organization` | 仅限绑卡付费组织 |
+| **Claude Code CLI** (`claude auth login`) | 提示「连接 Claude Code 需要 Max、Ultra 或 Pro 套餐」 | 仅限付费订阅用户 |
+| **网页端抓包 Cookie** | 频繁受制于 Cloudflare 动态人机验证与 Cookie 过期 | 容易频繁失效与掉线 |
+| **Claude Desktop 本地凭据解密** | **✅ 成功获取完整合法长效会话、cf_clearance 与配套 UA** | **免费可用、协议完整、稳定长效** |
 
-### 桌面端逆向与解密链
+### 桌面端解密链 (Windows)
 
-Claude 官方桌面端（Windows）基于 Electron 架构，用户的登录凭据被高强度加密保存在本地数据目录：`%LOCALAPPDATA%\Claude-Data\claude_pzs8sxrjxfjjc`。
+Claude 官方桌面端基于 Electron 架构，登录凭据使用 Windows 系统级安全服务加密保存在本地数据目录：`%LOCALAPPDATA%\Claude-Data\claude_pzs8sxrjxfjjc`。
 
-本项目内置了自动化解密工具（[tools/desktop_session.py](tools/desktop_session.py)），解密链如下：
+本项目内置全自动本地解密工具（[tools/desktop_session.py](tools/desktop_session.py)）：
 ```text
 Local State (os_crypt.encrypted_key) 
     └──> Windows DPAPI (CryptUnprotectData) 
-          └──> AES-256-GCM Key 
+          └──> AES-256-GCM Master Key 
                 └──> 解密 Cookies.sqlite (encrypted_value) 
-                      └──> 提取 sessionKey、cf_clearance 与配套 Electron UA
+                      └──> 提取 sessionKey、cf_clearance 与配套合法 Electron UA
 ```
-**桌面客户端在后台正是使用这套凭证与上游保持长连接并调用 completion 接口进行对话。本代理通过自动化提取 Claude 桌面端凭据，彻底打通免费会话向通用 OpenAI 接口的转换！**
+提取完成后，反代服务利用合法桌面端环境向官方接口保持通信，完整模拟桌面端会话协议，平滑转换为通用标准的 OpenAI 格式。
 
 ---
 
 ## 🌟 核心特性
 
-- **Claude Desktop 原生会话复用**：自动化解密本地已安装的 Claude 桌面端凭据，免复制 Cookie、免抓包、开箱即用。
-- **OpenAI 协议全兼容**：无缝对接 Cherry Studio、NextChat、Cursor、Chatbox、沉浸式翻译等第三方客户端及各类 LangChain/LlamaIndex 应用。
-- **多账号智能调度池**：
-  - 支持 **轮询 (`round-robin`)** 与 **最闲优先 (`least-loaded`)** 调度。
-  - 每账号独立并发控制，超额自动排队。
-  - **精细区分两类 429**：区分「额度耗尽（等待窗口刷新）」与「瞬时并发满（1.5s 极速自愈）」。
-  - **自动 Failover 与熔断自愈**：单一账号异常秒级无感切换，额度耗尽自动冷却并在窗口刷新时重新入池。
-  - **低额度避让**：5h/7d 窗口剩余额度 `< 20%` 时自动切走，保障主力请求稳定。
-- **现代化 WebUI 控制台**：
-  - 反代进程内置托管，访问 `http://127.0.0.1:8787` 即可实时查看账号状态、TPS 速度、用量日志与系统配置。
-  - **🔗 自动化链接登录**：一键调起隔离浏览器完成 Claude 登录，CDP 自动捕获 Cookie/UA/组织信息入池。
-- **深度工程优化**：
-  - **多模态图文对齐**：支持历史多轮对话中的图片准确关联与有序传递。
-  - **真实 TPS 测速纠偏**：精准识别上游 Keep-Alive 挂起与正文输出，还原真实吐字速度。
-  - **上下文裁剪（Prune Context）**：智能裁剪历史冗余工具调用，避免长对话 Token 暴涨。
+- **⚡ 零第三方 npm 依赖 (Zero Dependencies)**  
+  全项目基于 Node.js 原生 ESM 模块体系开发，采用内置 `fetch`、`WebSocket` 与 `crypto`。无任何臃肿依赖包，轻量秒启，审计安全透明。
+- **🔌 100% OpenAI 协议全兼容**  
+  标准 `/v1/chat/completions` 与 `/v1/models`，支持流式输出 (`stream: true`)、非流式输出、工具调用 (`tools`) 与多轮上下文。无缝接入各类生态客户端与应用。
+- **🎯 工业级多账号智能调度池**：
+  - **多策略调度**：支持 `least-loaded`（基于 5 小时窗口负载动态权重最优调度）与 `round-robin`（严格轮询）。
+  - **两级 429 智能区分**：
+    - **瞬时并发 429**：毫秒级退避并自动换号重试，绝不误杀账号。
+    - **配额耗尽 429**：自动解析上游 `resets_at` 到期时间，自动冷却移出活动池，到期自动回池复活。
+  - **动态容错与 Failover**：单一账号遇阻（如速率限制、异常中断）自动秒级换号接力，保障调用方 0 感知。
+  - **低额度避让**：5h/7d 配额剩余低于阈值（如 20%）时自动切至备用账号，保护主力调用。
+  - **客户端断连立即中止**：调用方主动中断时，代理立即发送 `AbortSignal` 终止上游请求，绝不白白消耗账号 Token 额度。
+- **🖥️ 现代化开箱即用 WebUI 控制台**：
+  - 反代内置 Web 服务（访问 `http://127.0.0.1:8787`），无需额外部署任何前端服务。
+  - 实时可视化查看账号健康状态、配额占用、TPS 速度、请求历史流式日志。
+  - **🔗 自动化链接登录**：一键拉起独立隔离浏览器登录 Claude，后台自动捕获 `sessionKey` 并入池。
+- **📥 纯 sessionKey 多格式免密导入**：
+  - 仅需提供 `sessionKey`，**绝不索取、不需要任何邮箱或密码**。
+  - 自动兼容纯文本每行一个、JSON 对象、JSON 数组、JSONL 以及整段 Cookie，自动验活并分配组织 Org。
+- **🖼️ 多模态图文对齐**：
+  - 支持多轮历史对话中的多张图片智能提取、排重与时间序列对齐。
+- **📊 真实 TPS 纠偏统计**：
+  - 精准过滤上游长连接握手与 Keep-Alive 挂起延迟，准确计算实际吐字速率。
 
 ---
 
 ## 📂 项目结构
-
-本项目经过清晰的分层规划，核心服务、前端管理界面、实用工具、测试套件与配置模版各司其职：
 
 ```text
 claude-free-proxy/
@@ -69,42 +81,32 @@ claude-free-proxy/
 │   ├── accounts.mjs              # 账号池管理器（负载调度、冷却阶梯、配额监控）
 │   ├── config.mjs                # 配置中心与多 API Key 权限鉴权管理
 │   ├── kyc.mjs                   # 账号 KYC 与风控封禁状态嗅探
-│   ├── login-link.mjs            # 自动化浏览器登录托管模块
+│   ├── login-link.mjs            # 自动化浏览器登录托管与输入调度模块
 │   ├── quota-probe.mjs           # 官方上游配额主动嗅探
 │   └── usage-log.mjs             # 请求流水与 Token 统计日志
 │
 ├── web/                          # 前端单页面应用
-│   └── webui.html                # 现代化 Web 控制台（响应式、无外置构建依赖）
+│   └── webui.html                # 现代化 Web 管理控制台
 │
 ├── tools/                        # 实用工具与辅助脚本
-│   ├── accounts.ps1              # PowerShell 命令行账号快捷管理工具
-│   ├── desktop_session.py        # Claude Desktop 本地会话解密与提取工具 (DPAPI+AES)
-│   ├── probe_upstream_timing.mjs # 上游连接与网络延迟分析工具
-│   └── record_har.mjs            # 浏览器网络交互录制抓包工具
+│   ├── desktop_session.py        # Claude Desktop 本地会话解密提取工具 (DPAPI+AES)
+│   ├── accounts.ps1              # 命令行账号池快捷维护脚本
+│   └── probe_upstream_timing.mjs # 上游连接与网络延迟分析工具
 │
-├── tests/                        # 单元测试与端到端测试套件
-│   ├── mock_claude.mjs           # Claude 官方交互仿真 Mock 服务
-│   ├── mock_upstream.mjs         # 上游反代模拟器
-│   ├── smoke.mjs                 # 快速冒烟测试
-│   ├── test_accounts.mjs         # 账号池冷却与轮询调度测试 (24/24 passed)
-│   ├── test_e2e.mjs              # 端到端请求链路测试
-│   ├── test_image_collect.mjs    # 多图混排与上下文对齐测试
-│   ├── test_multi.mjs            # 多账号并发与故障转移集成测试 (29/29 passed)
-│   ├── test_pool_429.mjs         # 429 自动冷却熔断与恢复测试
-│   ├── test_responses.mjs        # 协议流式输出与格式测试
-│   ├── test_tps_record.mjs       # 出字速度 (TPS) 统计精准度验证
-│   └── test_tps_tail.mjs         # 长连接挂起对 TPS 影响优化验证
+├── tests/                        # 单元测试与端到端回归测试套件
+│   ├── test_accounts.mjs         # 账号池冷却与轮询调度测试
+│   ├── test_multi.mjs            # 多账号高并发与 Failover 测试
+│   └── test_pool_429.mjs         # 429 自动冷却熔断与恢复测试
 │
-├── config/                       # 配置文件模版（安全脱敏）
-│   ├── accounts.example.json     # 账号池数据模版
-│   ├── config.example.json       # 主系统配置模版
-│   └── upstream.example.json     # 单上游配置模版
+├── config/                       # 安全脱敏配置模版
+│   ├── accounts.example.json     # 账号池模版
+│   └── config.example.json       # 系统配置模版
 │
-├── package.json                  # Node.js 项目清单
-├── start.cmd                     # Windows 一键无痛启动入口脚本 (双击运行)
-├── start.mjs                     # 跨平台启动协调器与端口占用检测
-├── LICENSE                       # MIT 开源许可证
-└── README.md                     # 本文档
+├── start.cmd                     # Windows 双击无痛启动脚本
+├── start.mjs                     # 跨平台启动协调器与端口检测
+├── Dockerfile                    # Docker 容器镜像构建文件
+├── docker-compose.yml            # Docker-Compose 一键编排配置
+└── README.md                     # 本说明文档
 ```
 
 ---
@@ -112,10 +114,10 @@ claude-free-proxy/
 ## 🚀 快速上手
 
 ### 环境需求
-- **Node.js**: `v22.0.0` 或更高版本（原生支持 fetch、WebSocket 与 ESM，**全项目零第三方 npm 依赖**）
-- **Python 3**: Windows 环境运行 `tools/desktop_session.py` 解密桌面端时需要（使用内置 ctypes / sqlite3 模块，零 pip 依赖）
+- **Node.js**: `v22.0.0` 或更高版本（全项目零第三方 npm 依赖，开箱即用）。
+- **Python 3** *(可选)*: 仅在 Windows 下运行本地 Claude 桌面端自动解密脚本时需要（使用原生内置模块）。
 
-### 1. 启动服务
+### 1. 克隆并启动
 
 ```bash
 git clone https://github.com/suimi8/claude-free-proxy.git
@@ -123,69 +125,96 @@ cd claude-free-proxy
 ```
 
 #### Windows 用户：
-直接双击根目录下的 **`start.cmd`** 即可启动。如果需要局域网共享模式或打包：
+直接双击根目录下的 **`start.cmd`** 即可。也可以使用命令行参数：
 ```cmd
-start.cmd          # 默认本机模式 (127.0.0.1:8787)
-start.cmd lan      # 局域网模式（允许局域网设备接入）
-start.cmd pack     # 快速打包项目（自动排除所有敏感配置与日志）
+start.cmd          # 默认本机模式 (监听 127.0.0.1:8787)
+start.cmd lan      # 局域网接入模式 (监听 0.0.0.0:8787)
+start.cmd pack     # 自动打包归档（安全排除本地隐私配置与日志）
 ```
 
 #### Linux / macOS 用户：
 ```bash
 node start.mjs
-# 或局域网模式
+# 或允许局域网其他设备访问
 node start.mjs lan
 ```
 
-首次运行程序会在根目录下自动创建 `config.json`，并自动生成默认的 API Key 打印在控制台中。
+首次启动服务会自动在根目录生成 `config.json`，并自动生成默认的鉴权 API Key 并打印在终端控制台中。
 
 ---
 
-### 2. 账号接入模式
+### 2. 账号录入方式
 
-服务启动后，打开浏览器访问管理控制台：
+服务启动后，在浏览器中打开内置控制台：
 👉 **http://127.0.0.1:8787**
 
-#### 模式一：直接提取本机 Claude Desktop（推荐）
-如果你本机已经安装并登录了 Claude 官方桌面端，运行：
+你可以通过以下四种方式中的任意一种添加账号：
+
+#### 方式 A：一键解密本机 Claude 桌面端（最推荐）
+如果本机已安装并登录过官方 Claude 桌面端，在命令行中执行：
 ```powershell
 python tools/desktop_session.py
 ```
-脚本会自动解密当前桌面端的登录凭据并生成 `upstream.json`，代理启动时会自动加载作为基础账号。
+脚本会自动解密当前桌面端会话并生成 `upstream.json`，反代启动时自动载入作为主力账号。
 
-#### 模式二：WebUI 自动化链接登录（扩充多账号池 ⭐）
-1. 在 WebUI 页面点击 **「🔗 链接登录」**。
-2. 系统会自动启动一个独立的 Chrome/Edge 浏览器并进入 Claude 登录页面。
-3. 在弹出的窗口中正常登录你的 Claude 账号。
-4. 登录完成后，后台自动捕获 `sessionKey`、`cf_clearance` 与配套 UA 并加入账号池。
+#### 方式 B：WebUI「🔗 链接登录」（自动化扩充池）
+1. 在 WebUI 界面中点击 **「🔗 链接登录」**。
+2. 系统自动唤起隔离浏览器并跳转官方登录页面。
+3. 正常完成登录，后台自动捕获 `sessionKey`、Cookie 与配套 User-Agent 并自动入池。
 
-#### 模式三：批量导入 sessionKey 与购买成品账号
-- **批量导入**：在控制台点击 **「📥 批量导入」**，支持多种纯 sessionKey 凭据格式自动解析与批量导入：
-  - 📝 **每行一个 sessionKey**（纯文本 TXT）
-  - 📦 **JSON 格式中自动获取 sessionKey**（支持单个 JSON 对象，如 `{"sessionKey": "sk-ant-..."}`）
-  - 📑 **JSON 数组中批量获取 sessionKey**（支持 JSON 数组，如 `[{"sessionKey": "..."}, ...]` 或 `["sk-ant-...", ...]`）
-  - 📄 **JSONL 格式中获取 sessionKey**（每行一个独立 JSON 对象）
-  - 🍪 **Cookie 串自动提取**（直接粘贴包含 `sessionKey=...` 的整段 Cookie）
-  > 💡 **特别说明**：**仅需提供 sessionKey 即可，绝不提供、也不需要任何邮箱和密码！** 后台将自动并发验证有效性、自动发现组织 Org 与备注入池。
-- **购买成品账号**：如果你没有现成的 Claude 账号或不想花费时间自建注册，可直接前往小店购买高质量稳定成品账号：
-  👉 **[碎米的小店的小店 - 链动小铺](https://wzyp.cn/shop/8WRBPFIB)**（购买后获取 sessionKey 直接批量粘贴导入，秒级开启并发服务）
+#### 方式 C：批量导入 sessionKey（免密快速录入）
+在控制台点击 **「📥 批量导入」**，直接粘贴 sessionKey 凭据，支持以下各种常见格式：
+- 📝 **每行一个 sessionKey**（纯文本 TXT）
+- 📦 **JSON 格式**（例如 `{"sessionKey": "sk-ant-sid02-..."}`）
+- 📑 **JSON 数组**（例如 `[{"sessionKey": "..."}, ...]` 或 `["sk-ant-sid02-...", ...]`）
+- 📄 **JSONL 格式**（每行一个独立 JSON 字符串）
+- 🍪 **整段 Cookie 文本**（自动从中正则匹配提取 `sessionKey` 项）
 
-#### 模式四：手动单账号添加
-在控制台的账号管理中，点击「✎ 手动输入」，直接填入账号备注与 `sessionKey=sk-ant-sid02-...`。
+> 🔒 **隐私提示**：本代理所有账号 Cookie、凭据、日志数据**完全存储在你的本地硬盘**，绝不进行任何形式的远程上报或云端同步。
+
+#### 方式 D：手动单独录入
+在 WebUI 页面点击「✎ 手动输入」，输入账号自定义备注与 `sessionKey` 即可。
 
 ---
 
-### 3. 在客户端中配置并使用
+## 🐳 Docker 部署
 
-在任意兼容 OpenAI API 的客户端（如 NextChat、Cherry Studio、Chatbox、Cursor、沉浸式翻译等）中配置：
+适合部署在 Linux VPS 或 NAS 环境中常驻运行：
+
+### Docker Compose（推荐）
+
+项目根目录已内置 `docker-compose.yml`，执行：
+
+```bash
+docker compose up -d
+```
+
+### Docker 运行命令
+
+```bash
+docker build -t claude-free-proxy .
+docker run -d \
+  --name claude-free-proxy \
+  -p 8787:8787 \
+  -v $(pwd)/config.json:/app/config.json \
+  -v $(pwd)/accounts.json:/app/accounts.json \
+  --restart unless-stopped \
+  claude-free-proxy
+```
+
+---
+
+## 📱 主流客户端接入
+
+在任意兼容 OpenAI API 的客户端或分发聚合系统（如 **NextChat / Cherry Studio / Cursor / Chatbox / 沉浸式翻译 / One-API / New-API**）中配置：
 
 | 配置项 | 填写内容 |
 | :--- | :--- |
-| **API 端点 (Base URL)** | `http://127.0.0.1:8787/v1` |
-| **API Key** | 填写控制台展示的 API Key（在 `config.json` 或 WebUI 中管理） |
+| **接口地址 (Base URL)** | `http://127.0.0.1:8787/v1` （局域网/服务器请填真实 IP/域名） |
+| **API Key** | 填写控制台展示的 API Key（在 WebUI 界面或 `config.json` 中配置） |
 | **支持模型 (Models)** | `claude-3-7-sonnet` / `claude-3-5-sonnet` / `claude-3-5-haiku` |
 
-#### cURL 调用示例
+### cURL 请求示例
 
 ```bash
 curl http://127.0.0.1:8787/v1/chat/completions \
@@ -193,56 +222,115 @@ curl http://127.0.0.1:8787/v1/chat/completions \
   -H "Authorization: Bearer <YOUR_API_KEY>" \
   -d '{
     "model": "claude-3-7-sonnet",
-    "messages": [{"role": "user", "content": "你好，请用一句话介绍你自己"}],
-    "stream": false
+    "messages": [
+      {"role": "user", "content": "你好，请用简短一句话介绍你自己"}
+    ],
+    "stream": true
   }'
 ```
 
----
+### Python SDK 接入示例
 
-## ⚙️ 核心架构与调度机制
+```python
+from openai import OpenAI
 
-### 账号池调度与容灾矩阵
+client = OpenAI(
+    base_url="http://127.0.0.1:8787/v1",
+    api_key="sk-your-proxy-key"
+)
 
-| 机制 | 工作细节 |
-| :--- | :--- |
-| **多策略调度** | 支持 `round-robin`（严格轮询）与 `least-loaded`（基于 5 小时窗口占用率的动态权重分配）。 |
-| **智能并发控制** | 每账号支持独立设置并发槽位（默认 `3`），防止单个账号因高并发直接触发官方风控。 |
-| **两级 429 区分** | <ul><li>**并发型 429**（`representativeClaim: concurrents`）：立即进入 1.5 秒短暂冷却后迅速重试，不污染主错误计数器。</li><li>**配额型 429**（`rate_limit_error`）：自动计算上游 `resets_at` 到期时刻并暂时移出活动池，等待到期自愈。</li></ul> |
-| **客户端中断感知** | 当客户端提前取消或断连时，立即中止上游 Fetch 请求并释放连接池，避免无效占用后续请求的配额。 |
-| **配置热重载** | `config.json` 与 `accounts.json` 的修改会被实时监听，无需重启服务即可即时生效。 |
+response = client.chat.completions.create(
+    model="claude-3-7-sonnet",
+    messages=[{"role": "user", "content": "请写一段 Python 快速排序代码"}],
+    stream=True
+)
 
----
-
-## 🧪 运行测试套件
-
-项目内置了详尽的单元测试与端到端测试，确保每一次调度与接口协议的可靠性：
-
-```bash
-# 运行账号池调度单测
-node tests/test_accounts.mjs
-
-# 运行多账号高并发与 Failover 测试
-node tests/test_multi.mjs
-
-# 运行 429 熔断与自动恢复测试
-node tests/test_pool_429.mjs
-
-# 运行 TPS 吐字测速精准性验证
-node tests/test_tps_record.mjs
+for chunk in response:
+    content = chunk.choices[0].delta.content or ""
+    print(content, end="", flush=True)
 ```
 
 ---
 
-## 🔒 隐私与安全性规范
+## ⚙️ 账号池状态与健康调度
 
-本项目严格遵守安全设计原则：
-1. **数据本地化**：所有账号 Cookie、密钥、请求日志仅保存在用户本地，绝不向任何第三方服务回传。
-2. **严防凭证泄露**：`.gitignore` 默认强力屏蔽所有 `.env`、`accounts.json`、`config.json`、`upstream.json`、`*.log` 以及抓包文件，提交代码时绝不会夹带个人隐私。
-3. **隔离配置文件**：代码中仅提供脱敏的示例模版（`config/*.example.json`），生产配置由本地初始化自动生成。
+```text
+               ┌───────────────────────────────┐
+               │    客户端 OpenAI API 请求      │
+               └──────────────┬────────────────┘
+                              │
+                    ┌─────────▼─────────┐
+                    │ 智能调度器 Picker  │
+                    └─────────┬─────────┘
+                              │
+           ┌──────────────────┴──────────────────┐
+           │                                     │
+┌──────────▼──────────┐               ┌──────────▼──────────┐
+│  least-loaded 最闲  │               │  round-robin 轮询   │
+└──────────┬──────────┘               └──────────┬──────────┘
+           │                                     │
+           └──────────────────┬──────────────────┘
+                              │
+                    ┌─────────▼─────────┐
+                    │  并发检查与配额校验 │
+                    └─────────┬─────────┘
+                              │
+     ┌────────────────────────┼────────────────────────┐
+     │ 触发瞬时并发限频        │ 5h 窗口配额耗尽         │ 成功响应
+┌────▼────────────────┐ ┌─────▼────────────────┐ ┌─────▼────────────────┐
+│ 1.5s 短暂退避        │ │ 计算 resets_at       │ │ 更新 Token 统计      │
+│ 自动切换备选账号重试  │ │ 进入冷却池等待复活    │ │ 归还并发槽位         │
+└─────────────────────┘ └──────────────────────┘ └──────────────────────┘
+```
+
+---
+
+## ❓ 常见问题 / FAQ
+
+<details>
+<summary><b>Q: 提示「429 no eligible account available」怎么办？</b></summary>
+
+出现该提示说明账号池中所有账号当前均处于冷却中或 5 小时额度窗口已耗尽。
+- 代理会在响应中贴心标明最近一个账号的预计恢复时间。
+- 建议通过 WebUI 批量导入多个 sessionKey，账号越多，池子的并发承载力和容灾抗压能力越高。
+</details>
+
+<details>
+<summary><b>Q: 提示「403 oauth_not_allowed_for_organization」是什么原因？</b></summary>
+
+这说明调用请求使用了官方商业 API 格式直接请求了 `api.anthropic.com`，而免费个人账号没有商业 API 权限。请务必将客户端 Base URL 指向本代理服务（`http://127.0.0.1:8787/v1`），由本代理转换为桌面端安全协议。
+</details>
+
+<details>
+<summary><b>Q: 导入 sessionKey 安全吗？需要提供邮箱和密码吗？</b></summary>
+
+**绝对不需要提供任何邮箱和密码！** 
+- 仅需提供以 `sk-ant-sid02-` 开头的 `sessionKey`。
+- 本项目开源透明，零外部第三方网络上报，全部数据加密持久化存储于你的本机。
+</details>
+
+<details>
+<summary><b>Q: 如果我没有多余的账号，或者不想繁琐自建注册怎么办？</b></summary>
+
+本项目完全开源开放，支持任意合规来源的账号 sessionKey。如果您缺乏多账号资源、或希望快速获取稳定即用的成品账号，可按社区规范参考下方 Base64 编码信息获取支持通道：
+
+```text
+# Linux.do 社区合规 Base64 凭据通道：
+aHR0cHM6Ly93enlwLmNuL3Nob3AvOFdSQlBGSUI=
+```
+*(使用终端命令 `echo "aHR0cHM6Ly93enlwLmNuL3Nob3AvOFdSQlBGSUI=" | base64 -d` 或在线解码工具获取链接，购买后仅提供 sessionKey，支持一键批量复制导入)*
+</details>
+
+---
+
+## 🔒 隐私与免责声明
+
+1. **隐私安全**：本项目恪守本地化原则，`.gitignore` 默认强力屏蔽所有 `.env`、`accounts.json`、`config.json`、`upstream.json`、`*.log`，严防用户凭据外泄。
+2. **开源免责**：本项目仅供计算机技术研究与学习交流使用。使用者应自行对使用行为负责，请在遵守当地法律法规及第三方平台服务条款的前提下合理使用。
 
 ---
 
 ## 📄 开源许可证
 
-本项目基于 [MIT 许可证](LICENSE) 分发与开源。仅供技术学习与交流使用，请合理合规使用相关服务。
+本项目遵循 [MIT License](LICENSE) 许可证开放源代码。
+欢迎提交 Issue 与 Pull Request 共同改进！

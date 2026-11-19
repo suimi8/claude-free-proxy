@@ -173,15 +173,16 @@ const LOGIN = createLoginManager({
   baseUrl: `http://127.0.0.1:${PORT}`,
   webBase: () => UP.web_base || 'https://claude.ai',
   timeoutMs: +(process.env.LOGIN_TIMEOUT_MS || 5 * 60 * 1000),
-  onCapture: ({ sessionKey, cookie, ua, org, name, plan }) => {
-    const label = `${(name || 'claude.ai').slice(0, 28)} · ${new Date().toLocaleDateString('zh-CN')}`;
+  onCapture: ({ sessionKey, cookie, ua, org, name, plan, email }) => {
+    const displayName = email || name || 'claude.ai';
+    const label = `${displayName.slice(0, 36)} · ${new Date().toLocaleDateString('zh-CN')}`;
     const { account, created } = POOL.add({
-      label, sessionKey, cookie, ua, org,
+      label, sessionKey, cookie, ua, org, email,
       base: UP.web_base || 'https://claude.ai',
       source: 'link',
     });
     console.log(`[login] captured account ${account.id} label=${label} org=${org} plan=${plan || '-'} created=${created}`);
-    return { id: account.id, label: account.label, org: account.org, created };
+    return { id: account.id, label: account.label, org: account.org, email: account.email, created };
   },
 });
 
@@ -2107,14 +2108,8 @@ async function runCompletion(body, model, signal, apiKey, req) {
   for (;;) {
     // 客户端已断连：别再选账号/打上游
     if (signal?.aborted) throw clientGoneError();
-    const maxFail = +(POOL?.data?.maxFailover ?? POOL.opts.maxFailover ?? 3);
-    if (failovers > maxFail) break;
+
     // 池里还有没试过的可用账号吗？没有就别等了
-    //
-    // 「可用」分两种：立刻能用的（不在冷却、不在 429 耗尽池），
-    // 和冷却很快就要结束、值得排队等的（并发满 1.5s / 网络抖动）。
-    // 剩下全是「429 配额耗尽」的话就别空等了 —— 那是几小时后的事，
-    // 白等 30 秒还只会把 failover 配额耗光。
     const nowMs = Date.now();
     const candidates = POOL.accounts().filter(a =>
       a.enabled && a.sessionKey && a.org && !tried.has(a.id));
@@ -2122,6 +2117,12 @@ async function runCompletion(body, model, signal, apiKey, req) {
       nowMs >= (a.cooldownUntil || 0) && !(a.exhaustedUntil > nowMs));
     const soon = candidates.filter(a =>
       !readyNow.includes(a) && (a.cooldownUntil || 0) - nowMs <= queueBudget);
+
+    // 动态容错上限：池中有充足可用账号（readyNow）时，允许充分轮换尝试，绝不提前放弃抛出 429
+    const configuredMaxFail = +(POOL?.data?.maxFailover ?? POOL.opts.maxFailover ?? 3);
+    const dynamicMaxFail = Math.max(configuredMaxFail, Math.min(20, Math.max(8, candidates.length)));
+    if (failovers >= dynamicMaxFail && !readyNow.length) break;
+
     if (!readyNow.length && !soon.length) break;
 
     const targetPref = (preferredId && !tried.has(preferredId)) ? preferredId : null;
@@ -2252,9 +2253,14 @@ async function runCompletion(body, model, signal, apiKey, req) {
           // 改成 6s→12s→18s→20s（上限 20s）长退避，且本轮直接弃用该账号换下一个
           //（仅当还有其他真正可用账号时才弃，避免无备胎时直接失败）。
           const others = POOL.eligible(Date.now(), tried).filter(a => a.id !== acct.id);
-          if (others.length) tried.add(acct.id);
-          const backoff = Math.min(20000, 6000 * queueWaits);
-          console.log(`[pool] ${acct.label} concurrency-429 -> ${others.length ? `弃用换号(剩${others.length})` : '无备胎原地等'}，退避 ${Math.round(backoff / 1000)}s (waits=${queueWaits})`);
+          if (others.length) {
+            tried.add(acct.id);
+            console.log(`[pool] ${acct.label} concurrency-429 -> 立即切换其他可用备选账号(剩${others.length}个)`);
+            await sleep(50);
+            continue;
+          }
+          const backoff = Math.min(5000, 1500 * queueWaits);
+          console.log(`[pool] ${acct.label} concurrency-429 -> 无备胎原地等待 ${Math.round(backoff / 1000)}s (waits=${queueWaits})`);
           await sleep(backoff);
           continue;
         }
@@ -3903,7 +3909,7 @@ const server = http.createServer(async (req, res) => {
       if (kind === 'concurrency' || /resetsAt\\?":\s*null/.test(msg)) {
         // 并发型：短期滚动窗口（实测 8~66s 自动恢复），不是配额
         hint = '账号短期并发/速率窗口已满（不是配额用尽），通常 1 分钟内自动恢复；代理已对该账号退避并换号，稍后重试即可';
-        retryAfter = 30;
+        retryAfter = 2;
       } else if (/no eligible account/i.test(msg)) {
         // 有效池空了：把「429 耗尽池」的情况说清楚，并给出最近恢复时刻
         const st = POOL.status();
@@ -3914,14 +3920,14 @@ const server = http.createServer(async (req, res) => {
             + (nextAt ? `，最早 ${new Date(nextAt).toLocaleString('zh-CN')} 自动回池` : '')
             + '；其余账号在冷却中。可加账号或等恢复'
           : '所有账号都不可调度（冷却中/403 被自动禁用/低于额度阈值），可查看 GET /v1/accounts、加账号或等冷却结束';
-        retryAfter = nextAt ? Math.min(Math.max(30, Math.ceil((nextAt - Date.now()) / 1000)), 3600) : 30;
+        // 关键保护：给客户端的重试建议绝不超过 3 秒，杜绝客户端（如 bili）触发数分钟的长熔断
+        retryAfter = 2;
       } else if (resetsAt && resetsAt * 1000 > Date.now()) {
-        const sec = Math.ceil(resetsAt - Date.now() / 1000);
-        hint = `所有账号 5 小时配额已用尽，预计 ${new Date(resetsAt * 1000).toLocaleTimeString('zh-CN')} 恢复；可加账号或等重置`;
-        retryAfter = Math.min(sec, 3600);
+        hint = `账号 5 小时配额已用尽，预计 ${new Date(resetsAt * 1000).toLocaleTimeString('zh-CN')} 恢复；可加账号或等重置`;
+        retryAfter = 2;
       } else {
-        hint = '所有账号都在冷却中（配额用尽），可加账号或等冷却结束';
-        retryAfter = 30;
+        hint = '账号冷却中（配额用尽），可加账号或稍后重试';
+        retryAfter = 2;
       }
     } else if (code === 401) {
       hint = '所有账号登录态失效，请重新登录 Claude Desktop 或 POST /v1/accounts/refresh'

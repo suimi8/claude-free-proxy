@@ -629,6 +629,28 @@ async function detectVerify(f, cookies) {
 
 /** 用完整 cookie + UA 校验登录态并发现组织 */
 async function validateLogin({ cookie, ua, base }) {
+  const headers = {
+    cookie,
+    'user-agent': ua,
+    accept: 'application/json',
+    origin: base,
+    referer: base + '/',
+  };
+
+  let email = '';
+  try {
+    const bootR = await fetch(`${base}/api/bootstrap`, {
+      headers,
+      signal: AbortSignal.timeout(10000),
+    });
+    if (bootR.ok) {
+      const bootData = await bootR.json().catch(() => null);
+      if (bootData?.account?.email_address) {
+        email = String(bootData.account.email_address).toLowerCase().trim();
+      }
+    }
+  } catch {}
+
   const r = await fetch(`${base}/api/organizations`, {
     headers: {
       cookie,
@@ -646,7 +668,7 @@ async function validateLogin({ cookie, ua, base }) {
   const list = Array.isArray(arr) ? arr : (arr.data || []);
   const org = list[0]?.uuid;
   if (!org) throw new Error('未返回组织信息（登录可能未完成）');
-  return { org, name: list[0]?.name || '', plan: list[0]?.rate_limit_tier || '' };
+  return { org, name: list[0]?.name || '', plan: list[0]?.rate_limit_tier || '', email };
 }
 
 /**
@@ -1272,6 +1294,19 @@ export function createLoginManager(opts) {
         try {
           const base = typeof webBase === 'function' ? webBase() : webBase;
           const info = await validateLogin({ cookie, ua: f.ua, base });
+
+          // 核心防串号拦截：若本流程设置了目标邮箱，捕获的凭据必须与该邮箱一致！
+          if (f.autoEmail && info.email) {
+            const expectEmail = f.autoEmail.toLowerCase().trim();
+            const realEmail = info.email.toLowerCase().trim();
+            if (expectEmail !== realEmail) {
+              console.warn(`[login] ${f.id} 凭据邮箱不匹配！本流程目标: ${expectEmail}，但捕获凭据属于: ${realEmail}（并发冲突/串号）。已拒绝入池，继续等待属于自己的凭据`);
+              f.message = `等待属于 ${f.autoEmail} 的登录凭据（已拦截非本邮箱凭据）…`;
+              await new Promise(r => setTimeout(r, 1500));
+              continue;
+            }
+          }
+
           const account = await onCapture({
             sessionKey: sk.value,
             cookie,
@@ -1279,6 +1314,7 @@ export function createLoginManager(opts) {
             org: info.org,
             name: info.name,
             plan: info.plan,
+            email: info.email || f.autoEmail || '',
           });
           f.account = account;
           f.state = 'done';
@@ -1441,6 +1477,8 @@ export function createLoginManager(opts) {
         console.log(`[login] ${f.id} 检测到 Cage 虚拟机环境，正在 Cage 原生浏览器中打开登录标签页...`);
         const tab = await cageApi('/new', { url: loginUrl, incognito: true });
         f.tabId = tab.id;
+        // 打开新标签后清空遗留的 site cookies，确保当前标签页处于初始未登录态
+        cageApi('/cookies', { id: tab.id, mode: 'clear', scope: 'site' }).catch(() => {});
         f.pageCdp = new CageCdp(f.tabId);
         f.cdp = f.pageCdp;
         await f.pageCdp.call('Page.bringToFront');
