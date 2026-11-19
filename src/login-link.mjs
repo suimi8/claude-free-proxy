@@ -809,6 +809,23 @@ export function createLoginManager(opts) {
     }
   }
 
+  /* Cage 虚拟机动态 UI 坐标识别 */
+  function getCageLoginCoords() {
+    const detectorPath = path.join(ROOT, 'tools/detect_login_coords.py');
+    if (!fs.existsSync(detectorPath)) return null;
+    for (let i = 0; i < 4; i++) {
+      try {
+        const out = execSync(`python3 "${detectorPath}"`, { encoding: 'utf8', timeout: 3000 }).trim();
+        const data = JSON.parse(out);
+        if (data.input_x && data.input_y && data.button_x && data.button_y) {
+          return data;
+        }
+      } catch {}
+      try { execSync('sleep 0.8'); } catch {}
+    }
+    return null;
+  }
+
   /* Cage 虚拟机独占输入锁：防止多账号并发时在同一个 X11 屏幕互相抢焦点打架 */
   let cageInputQueue = Promise.resolve();
   function acquireCageInputLock() {
@@ -837,13 +854,23 @@ export function createLoginManager(opts) {
         // 首个或无痕标签页冷启动渲染耗时较长（等待 React 组件和输入框完全挂载，避开白屏/加载圆环状态）
         await sleep(3500);
 
-        // 精准聚焦邮箱输入框 (实测 1614x994 全屏视口下表单卡片居中范围 x:[438, 804], 中心 x=620, 邮箱输入框 y=655)
-        execSync('DISPLAY=:77 xdotool mousemove 620 655 click 1', { stdio: 'ignore' });
+        // 动态识别当前视口中的真实表单卡片坐标（自适应侧边栏展开/折叠、全屏、多分辨率）
+        const detected = getCageLoginCoords();
+        const inputX = detected?.input_x || 432;
+        const inputY = detected?.input_y || 617;
+        const btnX = detected?.button_x || 432;
+        const btnY = detected?.button_y || 677;
+        console.log(`[login] ${flow.id} [Cage] 使用坐标: input=(${inputX}, ${inputY}), button=(${btnX}, ${btnY}) (动态识别: ${!!detected})`);
+
+        // 精准聚焦邮箱输入框
+        execSync(`DISPLAY=:77 xdotool mousemove ${inputX} ${inputY} click 1`, { stdio: 'ignore' });
         await sleep(200);
 
-        // 关闭可能弹出的浏览器历史邮箱推荐悬浮窗
+        // 关闭可能弹出的浏览器历史邮箱推荐悬浮窗并再次聚焦
         execSync('DISPLAY=:77 xdotool key Escape', { stdio: 'ignore' });
         await sleep(100);
+        execSync(`DISPLAY=:77 xdotool mousemove ${inputX} ${inputY} click 1`, { stdio: 'ignore' });
+        await sleep(150);
 
         // 全选清空输入框，防止残留字符
         execSync('DISPLAY=:77 xdotool key ctrl+a BackSpace', { stdio: 'ignore' });
@@ -857,8 +884,8 @@ export function createLoginManager(opts) {
         execSync('DISPLAY=:77 xdotool key Return', { stdio: 'ignore' });
         await sleep(350);
 
-        // 双重保险：精准点击「メールで続ける / Continue with email」黑色按钮 (中心 x=620, y=706)
-        execSync('DISPLAY=:77 xdotool mousemove 620 706 mousedown 1 sleep 0.1 mouseup 1', { stdio: 'ignore' });
+        // 双重保险：精准点击「メールで続ける / Continue with email」黑色按钮
+        execSync(`DISPLAY=:77 xdotool mousemove ${btnX} ${btnY} mousedown 1 sleep 0.1 mouseup 1`, { stdio: 'ignore' });
         console.log(`[login] ${flow.id} [Cage] 已在 Cage 窗口内精准填入邮箱并提交`);
         await sleep(800);
         return true;
@@ -1152,10 +1179,22 @@ export function createLoginManager(opts) {
           if (winId) execSync(`DISPLAY=:77 xdotool windowactivate ${winId}`, { stdio: 'ignore' });
         } catch {}
         await sleep(300);
+
+        // 动态识别卡片坐标
+        const detected = getCageLoginCoords();
+        const inputX = detected?.input_x || 432;
+        const inputY = detected?.input_y || 617;
+        const btnX = detected?.button_x || 432;
+        const btnY = detected?.button_y || 677;
+
         // 点击验证码输入框居中区域确保获得焦点
-        execSync('DISPLAY=:77 xdotool mousemove 620 650 click 1', { stdio: 'ignore' });
+        execSync(`DISPLAY=:77 xdotool mousemove ${inputX} ${inputY} click 1`, { stdio: 'ignore' });
         await sleep(150);
-        execSync(`DISPLAY=:77 xdotool type --delay 30 ${JSON.stringify(String(code).trim())} key Return`, { stdio: 'ignore' });
+        execSync(`DISPLAY=:77 xdotool type --delay 30 ${JSON.stringify(String(code).trim())}`, { stdio: 'ignore' });
+        await sleep(200);
+        execSync('DISPLAY=:77 xdotool key Return', { stdio: 'ignore' });
+        await sleep(250);
+        execSync(`DISPLAY=:77 xdotool mousemove ${btnX} ${btnY} mousedown 1 sleep 0.1 mouseup 1`, { stdio: 'ignore' });
         return true;
       } catch (e) {
         console.warn(`[login] ${flow.id} [Cage] 自动输入验证码异常: ${e.message}`);
