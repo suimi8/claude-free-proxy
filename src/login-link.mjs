@@ -343,13 +343,13 @@ class CageCdp {
       return { result: { value: null } };
     }
     if (method === 'Storage.getCookies' || method === 'Network.getCookies' || method === 'Network.getAllCookies') {
-      const list = await cageApi('/cookies', { id: this.tabId, mode: 'list', scope: 'site' }).catch(() => null);
+      const list = await cageApi('/cookies', { id: this.tabId, mode: 'list', scope: 'all' }).catch(() => null);
       if (!list?.cookies) return { cookies: [] };
       const cookies = [];
       for (const c of list.cookies) {
-        if (c.name === 'sessionKey' || c.name === 'cf_clearance' || c.name === 'lastActiveOrg' || c.name === '__cf_bm' || c.name === '_cfuvid') {
+        if (!c.value && c.key) {
           try {
-            const detail = await cageApi('/cookies', { id: this.tabId, mode: 'details', cookieKey: c.key });
+            const detail = await cageApi('/cookies', { id: this.tabId, mode: 'details', scope: 'all', cookieKey: c.key });
             cookies.push({ ...c, value: detail?.value || '' });
           } catch {
             cookies.push({ ...c, value: '' });
@@ -368,13 +368,16 @@ class CageCdp {
 /** 取回 claude.ai 域下的全部 cookie（含 HttpOnly） */
 async function readCookies(flow) {
   if (flow.isCage && flow.tabId) {
-    const list = await cageApi('/cookies', { id: flow.tabId, mode: 'list', scope: 'site' }).catch(() => null);
+    // 关键修复：scope 设为 'all'，以在无痕上下文中完整读取 .claude.ai cookies，避免重定向期间受 site 域名限制
+    const list = await cageApi('/cookies', { id: flow.tabId, mode: 'list', scope: 'all' }).catch(() => null);
     if (!list?.cookies) return [];
-    return await Promise.all(list.cookies.map(async c => {
+    // 仅针对 claude.ai 域名的必要 cookie 请求明文 details，极大降低延迟与开销
+    const targetCookies = claudeCookies(list.cookies);
+    return await Promise.all(targetCookies.map(async c => {
       if (c.value) return c;
       if (!c.key) return c;
       try {
-        const detail = await cageApi('/cookies', { id: flow.tabId, mode: 'details', cookieKey: c.key });
+        const detail = await cageApi('/cookies', { id: flow.tabId, mode: 'details', scope: 'all', cookieKey: c.key });
         return { ...c, value: detail?.value || '' };
       } catch {
         return { ...c, value: '' };
@@ -1477,11 +1480,12 @@ export function createLoginManager(opts) {
       if (isCageBrowserAvailable()) {
         f.isCage = true;
         f.browser = 'Cage 原生浏览器';
+        f.ua = f.ua || 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
         console.log(`[login] ${f.id} 检测到 Cage 虚拟机环境，正在 Cage 原生浏览器中打开登录标签页...`);
         const tab = await cageApi('/new', { url: loginUrl, incognito: true });
         f.tabId = tab.id;
-        // 打开新标签后清空遗留的 site cookies，确保当前标签页处于初始未登录态
-        cageApi('/cookies', { id: tab.id, mode: 'clear', scope: 'site' }).catch(() => {});
+        // 打开新标签后清空遗留 cookies，确保当前标签页处于初始未登录态
+        cageApi('/cookies', { id: tab.id, mode: 'clear', scope: 'all' }).catch(() => {});
         f.pageCdp = new CageCdp(f.tabId);
         f.cdp = f.pageCdp;
         await f.pageCdp.call('Page.bringToFront');
