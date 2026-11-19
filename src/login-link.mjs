@@ -841,52 +841,39 @@ export function createLoginManager(opts) {
       console.log(`[login] ${flow.id} [Cage] 等待输入锁以填入邮箱: ${email}`);
       const release = await acquireCageInputLock();
       try {
-        console.log(`[login] ${flow.id} [Cage] 正在激活标签页 ${flow.tabId} 并填入邮箱: ${email}`);
+        console.log(`[login] ${flow.id} [Cage] 正在激活标签页 ${flow.tabId} 并直接注入邮箱: ${email}`);
         await cageApi('/activate', { id: flow.tabId }).catch(() => {});
         
-        // 激活 Chromium 顶层窗口
+        // 激活 Chromium 顶层窗口（不抢占物理鼠标光标）
         try {
           const winList = execSync('DISPLAY=:77 xdotool search --class Chromium 2>/dev/null', { encoding: 'utf8' }).trim().split(/\s+/).filter(Boolean);
           const winId = winList.pop();
           if (winId) execSync(`DISPLAY=:77 xdotool windowactivate ${winId}`, { stdio: 'ignore' });
         } catch {}
 
-        // 首个或无痕标签页冷启动渲染耗时较长（等待 React 组件和输入框完全挂载，避开白屏/加载圆环状态）
+        // 首个或无痕标签页冷启动渲染耗时较长（等待 React 组件和输入框完全挂载）
         await sleep(3500);
 
-        // 动态识别当前视口中的真实表单卡片坐标（自适应侧边栏展开/折叠、全屏、多分辨率）
-        const detected = getCageLoginCoords();
-        const inputX = detected?.input_x || 432;
-        const inputY = detected?.input_y || 617;
-        const btnX = detected?.button_x || 432;
-        const btnY = detected?.button_y || 677;
-        console.log(`[login] ${flow.id} [Cage] 使用坐标: input=(${inputX}, ${inputY}), button=(${btnX}, ${btnY}) (动态识别: ${!!detected})`);
-
-        // 精准聚焦邮箱输入框
-        execSync(`DISPLAY=:77 xdotool mousemove ${inputX} ${inputY} click 1`, { stdio: 'ignore' });
+        // 全程零鼠标控制：通过纯键盘焦点链直达邮箱输入框 (Tab x 5)，绝不移动或抢占用户鼠标光标
+        execSync('DISPLAY=:77 xdotool key Tab Tab Tab Tab Tab', { stdio: 'ignore' });
         await sleep(200);
-
-        // 关闭可能弹出的浏览器历史邮箱推荐悬浮窗并再次聚焦
-        execSync('DISPLAY=:77 xdotool key Escape', { stdio: 'ignore' });
-        await sleep(100);
-        execSync(`DISPLAY=:77 xdotool mousemove ${inputX} ${inputY} click 1`, { stdio: 'ignore' });
-        await sleep(150);
 
         // 全选清空输入框，防止残留字符
         execSync('DISPLAY=:77 xdotool key ctrl+a BackSpace', { stdio: 'ignore' });
         await sleep(150);
 
-        // 键入邮箱文本
-        execSync(`DISPLAY=:77 xdotool type --delay 25 ${JSON.stringify(email)}`, { stdio: 'ignore' });
-        await sleep(400);
-
-        // 表单内直接按回车提交
-        execSync('DISPLAY=:77 xdotool key Return', { stdio: 'ignore' });
+        // 通过 Cage 原生 CDP /insert-text 直接将邮箱注入输入框（完全后台协议级输入，用户随意移动鼠标不失焦）
+        try {
+          await cageApi('/insert-text', { id: flow.tabId, text: email });
+        } catch {
+          // 备用协议级输入回退
+          execSync(`DISPLAY=:77 xdotool type --delay 20 ${JSON.stringify(email)}`, { stdio: 'ignore' });
+        }
         await sleep(350);
 
-        // 双重保险：精准点击「メールで続ける / Continue with email」黑色按钮
-        execSync(`DISPLAY=:77 xdotool mousemove ${btnX} ${btnY} mousedown 1 sleep 0.1 mouseup 1`, { stdio: 'ignore' });
-        console.log(`[login] ${flow.id} [Cage] 已在 Cage 窗口内精准填入邮箱并提交`);
+        // 纯键盘 Tab 切至 Continue 按钮并按 Return 提交（零鼠标点击）
+        execSync('DISPLAY=:77 xdotool key Tab Return', { stdio: 'ignore' });
+        console.log(`[login] ${flow.id} [Cage] 已直接注入邮箱并提交（全程无鼠标接管）`);
         await sleep(800);
         return true;
       } catch (err) {
@@ -1180,21 +1167,16 @@ export function createLoginManager(opts) {
         } catch {}
         await sleep(300);
 
-        // 动态识别卡片坐标
-        const detected = getCageLoginCoords();
-        const inputX = detected?.input_x || 432;
-        const inputY = detected?.input_y || 617;
-        const btnX = detected?.button_x || 432;
-        const btnY = detected?.button_y || 677;
-
-        // 点击验证码输入框居中区域确保获得焦点
-        execSync(`DISPLAY=:77 xdotool mousemove ${inputX} ${inputY} click 1`, { stdio: 'ignore' });
+        // 验证码输入框：零鼠标控制，直接纯文本注入
+        execSync('DISPLAY=:77 xdotool key Tab Tab Tab Tab Tab', { stdio: 'ignore' });
         await sleep(150);
-        execSync(`DISPLAY=:77 xdotool type --delay 30 ${JSON.stringify(String(code).trim())}`, { stdio: 'ignore' });
+        try {
+          await cageApi('/insert-text', { id: flow.tabId, text: String(code).trim() });
+        } catch {
+          execSync(`DISPLAY=:77 xdotool type --delay 20 ${JSON.stringify(String(code).trim())}`, { stdio: 'ignore' });
+        }
         await sleep(200);
-        execSync('DISPLAY=:77 xdotool key Return', { stdio: 'ignore' });
-        await sleep(250);
-        execSync(`DISPLAY=:77 xdotool mousemove ${btnX} ${btnY} mousedown 1 sleep 0.1 mouseup 1`, { stdio: 'ignore' });
+        execSync('DISPLAY=:77 xdotool key Tab Return', { stdio: 'ignore' });
         return true;
       } catch (e) {
         console.warn(`[login] ${flow.id} [Cage] 自动输入验证码异常: ${e.message}`);
