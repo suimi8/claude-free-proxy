@@ -402,7 +402,8 @@ function curlProfileFor(ua) {
  */
 async function curlFetch(url, { method = 'GET', headers = {}, body = null, signal = null } = {}) {
   const profile = curlProfileFor(headers['user-agent'] || DEFAULT_UA);
-  const args = ['-i', '-sS', '-N', '--compressed', '--connect-timeout', '15', '--max-time', '600', '--impersonate', profile, '-X', method];
+  const maxTime = String(process.env.CURL_MAX_TIME || '1800');
+  const args = ['-i', '-sS', '-N', '--compressed', '--connect-timeout', '15', '--max-time', maxTime, '--impersonate', profile, '-X', method];
   for (const [k, v] of Object.entries(headers)) args.push('-H', `${k}: ${v}`);
   if (body != null && method !== 'GET' && method !== 'HEAD') args.push('--data-binary', '@-');
   args.push(url);
