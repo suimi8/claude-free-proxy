@@ -8,10 +8,9 @@
 [![Node.js](https://img.shields.io/badge/Node.js-22+-43853d.svg?style=flat-square&logo=node.js)](https://nodejs.org/)
 [![Dependencies](https://img.shields.io/badge/Dependencies-Zero%20(0)-blue.svg?style=flat-square)](package.json)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20Compatible-412991.svg?style=flat-square&logo=openai)](https://platform.openai.com/docs/api-reference)
-[![LINUX DO](https://img.shields.io/badge/LINUX%20DO-Community-2563eb.svg?style=flat-square)](https://linux.do/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 
-[功能特性](#-核心特性) • [技术原理](#-为什么是桌面端解密逆向) • [快速上手](#-快速上手) • [Docker 部署](#-docker-部署) • [客户端接入](#-主流客户端接入) • [常见问题](#-常见问题--faq)
+[功能特性](#-核心特性) • [技术原理](#-为什么是桌面端解密逆向) • [快速上手](#-快速上手) • [Docker 部署](#-docker-部署) • [客户端接入](#-主流客户端接入) • [现号小店](#-现号获取--备用小店) • [常见问题](#-常见问题--faq)
 
 </div>
 
@@ -321,8 +320,19 @@ for chunk in response:
 <summary><b>Q: 如何获取更多账号凭据？</b></summary>
 
 本项目推荐优先使用您自己的个人账号（通过桌面端一键解密或 WebUI 链接登录，完全免费）。  
-如果您缺少多账号环境或仅用于临时开发测试，可参考作者提供的应急备用通道（Base64：`aHR0cHM6Ly93enlwLmNuL3Nob3AvOFdSQlBGSUI=`），获取后直接将 `sessionKey` 复制到控制台「批量导入」即可。
+如果您缺少多账号环境或仅用于临时开发测试，可以直接访问下方作者自营备用小店获取现号。
 </details>
+
+---
+
+## 🛒 现号获取 / 备用小店 (Account Store)
+
+如果您缺少现成账号或临时用于高并发开发调试，可以直接访问作者自营的现号备用小店（含完整 SessionKey 与组织信息，开箱即用）：
+
+- **小店直达**：[碎米的小店 (链动小铺)](https://wzyp.cn/shop/8WRBPFIB)
+- **Base64 密文**（如遇论坛或平台外链拦截，可直接解码）：`aHR0cHM6Ly93enlwLmNuL3Nob3AvOFdSQlBGSUI=`
+
+获取到账号卡密后，复制以 `sk-ant-sid02-` 开头的 `sessionKey` 直接粘贴到 WebUI 控制台的「批量导入」即可瞬间入池！
 
 ---
 
@@ -330,12 +340,6 @@ for chunk in response:
 
 1. **隐私安全**：本项目恪守本地化原则，`.gitignore` 默认强力屏蔽所有 `.env`、`accounts.json`、`config.json`、`upstream.json`、`*.log`，严防用户凭据外泄。
 2. **开源免责**：本项目仅供计算机技术研究与学习交流使用。使用者应自行对使用行为负责，请在遵守当地法律法规及第三方平台服务条款的前提下合理使用。
-
----
-
-## 💖 致谢 (Acknowledgements)
-
-特别致谢 **[LINUX DO](https://linux.do/)** 社区以及各位热心佬友们在技术探索、逆向分析与高可用架构讨论中提供的宝贵经验、无私分享与灵感启发！
 
 ---
 
