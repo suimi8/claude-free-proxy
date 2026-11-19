@@ -832,10 +832,10 @@ export function createLoginManager(opts) {
         } catch {}
 
         // 首个或无痕标签页冷启动渲染耗时较长（等待 React 组件和输入框完全挂载，避开白屏/加载圆环状态）
-        await sleep(4000);
+        await sleep(3500);
 
-        // 精准聚焦邮箱输入框 (x=413, y=709，对应 1614x994 全屏视口居中输入框)
-        execSync('DISPLAY=:77 xdotool mousemove 413 709 click 1', { stdio: 'ignore' });
+        // 精准聚焦邮箱输入框 (实测 1614x994 全屏视口下表单卡片居中范围 x:[438, 804], 中心 x=620, 邮箱输入框 y=655)
+        execSync('DISPLAY=:77 xdotool mousemove 620 655 click 1', { stdio: 'ignore' });
         await sleep(200);
 
         // 关闭可能弹出的浏览器历史邮箱推荐悬浮窗
@@ -854,8 +854,8 @@ export function createLoginManager(opts) {
         execSync('DISPLAY=:77 xdotool key Return', { stdio: 'ignore' });
         await sleep(350);
 
-        // 双重保险：精准点击「メールで続ける」按钮 (x=413, y=797)
-        execSync('DISPLAY=:77 xdotool mousemove 413 797 mousedown 1 sleep 0.1 mouseup 1', { stdio: 'ignore' });
+        // 双重保险：精准点击「メールで続ける / Continue with email」黑色按钮 (中心 x=620, y=706)
+        execSync('DISPLAY=:77 xdotool mousemove 620 706 mousedown 1 sleep 0.1 mouseup 1', { stdio: 'ignore' });
         console.log(`[login] ${flow.id} [Cage] 已在 Cage 窗口内精准填入邮箱并提交`);
         await sleep(800);
         return true;
@@ -1149,6 +1149,9 @@ export function createLoginManager(opts) {
           if (winId) execSync(`DISPLAY=:77 xdotool windowactivate ${winId}`, { stdio: 'ignore' });
         } catch {}
         await sleep(300);
+        // 点击验证码输入框居中区域确保获得焦点
+        execSync('DISPLAY=:77 xdotool mousemove 620 650 click 1', { stdio: 'ignore' });
+        await sleep(150);
         execSync(`DISPLAY=:77 xdotool type --delay 30 ${JSON.stringify(String(code).trim())} key Return`, { stdio: 'ignore' });
         return true;
       } catch (e) {
