@@ -24,6 +24,7 @@ export const RELEASE_FILES = Object.freeze([
     'config',
     'context-optimizer',
     'kyc',
+    'local-plugin-views',
     'login-link',
     'network-optimizer',
     'openai-proxy',

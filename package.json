@@ -45,6 +45,7 @@
     "src/config.mjs",
     "src/context-optimizer.mjs",
     "src/kyc.mjs",
+    "src/local-plugin-views.mjs",
     "src/login-link.mjs",
     "src/network-optimizer.mjs",
     "src/openai-proxy.mjs",

@@ -271,114 +271,30 @@ class CDP {
   close() { try { this.ws.close(); } catch { /* noop */ } }
 }
 
-/** 检测是否处于 Claude Cage 虚拟机原生环境 */
+// 可选加载本地私有虚拟机适配器（仅本地存在时生效，不在公开仓库中提供）
+let cageAdapter = null;
+try {
+  if (fs.existsSync(path.join(HERE, 'cage-adapter.local.mjs'))) {
+    cageAdapter = await import('./cage-adapter.local.mjs');
+  }
+} catch {}
+
+/** 检测是否处于本地虚拟机原生环境 */
 export function isCageBrowserAvailable() {
-  if (process.platform !== 'linux') return false;
-  try {
-    return fs.existsSync('/etc/claude-cage/browser-control.json');
-  } catch {
-    return false;
-  }
-}
-
-function getCageControlConfig() {
-  try {
-    return JSON.parse(fs.readFileSync('/etc/claude-cage/browser-control.json', 'utf8'));
-  } catch {
-    return null;
-  }
-}
-
-async function cageApi(endpoint, data = null) {
-  const cfg = getCageControlConfig();
-  if (!cfg?.token) throw new Error('Cage 控制凭据不可用');
-  const body = data ? JSON.stringify(data) : null;
-  const res = await fetch(`http://127.0.0.1:18500${endpoint}`, {
-    method: data ? 'POST' : 'GET',
-    headers: {
-      'Authorization': `Bearer ${cfg.token}`,
-      ...(body ? { 'Content-Type': 'application/json' } : {})
-    },
-    body: body || undefined,
-  });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(`Cage API ${endpoint} 失败: ${res.status} ${errText}`);
-  }
-  return await res.json();
-}
-
-/** 包装 Cage 原生浏览器 Tab 为标准 CDP 对象，全套 DOM 自动化、跳转与凭据捕获直接兼容复用 */
-class CageCdp {
-  constructor(tabId) {
-    this.tabId = tabId;
-    this.ws = { readyState: 1 };
-  }
-  async call(method, params = {}) {
-    if (method === 'Page.navigate') {
-      await cageApi('/navigate', { id: this.tabId, url: params.url });
-      return {};
-    }
-    if (method === 'Page.reload') {
-      await cageApi('/reload', { id: this.tabId });
-      return {};
-    }
-    if (method === 'Page.bringToFront') {
-      await cageApi('/activate', { id: this.tabId });
-      return {};
-    }
-    if (method === 'Input.insertText') {
-      await cageApi('/insert-text', { id: this.tabId, text: params.text });
-      return {};
-    }
-    if (method === 'Input.dispatchKeyEvent') {
-      if (params.key === 'Enter' || params.code === 'Enter') {
-        try { execSync('env DISPLAY=:77 xdotool key Return', { stdio: 'ignore' }); } catch {}
-      }
-      return {};
-    }
-    if (method === 'Input.dispatchMouseEvent') {
-      return {};
-    }
-    if (method === 'Runtime.evaluate') {
-      return { result: { value: null } };
-    }
-    if (method === 'Storage.getCookies' || method === 'Network.getCookies' || method === 'Network.getAllCookies') {
-      const list = await cageApi('/cookies', { id: this.tabId, mode: 'list', scope: 'all' }).catch(() => null);
-      if (!list?.cookies) return { cookies: [] };
-      const cookies = [];
-      for (const c of list.cookies) {
-        if (!c.value && c.key) {
-          try {
-            const detail = await cageApi('/cookies', { id: this.tabId, mode: 'details', scope: 'all', cookieKey: c.key });
-            cookies.push({ ...c, value: detail?.value || '' });
-          } catch {
-            cookies.push({ ...c, value: '' });
-          }
-        } else {
-          cookies.push(c);
-        }
-      }
-      return { cookies };
-    }
-    return {};
-  }
-  close() {}
+  return cageAdapter?.isCageBrowserAvailable?.() || false;
 }
 
 /** 取回 claude.ai 域下的全部 cookie（含 HttpOnly） */
 async function readCookies(flow) {
-  if (flow.isCage && flow.tabId) {
-    // 关键修复：scope 设为 'all'，以在无痕上下文中完整读取 .claude.ai cookies，避免重定向期间受 site 域名限制
-    const list = await cageApi('/cookies', { id: flow.tabId, mode: 'list', scope: 'all' }).catch(() => null);
+  if (flow.isCage && flow.tabId && cageAdapter) {
+    const list = await cageAdapter.cageApi('/cookies', { id: flow.tabId, mode: 'list', scope: 'all' }).catch(() => null);
     if (!list?.cookies) return [];
-    // 仅针对 claude.ai 域名的必要 cookie 请求明文 details，极大降低延迟与开销
     const targetCookies = claudeCookies(list.cookies);
     return await Promise.all(targetCookies.map(async c => {
       if (c.value) return c;
       if (!c.key) return c;
       try {
-        const detail = await cageApi('/cookies', { id: flow.tabId, mode: 'details', scope: 'all', cookieKey: c.key });
+        const detail = await cageAdapter.cageApi('/cookies', { id: flow.tabId, mode: 'details', scope: 'all', cookieKey: c.key });
         return { ...c, value: detail?.value || '' };
       } catch {
         return { ...c, value: '' };
@@ -810,79 +726,9 @@ export function createLoginManager(opts) {
     }
   }
 
-  /* Cage 虚拟机动态 UI 坐标识别 */
-  function getCageLoginCoords() {
-    const detectorPath = path.join(ROOT, 'tools/detect_login_coords.py');
-    if (!fs.existsSync(detectorPath)) return null;
-    for (let i = 0; i < 4; i++) {
-      try {
-        const out = execSync(`python3 "${detectorPath}"`, { encoding: 'utf8', timeout: 3000 }).trim();
-        const data = JSON.parse(out);
-        if (data.input_x && data.input_y && data.button_x && data.button_y) {
-          return data;
-        }
-      } catch {}
-      try { execSync('sleep 0.8'); } catch {}
-    }
-    return null;
-  }
-
-  /* Cage 虚拟机独占输入锁：防止多账号并发时在同一个 X11 屏幕互相抢焦点打架 */
-  let cageInputQueue = Promise.resolve();
-  function acquireCageInputLock() {
-    let release;
-    const p = new Promise(resolve => { release = resolve; });
-    const cur = cageInputQueue;
-    cageInputQueue = cur.then(() => p);
-    return cur.then(() => release);
-  }
-
   async function submitEmailToClaude(flow, email) {
-    if (flow.isCage) {
-      console.log(`[login] ${flow.id} [Cage] 等待输入锁以填入邮箱: ${email}`);
-      const release = await acquireCageInputLock();
-      try {
-        console.log(`[login] ${flow.id} [Cage] 正在激活标签页 ${flow.tabId} 并直接注入邮箱: ${email}`);
-        await cageApi('/activate', { id: flow.tabId }).catch(() => {});
-        
-        // 激活 Chromium 顶层窗口（不抢占物理鼠标光标）
-        try {
-          const winList = execSync('DISPLAY=:77 xdotool search --class Chromium 2>/dev/null', { encoding: 'utf8' }).trim().split(/\s+/).filter(Boolean);
-          const winId = winList.pop();
-          if (winId) execSync(`DISPLAY=:77 xdotool windowactivate ${winId}`, { stdio: 'ignore' });
-        } catch {}
-
-        // 首个或无痕标签页冷启动渲染耗时较长（等待 React 组件和输入框完全挂载）
-        await sleep(3500);
-
-        // 全程零鼠标控制：通过纯键盘焦点链直达邮箱输入框 (Tab x 5)，绝不移动或抢占用户鼠标光标
-        execSync('DISPLAY=:77 xdotool key Tab Tab Tab Tab Tab', { stdio: 'ignore' });
-        await sleep(200);
-
-        // 全选清空输入框，防止残留字符
-        execSync('DISPLAY=:77 xdotool key ctrl+a BackSpace', { stdio: 'ignore' });
-        await sleep(150);
-
-        // 通过 Cage 原生 CDP /insert-text 直接将邮箱注入输入框（完全后台协议级输入，用户随意移动鼠标不失焦）
-        try {
-          await cageApi('/insert-text', { id: flow.tabId, text: email });
-        } catch {
-          // 备用协议级输入回退
-          execSync(`DISPLAY=:77 xdotool type --delay 20 ${JSON.stringify(email)}`, { stdio: 'ignore' });
-        }
-        await sleep(350);
-
-        // 纯键盘 Tab 切至 Continue 按钮并按 Return 提交（零鼠标点击）
-        execSync('DISPLAY=:77 xdotool key Tab Return', { stdio: 'ignore' });
-        console.log(`[login] ${flow.id} [Cage] 已直接注入邮箱并提交（全程无鼠标接管）`);
-        await sleep(800);
-        return true;
-      } catch (err) {
-        console.warn(`[login] ${flow.id} [Cage] 填入提交异常: ${err.message}`);
-        return false;
-      } finally {
-        release();
-      }
+    if (flow.isCage && cageAdapter) {
+      return await cageAdapter.submitEmailInCage(flow, email);
     }
 
     const cdp = await ensurePageCdp(flow);
@@ -1156,35 +1002,8 @@ export function createLoginManager(opts) {
   }
 
   async function fillCodeInClaude(flow, code) {
-    if (flow.isCage) {
-      const release = await acquireCageInputLock();
-      try {
-        await cageApi('/activate', { id: flow.tabId }).catch(() => {});
-        await sleep(500);
-        try {
-          const winList = execSync('DISPLAY=:77 xdotool search --class Chromium 2>/dev/null', { encoding: 'utf8' }).trim().split(/\s+/).filter(Boolean);
-          const winId = winList.pop();
-          if (winId) execSync(`DISPLAY=:77 xdotool windowactivate ${winId}`, { stdio: 'ignore' });
-        } catch {}
-        await sleep(300);
-
-        // 验证码输入框：零鼠标控制，直接纯文本注入
-        execSync('DISPLAY=:77 xdotool key Tab Tab Tab Tab Tab', { stdio: 'ignore' });
-        await sleep(150);
-        try {
-          await cageApi('/insert-text', { id: flow.tabId, text: String(code).trim() });
-        } catch {
-          execSync(`DISPLAY=:77 xdotool type --delay 20 ${JSON.stringify(String(code).trim())}`, { stdio: 'ignore' });
-        }
-        await sleep(200);
-        execSync('DISPLAY=:77 xdotool key Tab Return', { stdio: 'ignore' });
-        return true;
-      } catch (e) {
-        console.warn(`[login] ${flow.id} [Cage] 自动输入验证码异常: ${e.message}`);
-        return false;
-      } finally {
-        release();
-      }
+    if (flow.isCage && cageAdapter) {
+      return await cageAdapter.fillCodeInCage(flow, code);
     }
 
     try {
@@ -1243,8 +1062,8 @@ export function createLoginManager(opts) {
 
   function cleanup(f) {
     releaseVerifyLock(f);
-    if (f.isCage && f.tabId) {
-      cageApi('/close', { id: f.tabId }).catch(() => {});
+    if (f.isCage && f.tabId && cageAdapter) {
+      cageAdapter.cageApi('/close', { id: f.tabId }).catch(() => {});
       f.tabId = null;
     }
     if (f.port) ALLOCATED_PORTS.delete(f.port);
@@ -1276,9 +1095,9 @@ export function createLoginManager(opts) {
     let lastHint = '';
     let consecutiveFails = 0;
     while (Date.now() < f.expiresAt && f.state !== 'cancelled' && f.state !== 'closed') {
-      if (f.isCage) {
+      if (f.isCage && cageAdapter) {
         try {
-          const tabsRes = await cageApi('/tabs');
+          const tabsRes = await cageAdapter.cageApi('/tabs');
           const exists = tabsRes.tabs?.some(t => t.id === f.tabId);
           if (!exists) {
             console.log(`[login] ${f.id} Cage 浏览器标签页已关闭，停止轮询`);
@@ -1498,17 +1317,17 @@ export function createLoginManager(opts) {
 
   async function run(f) {
     try {
-      // 虚拟机专属：如果处于 Claude Cage 虚拟机环境，使用 Cage 原生浏览器（在 Cage 标签页中打开），不调用外部独立 Chrome
-      if (isCageBrowserAvailable()) {
+      // 虚拟机专属：如果处于虚拟机环境，使用原生浏览器（在虚拟机标签页中打开），不调用外部独立 Chrome
+      if (isCageBrowserAvailable() && cageAdapter) {
         f.isCage = true;
         f.browser = 'Cage 原生浏览器';
         f.ua = f.ua || 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
         console.log(`[login] ${f.id} 检测到 Cage 虚拟机环境，正在 Cage 原生浏览器中打开登录标签页...`);
-        const tab = await cageApi('/new', { url: loginUrl, incognito: true });
+        const tab = await cageAdapter.cageApi('/new', { url: loginUrl, incognito: true });
         f.tabId = tab.id;
         // 打开新标签后清空遗留 cookies，确保当前标签页处于初始未登录态
-        cageApi('/cookies', { id: tab.id, mode: 'clear', scope: 'all' }).catch(() => {});
-        f.pageCdp = new CageCdp(f.tabId);
+        cageAdapter.cageApi('/cookies', { id: tab.id, mode: 'clear', scope: 'all' }).catch(() => {});
+        f.pageCdp = new cageAdapter.CageCdp(f.tabId);
         f.cdp = f.pageCdp;
         await f.pageCdp.call('Page.bringToFront');
         f.state = 'waiting';

@@ -64,6 +64,7 @@ import { AccountPool, discoverOrg, DEFAULT_UA, sleep } from './accounts.mjs';
 import { createLoginManager, createCfVerifyManager, loginPage, openClaudeWebBrowser } from './login-link.mjs';
 import { createConfigStore, publicSettings } from './config.mjs';
 import { ROOT, DATA, dataFile } from './paths.mjs';
+import { loadLocalPluginViews } from './local-plugin-views.mjs';
 import { fetchPublicBytes } from './public-http.mjs';
 import { validatedEvents } from './upstream-events.mjs';
 import { probeQuota } from './quota-probe.mjs';
@@ -1898,12 +1899,14 @@ async function acquireAccount(exclude, signal, preferredId) {
 // ---------------------------------------------------------- 本地私有插件挂载机制
 // 动态挂载本地 plugins/ 目录下的扩展（plugins/ 目录被 .gitignore 忽略，不进入公开仓库）
 const PLUGIN_ROUTES = new Map();
+const LOCAL_VIEWS_PATH = '/v1/local-plugins';
+const localViews = await loadLocalPluginViews(path.join(ROOT, 'plugins'), () => KEYS.settings(), process.env.ENABLE_LOCAL_PLUGINS === '0');
 async function loadLocalPlugins() {
   const pDir = path.join(ROOT, 'plugins');
   if (!fs.existsSync(pDir)) return;
   try {
     for (const d of fs.readdirSync(pDir, { withFileTypes: true })) {
-      if (d.isDirectory()) {
+      if (d.isDirectory() && !localViews.has(d.name)) {
         const entry = path.join(pDir, d.name, 'plugin.mjs');
         if (fs.existsSync(entry)) {
           const mod = await import(pathToFileURL(entry).href);
@@ -2072,6 +2075,13 @@ async function handleRequest(req, res) {
   req.apiKey = auth.key;
   // Scope private history to the credential, not a mutable/imported display ID.
   req.keyScope = createHash('sha256').update(auth.key === LEGACY_KEY_OBJ ? LEGACY_KEY : auth.key.key).digest('hex');
+  if (url.pathname === LOCAL_VIEWS_PATH || url.pathname.startsWith(LOCAL_VIEWS_PATH + '/')) {
+    if (!isLoopbackReq(req)) return json(res, 403, { error: { message: '本地插件仅支持本机管理' } });
+    if (req.method !== 'GET') return json(res, 405, { error: { message: '列表仅支持 GET' } }, { allow: 'GET' });
+    if (url.pathname === LOCAL_VIEWS_PATH) return json(res, 200, localViews.catalog());
+    const [status, result] = await localViews.read(url.pathname.slice(LOCAL_VIEWS_PATH.length + 1));
+    return json(res, status, result);
+  }
   // 优先执行本地扩展插件注册的自定义路由
   if (pluginHandler) {
     try {
