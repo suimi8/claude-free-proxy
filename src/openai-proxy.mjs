@@ -64,7 +64,7 @@ import { AccountPool, discoverOrg, DEFAULT_UA, sleep } from './accounts.mjs';
 import { createLoginManager, createCfVerifyManager, loginPage, openClaudeWebBrowser } from './login-link.mjs';
 import { createConfigStore, publicSettings } from './config.mjs';
 import { ROOT, DATA, dataFile } from './paths.mjs';
-import { loadLocalPluginViews } from './local-plugin-views.mjs';
+import { loadLocalPluginViews, parsePluginMultipart } from './local-plugin-views.mjs';
 import { fetchPublicBytes } from './public-http.mjs';
 import { validatedEvents } from './upstream-events.mjs';
 import { probeQuota } from './quota-probe.mjs';
@@ -1060,14 +1060,14 @@ async function* normalizeSse(stream, acct, ctx) {
 }
 
 /** 非流式：吃完整个 SSE 再组装 */
-async function collect(stream, acct, ctx) {
+async function collect(events, ctx) {
   let text = '';
   const thoughtBlocks = new Map();
   const toolCalls = [];
   const slot = new Map();
   let stop = null, model = null, id = null, limit = null;
 
-  for await (const ev of normalizeSse(stream, acct, ctx)) {
+  for await (const ev of events) {
     switch (ev.type) {
       case 'message_start':
         id = ev.message?.id; model = ev.message?.model; break;
@@ -1116,7 +1116,8 @@ function heartbeat(res) {
   const timer = setInterval(() => { if (!res.destroyed && !res.writableEnded) res.write(': keep-alive\n\n'); }, 10000);
   timer.unref(); return () => clearInterval(timer);
 }
-async function streamToClient(res, stream, model, chatId, acct, ctx, includeUsage) {
+async function streamToClient(res, run, model, chatId, includeUsage) {
+  const ctx = run.ctx;
   const created = Math.floor(Date.now()/1000), stopHeartbeat = heartbeat(res);
   const send = (choices, usage) => {
     const data = { id: chatId, object: 'chat.completion.chunk', created, model, choices };
@@ -1126,7 +1127,7 @@ async function streamToClient(res, stream, model, chatId, acct, ctx, includeUsag
   const chunk = (delta, finish_reason = null) => send([{ index: 0, delta, finish_reason }]);
   const slot = new Map(); let stop=null;
   try {
-    for await (const ev of normalizeSse(stream,acct,ctx)) {
+    for await (const ev of run.events()) {
       const d=ev.delta || {}, cb=ev.content_block || {};
       if (ev.type==='message_start') chunk({role:'assistant',content:''});
       if (ev.type==='content_block_start' && cb.type==='tool_use') {
@@ -1419,7 +1420,7 @@ async function sendResponsesResult(res, run, model, id, rb, baseMessages, owner)
   let lastItem = null;
 
   try {
-    for await (const ev of normalizeSse(run.stream, run.account, run.ctx)) {
+    for await (const ev of run.events()) {
       switch (ev.type) {
         case 'content_block_start': {
           const cb = ev.content_block || {};
@@ -1567,22 +1568,27 @@ function onClientGone(res) {
   return ac;
 }
 
-function readBody(req) {
+function readRawBody(req, limit = 64 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0, chunks = [];
     req.on('data', c => {
       if (!chunks) return; // discard rather than accumulating after rejection
       size += c.length;
-      if (size > 64 * 1024 * 1024) { chunks=null; reject(Object.assign(new Error('body too large'),{status:413})); }
+      if (size > limit) { chunks=null; reject(Object.assign(new Error('body too large'),{status:413})); }
       else chunks.push(c);
     });
     req.on('end', () => {
       if (!chunks) return;
-      try { resolve(size ? JSON.parse(Buffer.concat(chunks,size).toString('utf8')) : {}); }
-      catch { reject(Object.assign(new Error('invalid JSON body'), {status:400})); }
+      resolve(Buffer.concat(chunks, size));
     });
     req.on('error', reject);
   });
+}
+
+async function readBody(req, limit = 64 * 1024 * 1024) {
+  const bytes = await readRawBody(req, limit);
+  try { return bytes.length ? JSON.parse(bytes.toString('utf8')) : {}; }
+  catch { throw Object.assign(new Error('invalid JSON body'), { status: 400 }); }
 }
 
 /**
@@ -1701,7 +1707,7 @@ function recordCompletion(ctx, status, error = '') {
  * 返回 { stream, upBody, account, release } —— 调用方消费完流后必须调 release()
  * 释放并发额度（无论成功失败）。
  */
-async function runCompletion(body, model, signal, req, ctx) {
+async function runCompletion(body, model, signal, req, ctx, excludedAccounts = [], withRecovery = true) {
   const session = getConversationKey(body, req);
   const convKey = session && `${req.keyScope}:${session}`;
   let preferredId = convKey ? CONV_ROUTING.get(convKey)?.accountId : null;
@@ -1710,7 +1716,7 @@ async function runCompletion(body, model, signal, req, ctx) {
   const upBody = buildUpstreamBody(body, model);
   const inputTokens = estimateInputTokens(upBody);
   const images = collectImages(body);          // 本轮要上传的图片（与 prompt 里 [image] 占位同序同集合）
-  const tried = new Set();
+  const tried = new Set(excludedAccounts);
   let lastErr = null;
   // 「换账号」与「等并发槽」分开计：
   //   failovers   —— 账号真的坏了才换，受 maxFailover 约束
@@ -1823,7 +1829,8 @@ async function runCompletion(body, model, signal, req, ctx) {
       }
       // 本地估算输入 token（上游不返回 usage；只累计"已用"，不是配额）
       if (ctx.input_tokens) POOL.noteTokens(acct, ctx.input_tokens, 0);
-      return { stream, upBody: reqBody, account: acct, release, ctx };
+      const run = { stream, upBody: reqBody, account: acct, release, ctx };
+      return withRecovery ? attachStreamRecovery(run, body, model, signal, req, ctx) : run;
     } catch (e) {
       if (e?.name === 'AbortError' || signal?.aborted) {
         POOL.release(acct, false);   // 中性归还 inflight（fail 会记失败+冷却，不能用）
@@ -1879,6 +1886,77 @@ async function runCompletion(body, model, signal, req, ctx) {
     { kind: 'rate_limit', retryable: false, status: 429 });
 }
 
+function hasGeneratedOutput(ev) {
+  if (ev.type === 'content_block_start') {
+    const block = ev.content_block || {};
+    return block.type === 'tool_use' || !!(block.text || block.thinking);
+  }
+  if (ev.type !== 'content_block_delta') return false;
+  const delta = ev.delta || {};
+  return !!(delta.text || delta.thinking || delta.partial_json || delta.summary?.summary);
+}
+
+function attachStreamRecovery(run, body, model, signal, req, ctx) {
+  let current = run;
+  let consumed = false;
+  const initialRelease = run.release;
+  run.release = (...args) => current === run ? initialRelease(...args) : current.release(...args);
+  run.events = () => {
+    if (consumed) throw new Error('completion stream already consumed');
+    consumed = true;
+    return (async function* () {
+      let committed = false;
+      let retried = false;
+      let pending = [];
+      let pendingBytes = 0;
+      for (;;) {
+        try {
+          for await (const event of normalizeSse(current.stream, current.account, ctx)) {
+            if (!committed && hasGeneratedOutput(event)) {
+              for (const buffered of pending) yield buffered;
+              pending = [];
+              pendingBytes = 0;
+              committed = true;
+            }
+            if (committed) yield event;
+            else {
+              const eventBytes = Buffer.byteLength(JSON.stringify(event));
+              if (pending.length >= 1024 || pendingBytes + eventBytes > 1024 * 1024) {
+                for (const buffered of pending) yield buffered;
+                pending = [];
+                pendingBytes = 0;
+                committed = true;
+                yield event;
+              } else {
+                pending.push(event);
+                pendingBytes += eventBytes;
+              }
+            }
+          }
+          for (const buffered of pending) yield buffered;
+          return;
+        } catch (error) {
+          if (committed || retried || signal?.aborted || error.code !== 'UPSTREAM_TRANSPORT_INTERRUPTED') throw error;
+          const failed = current;
+          failed.release(false, error.message, 'transient');
+          retried = true;
+          try {
+            current = await runCompletion(body, model, signal, req, ctx, [failed.account.id], false);
+          } catch (retryError) {
+            console.warn(`[stream] pre-output recovery unavailable: kind=${retryError?.kind || 'unknown'} status=${retryError?.status || 0}`);
+            throw error;
+          }
+          delete ctx.status;
+          ctx.error = '';
+          pending = [];
+          pendingBytes = 0;
+        }
+      }
+    })();
+  };
+  return run;
+}
+
 /**
  * 等一个可用账号。
  * 所有账号都在冷却/满载时不会立刻失败，而是等到 waitTimeoutMs（默认 30s），
@@ -1900,7 +1978,12 @@ async function acquireAccount(exclude, signal, preferredId) {
 // 动态挂载本地 plugins/ 目录下的扩展（plugins/ 目录被 .gitignore 忽略，不进入公开仓库）
 const PLUGIN_ROUTES = new Map();
 const LOCAL_VIEWS_PATH = '/v1/local-plugins';
-const localViews = await loadLocalPluginViews(path.join(ROOT, 'plugins'), () => KEYS.settings(), process.env.ENABLE_LOCAL_PLUGINS === '0');
+const LOCAL_PLUGIN_FORM_LIMIT = 32 * 1024 * 1024;
+const LOCAL_PLUGIN_UPLOAD_LIMIT = 32 * 1024 * 1024;
+const localViews = await loadLocalPluginViews(path.join(ROOT, 'plugins'), () => KEYS.settings(),
+  process.env.ENABLE_LOCAL_PLUGINS === '0', patch => KEYS.updateSettings(patch),
+  (route, handler) => PLUGIN_ROUTES.set(route, handler),
+  { KEYS, POOL, LOGIN, json, readBody });
 async function loadLocalPlugins() {
   const pDir = path.join(ROOT, 'plugins');
   if (!fs.existsSync(pDir)) return;
@@ -2077,9 +2160,33 @@ async function handleRequest(req, res) {
   req.keyScope = createHash('sha256').update(auth.key === LEGACY_KEY_OBJ ? LEGACY_KEY : auth.key.key).digest('hex');
   if (url.pathname === LOCAL_VIEWS_PATH || url.pathname.startsWith(LOCAL_VIEWS_PATH + '/')) {
     if (!isLoopbackReq(req)) return json(res, 403, { error: { message: '本地插件仅支持本机管理' } });
-    if (req.method !== 'GET') return json(res, 405, { error: { message: '列表仅支持 GET' } }, { allow: 'GET' });
-    if (url.pathname === LOCAL_VIEWS_PATH) return json(res, 200, localViews.catalog());
-    const [status, result] = await localViews.read(url.pathname.slice(LOCAL_VIEWS_PATH.length + 1));
+    const parts = url.pathname.slice(LOCAL_VIEWS_PATH.length + 1).split('/');
+    const [id, section, action] = parts;
+    const form = parts.length === 3 && section === 'actions' && !!action;
+    const info = parts.length === 2 && section === 'settings';
+    if (parts.length > 1 && !form && !info) return json(res, 404, { error: { message: '没有此插件操作' } });
+    const method = form ? 'POST' : 'GET';
+    if (req.method !== method) return json(res, 405, { error: { message: '请求方法不匹配' } }, { allow: method });
+    if (!id) return json(res, 200, localViews.catalog());
+    const contentType = String(req.headers['content-type'] || '');
+    const jsonForm = /^application\/json(?:\s*;|$)/i.test(contentType);
+    const fileForm = /^multipart\/form-data(?:\s*;|$)/i.test(contentType);
+    if (form && !jsonForm && !fileForm) {
+      return json(res, 415, { error: { message: '插件表单需要 JSON 或 multipart/form-data' } });
+    }
+    let payload;
+    if (form) {
+      try {
+        payload = jsonForm
+          ? await readBody(req, LOCAL_PLUGIN_FORM_LIMIT)
+          : await parsePluginMultipart(contentType, await readRawBody(req, LOCAL_PLUGIN_UPLOAD_LIMIT));
+      } catch (error) {
+        const status = error.status === 413 ? 413 : 400;
+        return json(res, status, { error: { message: status === 413 ? '插件上传内容超过大小限制' : '插件表单数据无效' } });
+      }
+    }
+    const [status, result] = form ? await localViews.submit(id, action, payload)
+      : info ? await localViews.status(id) : await localViews.read(id);
     return json(res, status, result);
   }
   // 优先执行本地扩展插件注册的自定义路由
@@ -3176,7 +3283,7 @@ async function handleRequest(req, res) {
 
         });
         try {
-          return await streamToClient(res, run.stream, model, chatId, run.account, run.ctx, body.stream_options?.include_usage === true);
+          return await streamToClient(res, run, model, chatId, body.stream_options?.include_usage === true);
         } catch (streamErr) {
           run.release(false,streamErr.message);
           if (!res.writableEnded && !res.destroyed) {
@@ -3190,7 +3297,7 @@ async function handleRequest(req, res) {
       }
 
       try {
-        const result = await collect(run.stream, run.account, run.ctx);
+        const result = await collect(run.events(), run.ctx);
         return json(res, 200, ant2oaiText(result, model, run.ctx));
       } catch (e) {
         run.release(false,e.message); throw e;
@@ -3296,7 +3403,7 @@ async function handleRequest(req, res) {
           const stopHeartbeat = heartbeat(res);
           const summaryBlocks = new Set();
           try {
-            for await (const ev of normalizeSse(run.stream, run.account, run.ctx)) {
+            for await (const ev of run.events()) {
               // 上游思考只回摘要（thinking_summary_delta 不是 Anthropic 标准事件，
               // 客户端 SDK 会丢弃）→ 转成标准 thinking_delta 下发，SDK 才能展示思考过程
               if (ev.type === 'content_block_delta' && ev.delta?.type === 'thinking_summary_delta') {
@@ -3320,7 +3427,7 @@ async function handleRequest(req, res) {
           return;
         }
 
-        const result = await collect(run.stream, run.account, run.ctx);
+        const result = await collect(run.events(), run.ctx);
         const content = [];
         if (result.reasoning) {
           // Anthropic 规范：thinking 块在正文之前（signature 留空——摘要不是可回放的

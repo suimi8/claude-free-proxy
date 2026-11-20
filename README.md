@@ -143,9 +143,9 @@ node start.mjs lan
 
 **已有安装升级**：先在维护窗口停掉原服务，备份私有数据。没有 `role` 的旧 Key 和 `LOCAL_API_KEY` 都只能调用，不能管理。若没有独立管理员，在项目目录运行 `node src/init-admin.mjs`（使用与服务相同的 `DATA_DIR` 或 `CONFIG_FILE`）。它只追加一个新的管理 Key；重复运行不修改已有管理员，也不输出密钥。不要给已分发的旧 Key 提权。原来通过地址栏、共享链接或日志暴露过的 Key 应轮换。
 
-**目录与发布**：设置 `DATA_DIR` 后，配置、账号、上游配置、usage 和操作日志都放在此目录；不设置时兼容原根目录或现有的 `config/*.json`。`node start.mjs pack <新的文件名.tgz>`（或 `npm run pack:release`）只打包清单内的程序、公开页面、示例和离线测试，并核对归档目录；不打包账号、私有插件、抓包及日志。**这是程序发布包，不是数据备份。** 在新机器解包后先 `npm ci`；本机可选工具不随包发布。私有页面和插件默认关闭。本机管理员可以在私有 `plugins/local-views.json` 中配置列表插件。每个数组项以 `id` 对应已安装的插件目录，以 `title` 设置显示名，以 `namespace` 和 `collection` 指定原插件的列表接口（`mailboxes` 或 `goods`）。重启后在控制台「本地插件」查看邮箱或商品库存。页面仅在点击查看时读取服务数据。清单与插件一起保留在本机，不进入发布包。
+**目录与发布**：设置 `DATA_DIR` 后，配置、账号、上游配置、usage 和操作日志都放在此目录；不设置时兼容原根目录或现有的 `config/*.json`。`node start.mjs pack <新的文件名.tgz>`（或 `npm run pack:release`）只打包清单内的程序、公开页面、示例和离线测试，并核对归档目录；不打包账号、私有插件、抓包及日志。**这是程序发布包，不是数据备份。** 在新机器解包后先 `npm ci`；本机可选工具不随包发布。私有页面和插件默认关闭。本机管理员可以在私有 `plugins/local-views.json` 中配置列表插件。每个数组项以 `id` 对应已安装的插件目录，以 `title` 设置显示名，以 `namespace` 和 `collection` 指定原插件的列表接口（`mailboxes` 或 `goods`）。重启后可从「账号池」工具栏或「本地插件」打开面板。点击列表按钮会读取邮箱或商品库存，修改列表的表单可在操作成功后自动刷新。清单与插件一起保留在本机，不进入发布包。
 
-`ENABLE_LOCAL_PLUGINS=0` 关闭全部本地插件。单独启用私有页面或其他完整插件时沿用 `ENABLE_LOCAL_UI=1` 和 `ENABLE_LOCAL_PLUGINS=1`。清单内的插件只挂载已选的列表接口。
+`ENABLE_LOCAL_PLUGINS=0` 关闭全部本地插件。单独启用私有页面或其他完整插件时沿用 `ENABLE_LOCAL_UI=1` 和 `ENABLE_LOCAL_PLUGINS=1`。清单内的插件提供指定的列表接口。本机插件目录带有 `management.mjs` 时，管理员还能通过账号池工具栏的插件按钮打开该插件的管理表单。
 
 ---
 

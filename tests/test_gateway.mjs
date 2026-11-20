@@ -52,8 +52,14 @@ const series = {
   truncatedTool: [start, tool(0, 'a', args[0]), stop(0), reason('max_tokens'), end],
   largeTool: [start, tool(0, 'tool-fixture'), arg(0, JSON.stringify(largeArgs)), stop(0), reason('tool_use'), end],
   pauseStream: [start, block(0, { type: 'text', text: '' }), delta(0, { type: 'text_delta', text: 'partial' })],
+  interruptAfterText: [start, block(0, { type: 'text', text: '' }),
+    delta(0, { type: 'text_delta', text: 'already delivered' })],
   text: textEvents(),
   pseudo: textEvents('<tool_call>{"name":"write","arguments":{}}</tool_call>'),
+  compatMissingId: [start, block(0, { type: 'tool_use', name: 'write', input: args[0] }), stop(0), reason('tool_use'), end],
+  compatWrappedName: [start, block(0, { type: 'tool_use', name: 'FUNCTIONS.write', id: 'wrapped-id', input: args[0] }), stop(0), reason('end_turn'), end],
+  undeclaredTool: [start, block(0, { type: 'tool_use', name: 'web_search', id: 'unavailable', input: { query: 'SYNTHETIC-UNDECLARED-TOOL-PAYLOAD' } }),
+    delta(0, { type: 'signature_delta', signature: 'SYNTHETIC-UNDECLARED-TOOL-PAYLOAD' }), stop(0), reason('tool_use'), end],
   // Stop the SECOND block first. Both arrival order and call IDs must be retained.
   interleaved: [
     start,
@@ -117,7 +123,12 @@ function mockUpstream() {
       return res.end();
     }
     state.bodies.push(JSON.parse(Buffer.concat(body)));
-    const mode = state.mode, uuid = 'message-fixture-' + state.bodies.length;
+    let mode = state.mode;
+    if (mode === 'interruptFirst') {
+      mode = state.interruptFirstDone ? 'text' : 'interrupted';
+      state.interruptFirstDone = true;
+    }
+    const uuid = 'message-fixture-' + state.bodies.length;
     if (mode === 'pauseHeaders') {
       state.server.emit('holding-headers');
       return;
@@ -156,7 +167,7 @@ function mockUpstream() {
       res.on('close', () => state.closedWaits++);
       return;
     } // do not send EOF
-    if (mode === 'interrupted') {
+    if (mode === 'interrupted' || mode === 'interruptAfterText') {
       await delay(15);
       return res.destroy();
     }
@@ -337,6 +348,43 @@ function stageApp(root) {
     fs.mkdirSync(path.dirname(dst), { recursive: true });
     fs.copyFileSync(path.join(project, file), dst);
   }
+  const pluginRoot = path.join(app, 'plugins');
+  fs.mkdirSync(path.join(pluginRoot, 'chain-shop'), { recursive: true });
+  fs.mkdirSync(path.join(pluginRoot, 'mailboxes'), { recursive: true });
+  fs.writeFileSync(path.join(pluginRoot, 'local-views.json'), JSON.stringify([
+    { id: 'chain-shop', title: 'Chain shop fixture', namespace: 'chain_shop', collection: 'goods' },
+    { id: 'mailboxes', title: 'Mailbox fixture', namespace: 'mailboxes', collection: 'mailboxes' },
+  ]));
+  fs.writeFileSync(path.join(pluginRoot, 'chain-shop', 'management.mjs'), `
+    export async function createManagement() {
+      return {
+        forms: [{
+          id: 'upload', label: 'Upload sessionKey',
+          fields: [{ name: 'sessionKey', label: 'sessionKey', type: 'textarea', sensitive: true }],
+          submit: async payload => [200, { message: 'upload accepted', characters: payload.sessionKey.length }],
+        }],
+        status: async () => ({ message: 'ready', values: {} }),
+      };
+    }
+  `);
+  fs.writeFileSync(path.join(pluginRoot, 'mailboxes', 'management.mjs'), `
+    export async function createManagement({ getSettings, saveSettings }) {
+      return {
+        forms: [{
+          id: 'save', label: 'Save mailbox settings',
+          fields: [
+            { name: 'token', label: 'Token', type: 'password', sensitive: true },
+            { name: 'baseUrl', label: 'Base URL', type: 'url' },
+          ],
+          submit: async payload => {
+            saveSettings({ maomailToken: payload.token, maomailBaseUrl: payload.baseUrl });
+            return [200, { message: 'settings saved' }];
+          },
+        }],
+        status: async () => ({ message: getSettings().maomailToken ? 'configured' : 'not configured', values: {} }),
+      };
+    }
+  `);
   const require = createRequire(import.meta.url),
     dep = path.dirname(require.resolve('undici/package.json'));
   fs.mkdirSync(path.join(app, 'node_modules'));
@@ -374,6 +422,30 @@ test('isolated gateway with loopback mock upstream', { timeout: 100000 }, async 
       user = cfg.keys.find((k) => k.role === 'inference').key;
     const acctSecret = 'SYNTHETIC-account-credential';
     const call = (route, opts) => request(port, route, opts);
+    await t.test('local plugin forms submit large sessionKey batches and save mailbox settings', async () => {
+      const catalog = await call('/v1/local-plugins', { key: admin });
+      assert.equal(catalog.status, 200, catalog.text);
+      assert.equal(catalog.json().plugins.find(p => p.id === 'chain-shop').available, false);
+      assert(catalog.json().plugins.find(p => p.id === 'chain-shop').forms.some(f => f.id === 'upload'));
+
+      const sessionBatch = 'synthetic-session-key\\n'.repeat(4000);
+      const uploaded = await call('/v1/local-plugins/chain-shop/actions/upload', {
+        key: admin, body: { sessionKey: sessionBatch },
+      });
+      assert.equal(uploaded.status, 200, uploaded.text);
+      assert.equal(uploaded.json().characters, sessionBatch.length);
+      assert(!uploaded.text.includes(sessionBatch));
+
+      const saved = await call('/v1/local-plugins/mailboxes/actions/save', {
+        key: admin, body: { token: 'synthetic-fixture-value', baseUrl: 'https://example.invalid' },
+      });
+      assert.equal(saved.status, 200, saved.text);
+      assert.equal(saved.json().message, 'settings saved');
+      const settings = await call('/v1/local-plugins/mailboxes/settings', { key: admin });
+      assert.equal(settings.status, 200, settings.text);
+      assert.equal(settings.json().message, 'configured');
+      assert(!settings.text.includes('synthetic-fixture-value'));
+    });
     const logs = async () => (await call('/v1/usage/logs?range=all&limit=1000', { key: admin })).json().logs;
     const countRoute = '/v1/messages/count_tokens';
     async function logFor(uuid) {
@@ -839,6 +911,20 @@ test('isolated gateway with loopback mock upstream', { timeout: 100000 }, async 
               assert.equal(ok.status, 200, ok.text);
               assert.match(ok.text, /下一轮正常/);
             }
+            const missingId = await send('compatMissingId');
+            assert.equal(missingId.status, 200, missingId.text);
+            assert.deepEqual(calls(api, stream, missingId), [['toolu_compat_0', args[0]]]);
+
+            const wrappedName = await send('compatWrappedName');
+            assert.equal(wrappedName.status, 200, wrappedName.text);
+            assert.deepEqual(calls(api, stream, wrappedName), [['wrapped-id', args[0]]]);
+
+            const unavailable = await send('undeclaredTool');
+            assert.equal(unavailable.status, 200, unavailable.text);
+            assert.match(unavailable.text, /上游请求了本次请求未声明的工具/);
+            assert.match(unavailable.text, /未执行该调用/);
+            assert.doesNotMatch(unavailable.text, /SYNTHETIC-UNDECLARED-TOOL-PAYLOAD/);
+
             const pseudo = await send('pseudo');
             assert.match(pseudo.text, /tool_call>/);
             assert.doesNotMatch(pseudo.text, /"tool_calls":\[|"type":"(?:tool_use|function_call)"/);
@@ -905,6 +991,50 @@ test('isolated gateway with loopback mock upstream', { timeout: 100000 }, async 
       assert.equal(rows.length, before400 + 1);
       const row = rows[0];
       assert.deepEqual([row.api, row.status, row.attempts, row.ok], ['messages', 400, 1, false]);
+    });
+
+    await t.test('stream transport interruption retries another account only before generated output', async () => {
+      const backup = await call('/v1/accounts', {
+        key: admin,
+        body: { label: 'synthetic backup', sessionKey: 'SYNTHETIC-backup-account', org: 'org-backup', base },
+      });
+      assert([200, 201].includes(backup.status), backup.text);
+      const pool = await call('/v1/accounts', { key: admin });
+      for (const account of pool.json().accounts) {
+        const enabled = await call('/v1/accounts/' + encodeURIComponent(account.id), {
+          key: admin, method: 'PATCH', body: { enabled: true },
+        });
+        assert.equal(enabled.status, 200, enabled.text);
+      }
+      const before = mock.bodies.length;
+      mock.interruptFirstDone = false;
+      mock.mode = 'interruptFirst';
+      const recovered = await call(routes.responses, {
+        key: user,
+        body: {
+          input: 'transport recovery fixture', stream: true,
+          tools: [{ type: 'function', name: 'write', parameters: schema }],
+        },
+      });
+      assert.equal(recovered.status, 200, recovered.text);
+      assert(recovered.text.includes('response.output_text.delta'), recovered.text + '\n' + gw.output);
+      assert(recovered.text.includes('response.completed'));
+      assert.doesNotMatch(recovered.text, /partial_json_delta|transport interrupted/);
+      assert.equal(mock.bodies.length, before + 2);
+      const retried = await logFor('message-fixture-' + mock.bodies.length);
+      assert.deepEqual([retried.api, retried.status, retried.attempts, retried.ok], ['responses', 200, 2, true]);
+
+      const beforePartial = mock.bodies.length;
+      mock.mode = 'interruptAfterText';
+      const partial = await call(routes.responses, {
+        key: user, body: { input: 'no replay after visible output', stream: true },
+      });
+      assert.equal(partial.status, 200, partial.text);
+      assert(partial.text.includes('response.output_text.delta'));
+      assert(partial.text.includes('already delivered'));
+      assert(partial.text.includes('response.failed'));
+      assert.equal(mock.bodies.length, beforePartial + 1);
+      mock.mode = 'text';
     });
     assert.equal(mock.closedWaits, 6, 'each hanging HTTP producer must be cancelled once');
     assert.equal((await call('/readyz')).status, 200);

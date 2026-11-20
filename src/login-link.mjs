@@ -728,7 +728,11 @@ export function createLoginManager(opts) {
 
   async function submitEmailToClaude(flow, email) {
     if (flow.isCage && cageAdapter) {
-      return await cageAdapter.submitEmailInCage(flow, email);
+      try {
+        if (await cageAdapter.submitEmailInCage(flow, email)) return true;
+      } catch {
+        console.warn(`[login] ${flow.id} Cage 邮箱提交适配器不可用，改用页面 CDP 提交`);
+      }
     }
 
     const cdp = await ensurePageCdp(flow);
@@ -901,7 +905,12 @@ export function createLoginManager(opts) {
           await sleep(200);
         }
 
-        // 5. 点击提交按钮（优先 DOM 原生事件精确点击与表单提交，绝不使用易受缩放偏移影响的绝对坐标点击，彻底避免误触 Google 登录）
+        if (!btnReady) {
+          await sleep(500);
+          continue;
+        }
+
+        // Submit once through the site's form so React state and native validation stay in sync.
         if (info.hasBrowserErr) {
           console.log(`[login] ${flow.id} 检测到「无法验证您的浏览器」，准备自动重试提交 (${retryCount + 1}/${maxRetries})...`);
           flow.message = `页面提示「无法验证您的浏览器」，正在自动重试提交 (${retryCount + 1}/${maxRetries})…`;
@@ -914,23 +923,14 @@ export function createLoginManager(opts) {
               || document.querySelector('button[type="submit"][data-cds="Button"]')
               || document.querySelector('button[type="submit"]')
               || Array.from(document.querySelectorAll('button')).find(b => !/google|apple/i.test(b.innerText || '') && /メールで続ける|email|继续|continue|login|登录/i.test((b.innerText || '').trim()));
-            if (!btn) return false;
-            btn.removeAttribute('disabled');
-            btn.removeAttribute('aria-disabled');
-            const emailSpan = btn.querySelector('[data-submit-label="email"]') || btn.querySelector('[data-cds-button-label]');
-            if (emailSpan) emailSpan.click();
-            btn.click();
+            if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
             const form = btn.closest('form') || document.querySelector('form');
             if (form && typeof form.requestSubmit === 'function') {
-              try { form.requestSubmit(btn); } catch { form.requestSubmit(); }
-            }
+              form.requestSubmit(btn);
+            } else btn.click();
             return true;
           })()`,
         }).catch(() => {});
-
-        // 同时在输入框派发 Enter 键双重保底
-        await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }).catch(() => {});
-        await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }).catch(() => {});
 
         // 6. 点击后观察页面状态 (跳转到验证码页、成功凭据、频率限制等)
         const clickTime = Date.now();

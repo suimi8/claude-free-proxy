@@ -253,6 +253,13 @@
   /* 系统设置面板 */
   .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; margin-bottom: 20px; }
   .scard { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 20px; box-shadow: var(--shadow); }
+  #pluginShortcuts { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+  #pluginShortcuts:empty { display: none; }
+  .plugin-fields { margin: 12px 0 0; padding: 12px 0 0; border: 0; border-top: 1px solid var(--line); }
+  .plugin-fields label { display: block; margin: 0 0 8px; font-size: 13px; }
+  .plugin-fields input, .plugin-fields textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; padding: 7px; border: 1px solid var(--line); border-radius: 6px; }
+  .plugin-fields textarea { min-height: 76px; resize: vertical; font: inherit; }
+  .plugin-fields [role=status] { margin-left: 6px; font-size: 12px; }
   .scard h3 { margin: 0 0 4px; font-size: 15px; display: flex; align-items: center; gap: 8px; color: #1e293b; }
   .scard .sdesc { color: var(--sub); font-size: 12px; margin: 0 0 16px; line-height: 1.45; }
   .sitem { margin-bottom: 16px; }
@@ -324,6 +331,8 @@
     <button class="btn primary" id="btnLogin">🔗 链接登录（推荐）</button>
     <button class="btn" id="btnAdd">✎ 手动输入</button>
     <button class="btn" id="btnImport">🖥️ 导入 Desktop 登录态</button>
+    <button class="btn" id="btnLiandongModal" style="border-color:#f59e0b;color:#d97706;font-weight:600" title="打开链动小铺卡密库存上传管理">🛒 链动小铺</button>
+    <span id="pluginShortcuts"></span>
     <button class="btn" id="btnRefresh">⟳ 刷新</button>
     <button class="btn" id="btnQuotaAll" title="对所有账号主动查一次额度（每个账号消耗 1 条最小消息）">📊 刷新全部额度</button>
     <button class="btn" id="btnKycAll" title="查询所有账号各组织的 KYC 状态（只读接口，不消耗额度，结果缓存 5 分钟）">🪪 查全部 KYC</button>
@@ -348,6 +357,7 @@
     <label><input type="checkbox" id="selAll"> 全选</label>
     <span id="selInfo" class="hsub"></span>
     <div class="grow"></div>
+    <button class="btn sm" id="btnUploadLiandongSel" style="display:none;background:#f59e0b;border-color:#f59e0b;color:#fff;font-weight:600" title="将所选账号的 sessionKey 一键上传到链动小铺库存">🛒 上传所选到小铺</button>
     <button class="btn sm danger" id="btnDelSel" style="display:none">🗑 删除所选</button>
   </div>
 
@@ -564,8 +574,8 @@
 
       <!-- 肥猫猫临时邮箱配置 -->
       <div class="scard">
-        <h3>🐱 肥猫猫临时邮箱 · 一键自动登录配置</h3>
-        <div class="sdesc">配置肥猫猫临时邮箱服务（zjkdongao.cn）的 API 鉴权 Token。配置后支持在添加账号时一键全自动接收验证邮件/Magic Link 并完成登录。</div>
+        <h3>🐱 肥猫猫邮箱连接</h3>
+        <div class="sdesc">保存邮箱服务地址和 Token 后，可测试连接并查看邮箱列表。</div>
 
         <div class="sitem">
           <label>肥猫猫服务接口地址 (Base URL)</label>
@@ -727,6 +737,57 @@
         </div>
         <div id="tipYesCaptchaGuide" style="margin-top:5px;font-size:11px;color:#78350f;display:flex;align-items:center;justify-content:space-between">
           <span>💡 提示：勾选启用后批量登录自动注入并过人机验证；取消勾选则使用纯净原生浏览器，不消耗打码余额。</span>
+        </div>
+      </div>
+
+      <!-- ✨ 肥猫猫自动创建邮箱并登录（流水线模式） -->
+      <div style="background:#ecfdf5;border:1px solid #6ee7b7;border-radius:10px;padding:12px 14px;margin-bottom:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:13px;font-weight:700;color:#065f46">✨ 肥猫猫自动创建邮箱并登录（流水线模式）</span>
+            <span style="font-size:11px;padding:1px 6px;border-radius:4px;background:#d1fae5;color:#047857;font-weight:600">一个一个创建 · 一个一个登录</span>
+          </div>
+          <span style="font-size:11.5px;color:#047857">无需手动勾选，API 实时申请新临时邮箱并自动注册入池</span>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <label style="font-size:12px;color:#065f46;font-weight:600">目标创建数量：</label>
+            <input type="number" id="inputPipelineCount" min="1" max="100" value="1" style="width:64px;padding:4px 6px;border:1px solid #6ee7b7;border-radius:6px;font-size:12px;text-align:center;background:#fff;font-weight:600">
+            <span style="font-size:11.5px;color:#047857">个（创建 1 个 ➔ 登录 1 个 ➔ 成功入池 ➔ 再创建下一个）</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <button class="btn danger sm" id="btnPipelineCancel" type="button" style="display:none;padding:5px 12px">⏹ 终止流水线</button>
+            <button class="btn primary" id="btnPipelineStart" type="button" style="background:#059669;border-color:#059669;color:#fff;font-weight:600;padding:6px 16px;box-shadow:0 1px 2px rgba(5,150,105,0.2)">
+              ✨ 启动自动创建并登录
+            </button>
+          </div>
+        </div>
+        <!-- 流水线实时进展展示 -->
+        <div id="secPipelineLive" style="display:none;margin-top:10px;padding:8px 10px;background:#fff;border:1px solid #a7f3d0;border-radius:8px;font-size:12px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+            <div id="txtPipelineStatus" style="font-weight:600;color:#065f46">流水线准备中…</div>
+            <div id="txtPipelineProgress" style="color:var(--sub);font-size:11.5px">0 / 0</div>
+          </div>
+          <div style="width:100%;height:5px;background:#e2e8f0;border-radius:3px;overflow:hidden;margin-bottom:6px">
+            <div id="barPipelineProgress" style="width:0%;height:100%;background:#10b981;transition:width .3s"></div>
+          </div>
+          <div id="txtPipelineDetail" style="font-size:11.5px;color:#334155;word-break:break-all">正在初始化…</div>
+          <!-- 流水线账号任务明细表 -->
+          <div style="margin-top:8px;max-height:180px;overflow-y:auto;border:1px solid #d1fae5;border-radius:6px">
+            <table style="width:100%;border-collapse:collapse;font-size:11.5px;text-align:left">
+              <thead>
+                <tr style="background:#ecfdf5;color:#065f46;position:sticky;top:0">
+                  <th style="padding:4px 8px;width:32px">#</th>
+                  <th style="padding:4px 8px;width:180px">临时邮箱</th>
+                  <th style="padding:4px 8px;width:90px">当前状态</th>
+                  <th style="padding:4px 8px">实时进展 / 报错详情</th>
+                </tr>
+              </thead>
+              <tbody id="tbodyPipelineItems">
+                <tr><td colspan="4" style="text-align:center;padding:8px;color:#047857">暂无流水线记录</td></tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 
@@ -950,10 +1011,18 @@ let S = { status: null, health: null, search: "", sel: new Set(), editId: null, 
   usage: null, tab: "pool", usageRange: "today", usageAccount: "", kyc: {} };
 let pollTimer = null, tickTimer = null;
 
-// Retire credentials saved by old versions; never import a key from the URL.
-try { localStorage.removeItem('pxf_key'); } catch {}
-if (location.search) history.replaceState(null, '', location.pathname + location.hash);
-const key = () => sessionStorage.getItem('gateway_admin') || '';
+// 本地持久化保存与恢复管理 Key，支持 ?k= 参数直接免密登录
+(() => {
+  try {
+    const uk = new URLSearchParams(location.search).get("k");
+    if (uk) {
+      sessionStorage.setItem("gateway_admin", uk);
+      localStorage.setItem("gateway_admin", uk);
+      history.replaceState(null, "", location.pathname + location.hash);
+    }
+  } catch {}
+})();
+const key = () => sessionStorage.getItem('gateway_admin') || localStorage.getItem('gateway_admin') || localStorage.getItem('pxf_key') || '';
 function toast(msg, err) {
   const d = document.createElement("div");
   d.className = "toast" + (err ? " err" : "");
@@ -969,11 +1038,12 @@ async function api(path, opts = {}) {
     showKey(true, "请输入本机配置中 role 为 admin 的管理 Key");
     throw new Error("请先在右上角「🔑 Key」填入 API Key");
   }
-  const r = await fetch(path, {
-    ...opts,
-    headers: { "content-type": "application/json",
-      ...(opts.headers || {}), ...(k ? { authorization: "Bearer " + k } : {}) },
-  });
+  const headers = new Headers(opts.headers || {});
+  const multipart = typeof FormData !== "undefined" && opts.body instanceof FormData;
+  if (multipart) headers.delete("content-type");
+  else if (!headers.has("content-type")) headers.set("content-type", "application/json");
+  if (k) headers.set("authorization", "Bearer " + k);
+  const r = await fetch(path, { ...opts, headers });
   let j = null;
   try { j = await r.json(); } catch { /* noop */ }
   if (r.status === 401 || (r.status === 403 && path === '/v1/accounts')) {
@@ -1221,6 +1291,7 @@ function renderCards() {
   const selN = S.sel.size;
   $("#selInfo").textContent = selN ? "已选 " + selN + " 个" : "";
   $("#btnDelSel").style.display = selN ? "" : "none";
+    if ($("#btnUploadLiandongSel")) $("#btnUploadLiandongSel").style.display = selN ? "" : "none";
   const visIds = list.map(a => a.id);
   $("#selAll").checked = visIds.length > 0 && visIds.every(id => S.sel.has(id));
 }
@@ -1248,7 +1319,7 @@ function render() { renderHeader(); renderStats(); renderCards(); renderSettings
 /* ---------------- 用量统计看板 ---------------- */
 const nfmt = n => (n || 0).toLocaleString("zh-CN");
 const pct = v => Math.round((v || 0) * 100) + "%";
-function switchTab(t) {
+function switchTab(t, pluginId) {
   S.tab = t;
   $("#tabPool").classList.toggle("on", t === "pool");
   $("#tabUsage").classList.toggle("on", t === "usage");
@@ -1262,13 +1333,30 @@ function switchTab(t) {
   $("#viewSettings").style.display = t === "settings" ? "" : "none";
   $("#viewOps").style.display = t === "ops" ? "" : "none";
   $("#viewPlugins").style.display = t === "plugins" ? "" : "none";
-  if (t === "plugins") loadLocalPlugins();
+  if (t === "plugins") loadLocalPlugins(pluginId);
   if (t === "usage") loadUsage();
   if (t === "keys") loadKeys();
   if (t === "settings") renderSettings();
   if (t === "ops") loadOperations();
 }
-async function loadLocalPlugins() {
+async function loadPluginShortcuts() {
+  const bar = $("#pluginShortcuts");
+  bar.replaceChildren();
+  if (!S.status) return;
+  try {
+    const { plugins } = await api("/v1/local-plugins");
+    for (const plugin of plugins) {
+      const button = document.createElement("button");
+      button.className = "btn";
+      button.type = "button";
+      button.textContent = plugin.title;
+      button.onclick = () => switchTab("plugins", plugin.id);
+      bar.append(button);
+    }
+  } catch { /* Shortcuts are optional; the plugin tab reports service errors. */ }
+}
+
+async function loadLocalPlugins(pluginId) {
   const cards = $("#pluginCards"), notice = $("#pluginNotice");
   cards.replaceChildren();
   notice.textContent = "正在加载本地插件…";
@@ -1276,12 +1364,14 @@ async function loadLocalPlugins() {
     const { plugins, notice: warning } = await api("/v1/local-plugins");
     notice.textContent = warning || (plugins.length ? "" : "本机尚未配置插件视图。");
     cards.replaceChildren(...plugins.map(pluginCard));
+    if (pluginId) document.getElementById("plugin-panel-" + pluginId)?.scrollIntoView({ block: "start" });
   } catch (err) { notice.textContent = err.message; }
 }
 
 function pluginCard(plugin) {
   const card = document.createElement("article"), title = document.createElement("h3");
   card.className = "scard";
+  card.id = "plugin-panel-" + plugin.id;
   title.textContent = plugin.title;
   const button = document.createElement("button"), status = document.createElement("p");
   button.type = "button";
@@ -1293,12 +1383,23 @@ function pluginCard(plugin) {
   const contents = document.createElement("div");
   contents.className = "tblwrap";
   card.append(title, button, status, contents);
-  button.onclick = async () => {
+  if (plugin.collection === "goods" && (plugin.managementError || !plugin.forms?.length)) {
+    const managementStatus = document.createElement("p");
+    managementStatus.setAttribute("role", "status");
+    managementStatus.textContent = plugin.managementError
+      ? "商品管理表单加载失败，sessionKey 上传入口不可用；请检查插件安装。"
+      : "商品列表可用，但插件未注册管理表单；当前页面没有 sessionKey 上传入口。";
+    card.append(managementStatus);
+  }
+  let listRequest = 0;
+  async function refreshList() {
+    const current = ++listRequest;
     button.disabled = true;
     contents.replaceChildren();
     status.textContent = "正在读取…";
     try {
       const { columns, rows, total } = await api("/v1/local-plugins/" + encodeURIComponent(plugin.id));
+      if (current !== listRequest) return;
       status.textContent = total ? `共 ${total} 条` : "列表为空";
       if (rows.length) {
         const table = document.createElement("table");
@@ -1315,10 +1416,102 @@ function pluginCard(plugin) {
         }
         contents.append(table);
       }
-    } catch (err) { status.textContent = err.message; }
-    finally { button.disabled = false; }
-  };
+    } catch (err) {
+      if (current === listRequest) status.textContent = err.message;
+    } finally {
+      if (current === listRequest) button.disabled = false;
+    }
+  }
+  button.onclick = refreshList;
+  if (plugin.forms?.length) addPluginForms(card, plugin, refreshList);
   return card;
+}
+
+function addPluginForms(card, plugin, refreshList) {
+  const base = "/v1/local-plugins/" + encodeURIComponent(plugin.id);
+  const message = document.createElement("p"), forms = document.createElement("div");
+  message.setAttribute("role", "status");
+  card.append(message, forms);
+  async function refreshSettings(initial) {
+    try {
+      const state = await api(base + "/settings");
+      message.textContent = state.message;
+      for (const input of forms.querySelectorAll("input:not([type=password]):not([type=file]):not([data-sensitive]), textarea:not([data-sensitive])")) {
+        if (Object.hasOwn(state.values, input.name) && (!input.value || !initial && input.value === input.defaultValue)) {
+          input.defaultValue = input.value = state.values[input.name];
+        }
+      }
+    } catch (err) { message.textContent = err.message; }
+  }
+  for (const spec of plugin.forms) {
+    const form = document.createElement("form"), group = document.createElement("fieldset");
+    group.className = "plugin-fields";
+    for (const field of spec.fields) {
+      const label = document.createElement("label");
+      const input = document.createElement(field.type === "textarea" ? "textarea" : "input");
+      const sensitive = field.sensitive === true || /(?:session.?key|access.?token|refresh.?token|password|secret|cookie)/i.test(String(field.name || ""));
+      label.textContent = field.label;
+      if (field.type !== "textarea") input.type = field.type;
+      input.name = field.name;
+      input.required = !!field.required;
+      input.autocomplete = sensitive ? "off" : "on";
+      input.placeholder = field.placeholder || "";
+      if (field.type === "textarea") {
+        input.rows = Number.isInteger(field.rows) ? Math.max(2, Math.min(12, field.rows)) : 4;
+      }
+      if (sensitive) input.dataset.sensitive = "true";
+      if (field.type === "file") {
+        input.accept = typeof field.accept === "string" ? field.accept : "";
+        input.multiple = field.multiple === true;
+      }
+      label.append(input);
+      group.append(label);
+    }
+    const submit = document.createElement("button"), feedback = document.createElement("span");
+    submit.type = "submit";
+    submit.className = "btn sm";
+    submit.textContent = spec.label;
+    feedback.setAttribute("role", "status");
+    group.append(submit, feedback);
+    form.append(group);
+    form.onsubmit = async event => {
+      event.preventDefault();
+      if (group.disabled) return;
+      try {
+        const data = new FormData(form);
+        const fileInputs = [...form.querySelectorAll('input[type="file"]')];
+        const files = fileInputs.flatMap(input => Array.from(input.files || []));
+        const totalBytes = files.reduce((total, file) => total + file.size, 0);
+        if (totalBytes > 30 * 1024 * 1024) {
+          feedback.textContent = "文件总大小不能超过 30 MiB";
+          return;
+        }
+        for (const input of fileInputs) {
+          if (!input.files?.length) data.delete(input.name);
+        }
+        const hasFiles = files.length > 0;
+        const payload = hasFiles ? data : Object.fromEntries(data);
+        const confirmValue = data.get(spec.confirmField);
+        const confirmText = confirmValue instanceof File ? confirmValue.name : confirmValue;
+        if (spec.confirmField && !confirm(`确认${spec.label}？\n${confirmText || ""}`)) return;
+        group.disabled = true;
+        feedback.textContent = "处理中…";
+        const result = await api(base + "/actions/" + encodeURIComponent(spec.id), {
+          method: "POST", body: hasFiles ? payload : JSON.stringify(payload),
+        });
+        feedback.textContent = result.message;
+        for (const input of group.querySelectorAll("input, textarea")) {
+          if (input.type === "password" || input.type === "file" || input.dataset.sensitive === "true" || input.name === spec.confirmField) input.value = "";
+          else input.defaultValue = input.value;
+        }
+        if (spec.refreshList) await refreshList();
+        await refreshSettings(false);
+      } catch (err) { feedback.textContent = err.message; }
+      finally { group.disabled = false; }
+    };
+    forms.append(form);
+  }
+  refreshSettings(true);
 }
 
 async function loadUsage() {
@@ -1538,19 +1731,25 @@ $("#btnCfAll").onclick = async e => {
 };
 $("#btnKey").onclick = () => showKey(true);
 $("#btnKeySave").onclick = async () => {
-  const v = $("#fApi").value.trim();
-  if (!v) { toast("请先填入 API Key", true); $("#fApi").focus(); return; }
-  sessionStorage.setItem('gateway_admin', v);
-  S.status = null;
-  showKey(false);
-  await load(false);
-  if (S.status) {
-    toast("Key 已保存");
-    if (S.tab === "plugins") loadLocalPlugins();
-    startPoll();
-  }
-};
-$("#btnKeySkip").onclick = () => { sessionStorage.removeItem('gateway_admin'); location.reload(); };
+    const v = $("#fApi").value.trim();
+    if (!v) { toast("请先填入 API Key", true); $("#fApi").focus(); return; }
+    sessionStorage.setItem('gateway_admin', v);
+    localStorage.setItem('gateway_admin', v);
+    showKey(false);
+    try {
+      await load(false);
+      loadPluginShortcuts();
+      toast("✅ 管理 Key 已保存并生效！");
+    } catch (e) {
+      toast("连接失败: " + e.message, true);
+    }
+  };
+  $("#btnKeySkip").onclick = () => {
+    sessionStorage.removeItem('gateway_admin');
+    localStorage.removeItem('gateway_admin');
+    localStorage.removeItem('pxf_key');
+    location.reload();
+  };
 
 /* ---------------- 链接登录（主入口，自动捕获 sessionKey） ---------------- */
 let LOGIN_ID = null, LOGIN_TIMER = null, lastVerifyKind = null;
@@ -2188,39 +2387,43 @@ async function loadMaoMailboxes() {
   }
 }
 
-const saveMaoMailConfigDirect = async () => {
-  const token = $("#cfgMaoMailToken") ? $("#cfgMaoMailToken").value.trim() : "";
-  const baseUrl = $("#cfgMaoMailBaseUrl") ? $("#cfgMaoMailBaseUrl").value.trim() : "";
-  await api("/v1/pool", {
-    method: "POST",
-    body: JSON.stringify({
-      maomailToken: token || undefined,
-      maomailBaseUrl: baseUrl || undefined,
-    })
-  });
-  $("#cfgMaoMailToken").value = "";
-};
-
-if ($("#btnSaveMaoMailOnly")) {
-  $("#btnSaveMaoMailOnly").onclick = async () => {
-    const b = $("#btnSaveMaoMailOnly");
-    const token = $("#cfgMaoMailToken") ? $("#cfgMaoMailToken").value.trim() : "";
-    if (!token) {
-      toast("请先在上方输入框填入肥猫猫 Token (JWT Bearer)", true);
-      return;
+async function runMailSettings(test) {
+  const tip = $("#maomailStatusTip"), tokenField = $("#cfgMaoMailToken"), baseField = $("#cfgMaoMailBaseUrl");
+  const controls = [$("#btnSaveMaoMailOnly"), $("#btnTestMaoMail")];
+  controls.forEach(b => { b.disabled = true; });
+  tip.textContent = test ? "正在测试连接…" : "正在保存…";
+  try {
+    const { plugins } = await api("/v1/local-plugins");
+    const plugin = plugins.find(p => p.collection === "mailboxes" && p.forms?.some(f => f.id === "save"));
+    const token = tokenField.value.trim(), baseUrl = baseField.value.trim();
+    let message;
+    if (plugin) {
+      const path = "/v1/local-plugins/" + encodeURIComponent(plugin.id) + "/actions/";
+      if (!test || token || baseUrl) {
+        message = (await api(path + "save", { method: "POST", body: JSON.stringify({ token, baseUrl }) })).message;
+        tokenField.value = "";
+      }
+      if (test) message = (await api(path + "test", { method: "POST", body: "{}" })).message;
+    } else {
+      // Backwards compatibility for sites using a standalone mailbox plugin.
+      if (token || baseUrl) {
+        await api("/v1/pool", { method: "POST", body: JSON.stringify({ maomailToken: token || undefined, maomailBaseUrl: baseUrl || undefined }) });
+        tokenField.value = "";
+      }
+      if (test) {
+        const result = await api("/v1/maomail/mailboxes");
+        if (!result.ok) throw new Error("邮箱连接失败，请检查服务配置");
+        message = `连接成功，共 ${(result.mailboxes || []).length} 个邮箱`;
+      } else message = "邮箱配置已保存";
     }
-    b.disabled = true; b.textContent = "保存中…";
-    try {
-      await saveMaoMailConfigDirect();
-      toast("肥猫猫配置已直接保存并即时生效！");
-      await loadMaoMailboxes();
-    } catch (e) {
-      toast("保存失败: " + e.message, true);
-    } finally {
-      b.disabled = false; b.textContent = "💾 保存肥猫猫配置";
-    }
-  };
+    tip.textContent = message;
+    toast(message);
+  } catch (err) { tip.textContent = err.message; toast(err.message, true); }
+  finally { controls.forEach(b => { b.disabled = false; }); }
 }
+
+$("#btnSaveMaoMailOnly").onclick = () => runMailSettings(false);
+$("#btnTestMaoMail").onclick = () => runMailSettings(true);
 
 if ($("#btnRefreshMaoMail")) {
   $("#btnRefreshMaoMail").onclick = async () => {
@@ -2259,49 +2462,6 @@ if ($("#btnAutoLogin")) {
     } catch (ex) {
       setLoginUI("自动登录启动失败: " + ex.message, "bad", false);
       resetLoginUIButtons(false);
-    }
-  };
-}
-
-if ($("#btnTestMaoMail")) {
-  $("#btnTestMaoMail").onclick = async () => {
-    const b = $("#btnTestMaoMail");
-    const tip = $("#maomailStatusTip");
-    const typedToken = $("#cfgMaoMailToken") ? $("#cfgMaoMailToken").value.trim() : "";
-    
-    b.disabled = true; b.textContent = "测试中…";
-    if (tip) tip.textContent = "正在测试连接并保存配置…";
-    try {
-      if (!typedToken) {
-        throw new Error("请先在上方输入框填入肥猫猫 Token (JWT Bearer)");
-      }
-      // 1. 自动持久化保存到后端配置，省去翻到底部手动保存
-      await saveMaoMailConfigDirect();
-
-      const res = await api("/v1/maomail/mailboxes");
-      if (res.ok) {
-        const count = (res.mailboxes || []).length;
-        if (tip) {
-          tip.style.color = "#16a34a";
-          tip.textContent = `✓ 连通并保存成功！已获取 ${count} 个可用邮箱`;
-        }
-        toast(`肥猫猫配置已保存！成功获取 ${count} 个邮箱`);
-        await loadMaoMailboxes();
-      } else {
-        if (tip) {
-          tip.style.color = "#dc2626";
-          tip.textContent = `✗ 测试失败: ${res.error || "未知错误"}`;
-        }
-        toast("肥猫猫连接失败: " + (res.error || "未知错误"), true);
-      }
-    } catch (e) {
-      if (tip) {
-        tip.style.color = "#dc2626";
-        tip.textContent = `✗ 测试失败: ${e.message}`;
-      }
-      toast("肥猫猫测试失败: " + e.message, true);
-    } finally {
-      b.disabled = false; b.textContent = "🔍 测试邮箱连接与邮箱列表";
     }
   };
 }
@@ -2372,7 +2532,7 @@ $("#btnSaveSettings").onclick = async e => {
       defaultEffort: $("#cfgFullEffort").value,
       pricePerMillionTokens: +$("#cfgFullPrice").value,
       maomailToken: $("#cfgMaoMailToken") ? $("#cfgMaoMailToken").value.trim() || undefined : undefined,
-      maomailBaseUrl: $("#cfgMaoMailBaseUrl") ? $("#cfgMaoMailBaseUrl").value.trim() : undefined,
+      maomailBaseUrl: $("#cfgMaoMailBaseUrl") ? $("#cfgMaoMailBaseUrl").value.trim() || undefined : undefined,
     };
     await api("/v1/pool", { method: "POST", body: JSON.stringify(payload) });
     $("#cfgMaoMailToken").value = "";
@@ -2426,6 +2586,7 @@ $("#grid").addEventListener("click", async e => {
     e.target.checked ? S.sel.add(id) : S.sel.delete(id);
     $("#selInfo").textContent = S.sel.size ? "已选 " + S.sel.size + " 个" : "";
     $("#btnDelSel").style.display = S.sel.size ? "" : "none";
+  if ($("#btnUploadLiandongSel")) $("#btnUploadLiandongSel").style.display = S.sel.size ? "" : "none";
     return;
   }
   if (e.target.classList.contains("en")) {
@@ -2607,251 +2768,921 @@ $("#btnImportKeysStart").onclick = async () => {
   }
 };
 
+
 /* ---------------- 官方网页端一键登录 ---------------- */
-/* 复制按钮 */
-document.addEventListener("click", e => {
-  const t = e.target.dataset && e.target.dataset.copy;
-  if (!t) return;
-  const txt = document.querySelector(t).textContent;
-  navigator.clipboard.writeText(txt).then(() => toast("已复制：" + txt)).catch(() => toast(txt));
-});
+let WEB_LOGIN_ACCT = null;
+function openWebLogin(acct) {
+  WEB_LOGIN_ACCT = acct;
+  $("#webLoginTitle").textContent = "🌐 登录网页端 · " + (acct.label || acct.id);
+  const sk = acct.sessionKey || "";
+  const script = `document.cookie="sessionKey=${sk}; domain=.claude.ai; path=/; max-age=31536000; Secure; SameSite=Lax"; location.href="https://claude.ai/new";`;
+  $("#webLoginScript").value = script;
+  $("#btnWebLoginLaunch").disabled = false;
+  $("#btnWebLoginLaunch").textContent = "🚀 在默认浏览器 / Chrome 中打开并登录";
+  $("#maskWebLogin").classList.add("on");
+}
+window.closeWebLogin = () => $("#maskWebLogin").classList.remove("on");
+$("#maskWebLogin").addEventListener("click", e => { if (e.target.id === "maskWebLogin") closeWebLogin(); });
 
-/* Esc 关闭弹层 */
-document.addEventListener("keydown", e => {
-  if (e.key === "Escape") { closeAcc(); closeLookup(); closeBatchImport(); if (document.activeElement !== $("#fApi")) showKey(false); }
-});
-$("#maskAcc").addEventListener("click", e => { if (e.target.id === "maskAcc") closeAcc(); });
-
-/* ---------------- API Keys ---------------- */
-let K = { list: [], editId: null };
-
-const fmtDate = ts => {
-  if (!ts) return "永不过期";
-  const d = new Date(ts);
-  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+$("#btnWebLoginLaunch").onclick = async () => {
+  if (!WEB_LOGIN_ACCT) return;
+  const btn = $("#btnWebLoginLaunch");
+  btn.disabled = true;
+  btn.textContent = "正在调起浏览器…";
+  try {
+    const r = await api("/v1/accounts/" + encodeURIComponent(WEB_LOGIN_ACCT.id) + "/web-login", {
+      method: "POST",
+      body: "{}"
+    });
+    toast(r.message || "✅ 已成功打开浏览器并登录！");
+    closeWebLogin();
+  } catch (ex) {
+    toast("调起浏览器失败: " + ex.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🚀 在默认浏览器 / Chrome 中打开并登录";
+  }
 };
 
-async function loadKeys() {
+$("#btnCopyWebScript").onclick = async () => {
+  const v = $("#webLoginScript").value;
   try {
-    const d = await api("/v1/keys");
-    K.list = d.keys || [];
-    $("#kNote").textContent = K.list.length + " 个 Key · 配置 " + (d.config_file || "config.json");
-    renderKeys();
-  } catch (e) { toast("读取 Key 失败: " + e.message, true); }
+    await navigator.clipboard.writeText(v);
+    toast("控制台登录脚本已复制！在 claude.ai 页面按 F12 粘贴回车即可登录");
+  } catch {
+    $("#webLoginScript").select();
+    document.execCommand("copy");
+    toast("控制台登录脚本已复制！");
+  }
+};
+
+// --------------------------------------------- 链动小铺库存上传前端逻辑
+let LD_CURRENT_SOURCE = 'sel'; // 'sel' | 'all' | 'custom'
+let LD_GOODS_LIST = [];
+
+function updateLdContentLinesTip() {
+  const txt = $("#ldUploadContent") ? $("#ldUploadContent").value : "";
+  const lines = txt.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  if ($("#ldContentLinesTip")) $("#ldContentLinesTip").textContent = `共 ${lines.length} 行`;
 }
 
-function renderKeys() {
-  if (!K.list.length) {
-    $("#kRows").innerHTML = '<tr><td colspan="9" class="empty">还没有 Key，点右上「＋ 新建 Key」</td></tr>';
+if ($("#ldUploadContent")) {
+  $("#ldUploadContent").oninput = updateLdContentLinesTip;
+}
+
+function updateLdGoodsPill() {
+  const selId = Number($("#ldSelGoods")?.value);
+  const item = LD_GOODS_LIST.find(g => Number(g.id) === selId);
+  const pill = $("#ldGoodsInfoPill");
+  if (!pill) return;
+  if (!item) {
+    pill.style.display = "none";
     return;
   }
-  $("#kRows").innerHTML = K.list.map(k => {
-    const q = k.quota || {};
-    let state = "可用", color = "#16a34a";
-    if (k.enabled === false) { state = "已停用"; color = "#94a3b8"; }
-    else if (k.expired) { state = "已过期"; color = "#dc2626"; }
-    else if (k.quota_exhausted) { state = "额度用尽"; color = "#dc2626"; }
-    const quota = q.limitTokens > 0
-      ? nfmt(q.usedTokens) + " / " + nfmt(q.limitTokens)
-      : nfmt(q.usedTokens) + " / 不限";
-    const reqLine = q.limitRequests > 0
-      ? '<br><span class="hsub">请求 ' + q.usedRequests + "/" + q.limitRequests + "</span>" : "";
-    return "<tr>" +
-      '<td class="namecell">' + esc(k.name) + (k.role === "admin" ? "（管理）" : "（调用）") + "</td>" +
-      '<td><code style="font-size:11.5px">' + esc(k.key_masked) + "</code></td>" +
-      '<td><b style="color:' + color + '">' + state + "</b></td>" +
-      '<td style="white-space:nowrap">' + quota + reqLine + "</td>" +
-      "<td>" + fmtDate(k.expiresAt) + "</td>" +
-      '<td class="namecell">' + (k.models && k.models.length ? esc(k.models.join(", ")) : "全部") + "</td>" +
-      "<td>" + (k.rpm || "∞") + " / " + (k.tpm || "∞") +
-        '<br><span class="hsub">当前 ' + k.rpm_current + "/" + k.tpm_current + "</span></td>" +
-      '<td class="namecell">' + (k.ipWhitelist && k.ipWhitelist.length ? esc(k.ipWhitelist.join(", ")) : "不限") + "</td>" +
-      '<td style="white-space:nowrap">' +
-        '<button class="btn sm" data-kact="edit" data-id="' + k.id + '">✏️</button> ' +
-        '<button class="btn sm" data-kact="reset" data-id="' + k.id + '" title="清零已用量">↺</button> ' +
-        '<button class="btn sm danger" data-kact="del" data-id="' + k.id + '">🗑</button>' +
-      "</td></tr>";
-  }).join("");
+  pill.style.display = "flex";
+  if ($("#ldPillFullName")) $("#ldPillFullName").textContent = item.name;
+  if ($("#ldPillId")) $("#ldPillId").textContent = item.id;
+  if ($("#ldPillPrice")) $("#ldPillPrice").textContent = item.price;
+  if ($("#ldPillSellCount")) $("#ldPillSellCount").textContent = item.sellCount ?? 0;
+  if ($("#ldPillStock")) $("#ldPillStock").textContent = item.stockCount ?? 0;
 }
 
-function openKey(id) {
-  K.editId = id || null;
-  const k = id ? K.list.find(x => x.id === id) : null;
-  $("#keyTitle").textContent = k ? "编辑 Key" : "新建 Key";
-  $("#kName").value = k ? k.name : "";
-  $("#kLimitTokens").value = k && k.quota.limitTokens ? k.quota.limitTokens : "";
-  $("#kLimitRequests").value = k && k.quota.limitRequests ? k.quota.limitRequests : "";
-  $("#kExpires").value = k && k.expiresAt ? new Date(k.expiresAt).toISOString().slice(0, 10) : "";
-  $("#kModels").value = k && k.models ? k.models.join(",") : "";
-  $("#kRpm").value = k && k.rpm ? k.rpm : "";
-  $("#kTpm").value = k && k.tpm ? k.tpm : "";
-  $("#kIps").value = k && k.ipWhitelist ? k.ipWhitelist.join(",") : "";
-  $("#kEnabledRow").style.display = k ? "" : "none";
-  if (k) $("#kEnabled").checked = k.enabled !== false;
-  $("#maskKeyEdit").classList.add("on");
-  $("#kName").focus();
-}
-window.closeKey = () => $("#maskKeyEdit").classList.remove("on");
-
-async function saveKey() {
-  // 没有 key 就别发请求了：直接弹输入框，表单内容原地保留
-  if (!key()) { showKey(true, "请输入 config.json 中 role 为 admin 的管理 Key"); return; }
-  const body = {
-    name: $("#kName").value.trim() || "未命名",
-    quota: {
-      limitTokens: +$("#kLimitTokens").value || 0,
-      limitRequests: +$("#kLimitRequests").value || 0,
-    },
-    expiresAt: $("#kExpires").value ? new Date($("#kExpires").value + "T23:59:59").getTime() : null,
-    models: $("#kModels").value.split(",").map(s => s.trim()).filter(Boolean),
-    rpm: +$("#kRpm").value || 0,
-    tpm: +$("#kTpm").value || 0,
-    ipWhitelist: $("#kIps").value.split(",").map(s => s.trim()).filter(Boolean),
+if ($("#ldSelGoods")) {
+  $("#ldSelGoods").onchange = () => {
+    updateLdGoodsPill();
   };
-  if (K.editId) body.enabled = $("#kEnabled").checked;
+}
+
+const loadLiandongGoodsList = (...args) => (typeof loadLiandongModalGoods === 'function' ? loadLiandongModalGoods(...args) : Promise.resolve());
+
+async function loadLiandongModalGoods(selectedId) {
+  const sel = $("#ldUploadGoodsId") || $("#ldSelGoods");
+  if (!sel) return;
+  sel.innerHTML = '<option value="">正在获取商品列表...</option>';
   try {
-    if (K.editId) {
-      await api("/v1/keys/" + K.editId, { method: "PATCH", body: JSON.stringify(body) });
-      toast("已保存");
+    const res = await api("/v1/liandong/goods");
+    if (res.ok && Array.isArray(res.list)) {
+      LD_GOODS_LIST = res.list;
+      sel.innerHTML = "";
+      if (!LD_GOODS_LIST.length) {
+        sel.innerHTML = '<option value="">未找到任何商品</option>';
+        if ($("#ldGoodsInfoPill")) $("#ldGoodsInfoPill").style.display = "none";
+        return;
+      }
+      LD_GOODS_LIST.forEach(g => {
+        const opt = document.createElement("option");
+        opt.value = g.id;
+        opt.textContent = `[ID: ${g.id}] ${g.name} — 库存: ${g.stockCount}件 / ￥${g.price}`;
+        opt.title = `${g.name} (商品ID: ${g.id}, 当前库存: ${g.stockCount} 件, 单价: ${g.price} 元)`;
+        if (selectedId && Number(selectedId) === Number(g.id)) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      updateLdGoodsPill();
     } else {
-      const d = await api("/v1/keys", { method: "POST", body: JSON.stringify(body) });
-      const secret = d && d.secret;
-      if (secret) alert("新 Key 已创建 —— 只显示这一次，请立即保存：\n\n" + secret);
-      toast("已创建");
+      sel.innerHTML = `<option value="">获取商品失败: ${res.error || "未登录或Token失效"}</option>`;
     }
-    closeKey();
-    loadKeys();
-  } catch (e) { toast("保存失败: " + e.message, true); }
-}
-
-$("#btnKeyNew").onclick = () => openKey(null);
-$("#btnKeyRefresh").onclick = () => loadKeys().then(() => toast("已刷新"));
-$("#btnKeyEditSave").onclick = saveKey;
-$("#maskKeyEdit").addEventListener("click", e => { if (e.target.id === "maskKeyEdit") closeKey(); });
-$("#kRows").addEventListener("click", async e => {
-  const btn = e.target.closest("[data-kact]");
-  if (!btn) return;
-  const { kact, id } = btn.dataset;
-  const k = K.list.find(x => x.id === id);
-  if (kact === "edit") return openKey(id);
-  if (kact === "reset") {
-    if (!confirm("把「" + (k ? k.name : id) + "」的已用额度清零？")) return;
-    try { await api("/v1/keys/" + id + "/reset", { method: "POST" }); toast("已清零"); loadKeys(); }
-    catch (err) { toast("清零失败: " + err.message, true); }
-    return;
-  }
-  if (kact === "del") {
-    if (!confirm("删除「" + (k ? k.name : id) + "」？用这个 Key 的客户端会立即失效。")) return;
-    try { await api("/v1/keys/" + id, { method: "DELETE" }); toast("已删除"); loadKeys(); }
-    catch (err) { toast("删除失败: " + err.message, true); }
-  }
-});
-
-/* ---------------- 操作审计日志 ---------------- */
-let OP_STATE = {
-  category: "",
-  status: "",
-  q: "",
-  timer: null,
-};
-
-async function loadOperations() {
-  try {
-    const q = new URLSearchParams();
-    if (OP_STATE.category) q.set("category", OP_STATE.category);
-    if (OP_STATE.status) q.set("status", OP_STATE.status);
-    if (OP_STATE.q) q.set("q", OP_STATE.q);
-    q.set("limit", "150");
-
-    const res = await api("/v1/operations?" + q.toString());
-    renderOperations(res);
-  } catch (ex) {
-    if (S.tab === "ops") toast("获取操作日志失败: " + ex.message, true);
+  } catch (e) {
+    sel.innerHTML = `<option value="">请求异常: ${e.message}</option>`;
   }
 }
 
-function renderOperations(data) {
-  const stats = data.stats || {};
-  $("#opStatTotal").textContent = nfmt(stats.total || 0);
-  $("#opStatToday").textContent = nfmt(stats.today || 0);
-  $("#opStatSuccess").textContent = nfmt(stats.success || 0);
-  $("#opStatFailed").textContent = nfmt(stats.failed || 0);
+if ($("#btnRefreshLdGoods")) {
+  $("#btnRefreshLdGoods").onclick = () => loadLiandongModalGoods($("#ldSelGoods")?.value);
+}
 
-  const tbody = $("#opTableBody");
-  const items = data.items || [];
-  if (!items.length) {
-    tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 36px; color: #94a3b8;">暂无符合条件的操作日志</td></tr>`;
-    return;
-  }
-
-  const catColors = {
-    "登录认证": "#6366f1",
-    "账号管理": "#0284c7",
-    "客户端调起": "#8b5cf6",
-    "额度风控": "#f59e0b",
-    "凭据密钥": "#10b981",
-    "系统配置": "#64748b",
+if ($("#btnToggleLdLoginArea")) {
+  $("#btnToggleLdLoginArea").onclick = () => {
+    const f = $("#ldModalLoginForm");
+    if (f) f.style.display = f.style.display === "none" ? "block" : "none";
   };
-
-  tbody.innerHTML = items.map(it => {
-    const isOk = it.status === "success";
-    const catCol = catColors[it.category] || "#64748b";
-    return `<tr style="border-bottom: 1px solid #f1f5f9; transition: background 0.15s;" onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background=''">
-      <td style="padding: 9px 14px; font-family: monospace; font-size: 11.5px; color: #64748b;">${esc(it.time)}</td>
-      <td style="padding: 9px 12px;">
-        <span style="display:inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; background: ${catCol}15; color: ${catCol}; border: 1px solid ${catCol}30;">
-          ${esc(it.category)}
-        </span>
-      </td>
-      <td style="padding: 9px 12px; font-weight: 600; color: #1e293b;">${esc(it.action)}</td>
-      <td style="padding: 9px 14px; color: #334155; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${esc(it.target)}">
-        <code style="font-size: 11.5px; background: #f1f5f9; padding: 2px 5px; border-radius: 4px;">${esc(it.target)}</code>
-      </td>
-      <td style="padding: 9px 10px; text-align: center;">
-        <span class="chip ${isOk ? "ok" : "err"}" style="padding: 2px 7px; font-size: 11px;">${isOk ? "成功" : "失败"}</span>
-      </td>
-      <td style="padding: 9px 14px; color: ${isOk ? "#475569" : "#dc2626"}; line-height: 1.4; word-break: break-all;">
-        ${esc(it.detail || "—")}
-      </td>
-      <td style="padding: 9px 12px; font-family: monospace; font-size: 11px; color: #94a3b8;">${esc(it.ip || "127.0.0.1")}</td>
-    </tr>`;
-  }).join("");
 }
 
-$("#tabOps").onclick = () => switchTab("ops");
-$("#btnOpRefresh").onclick = () => loadOperations().then(() => toast("操作日志已刷新"));
-$("#opCategory").onchange = e => { OP_STATE.category = e.target.value; loadOperations(); };
-$("#opStatus").onchange = e => { OP_STATE.status = e.target.value; loadOperations(); };
-$("#opSearch").oninput = e => {
-  clearTimeout(OP_STATE.timer);
-  OP_STATE.timer = setTimeout(() => {
-    OP_STATE.q = e.target.value.trim();
-    loadOperations();
-  }, 300);
-};
-$("#btnOpClear").onclick = async () => {
-  if (!confirm("确定要清空全部操作审计日志吗？此操作不可逆。")) return;
-  try {
-    await api("/v1/operations/clear", { method: "POST" });
-    toast("操作日志已清空");
-    loadOperations();
-  } catch (ex) {
-    toast("清空失败: " + ex.message, true);
-  }
-};
+if ($("#ldSelectRegisterDate")) $("#ldSelectRegisterDate").onchange = onLiandongDateChanged;
+if ($("#btnFillSelectedDateCards")) $("#btnFillSelectedDateCards").onclick = () => fillSelectedDateCardsToBox(true);
+if ($("#btnUploadSelectedDateDirect")) $("#btnUploadSelectedDateDirect").onclick = uploadSelectedDateDirect;
+if ($("#btnRefreshDateSummary")) $("#btnRefreshDateSummary").onclick = loadLiandongDatesSummary;
+if ($("#chkLdAutoUploadOnRegister")) {
+  $("#chkLdAutoUploadOnRegister").onchange = (e) => toggleLiandongAutoUploadConfig(e.target.checked);
+}
 
-/* ---------------- 启动 ---------------- */
-(async function boot() {
-  $("#cfgConc").value = 3; $("#cfgThr").value = 20;
+if ($("#btnDoLdModalLogin")) {
+  $("#btnDoLdModalLogin").onclick = async () => {
+    const u = ($("#ldLoginUser")?.value || "").trim();
+    const p = ($("#ldLoginPwd")?.value || "").trim();
+    const tip = $("#ldModalLoginTip");
+    const btn = $("#btnDoLdModalLogin");
+    if (!u || !p) return toast("请输入商户账号和密码", true);
+
+    btn.disabled = true;
+    if (tip) { tip.style.color = "var(--sub)"; tip.textContent = "正在登录链动小铺..."; }
+
+    try {
+      const res = await api("/v1/liandong/login", {
+        method: "POST",
+        body: JSON.stringify({ username: u, password: p }),
+      });
+      if (res.ok) {
+        toast("🎉 链动小铺登录成功！凭据与商品已自动保存");
+        if (tip) { tip.style.color = "#059669"; tip.textContent = "✓ 登录成功"; }
+        if ($("#ldModalLoginForm")) $("#ldModalLoginForm").style.display = "none";
+        // 并行立即加载，零阻塞
+  loadLiandongDatesSummary();
+  loadLiandongAutoUploadConfig();
+  await loadLiandongModalConfig();
+      } else {
+        toast("❌ " + (res.error || "登录失败"), true);
+        if (tip) { tip.style.color = "#dc2626"; tip.textContent = "✗ " + (res.error || "登录失败"); }
+      }
+    } catch (e) {
+      toast("❌ " + e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+
+async function loadLiandongModalConfig() {
   try {
-    await load(false);
-    const st = S.status;
-    if (st) { $("#cfgStrategy").value = st.strategy;
-      $("#cfgConc").value = st.per_account_concurrency;
-      $("#cfgThr").value = Math.round((st.min_quota_remaining ?? .2) * 100); }
-  } catch { showKey(true); }
-  startPoll();
-})();
+    const res = await api("/v1/liandong/config");
+    if (res.ok && res.config) {
+      const cfg = res.config;
+      if ($("#ldCfgToken")) $("#ldCfgToken").value = cfg.merchantToken || "";
+      if ($("#ldCfgFirst")) $("#ldCfgFirst").value = String(cfg.first ?? 0);
+      if ($("#ldCfgCookie")) $("#ldCfgCookie").value = cfg.cookie || "";
+      if ($("#ldLoginUser") && cfg.username) $("#ldLoginUser").value = cfg.username;
+
+      // 渲染商户身份
+      const badge = $("#ldModalLoginBadge");
+      const name = $("#ldModalUserName");
+      const details = $("#ldModalUserDetails");
+
+      if (cfg.userInfo) {
+        if (badge) { badge.style.background = "rgba(16,185,129,0.15)"; badge.style.color = "#059669"; badge.textContent = "✓ 已登录"; }
+        if (name) name.textContent = `👤 ${cfg.userInfo.nickname || cfg.userInfo.username || "商户用户"}`;
+        if (details) details.textContent = `(ID: ${cfg.userInfo.id || "-"}, 账号: ${cfg.userInfo.username || "-"})`;
+      } else if (cfg.merchantToken) {
+        if (badge) { badge.style.background = "rgba(59,130,246,0.15)"; badge.style.color = "#2563eb"; badge.textContent = "Token 有效"; }
+        if (name) name.textContent = "👤 已配置商户 Token";
+        if (details) details.textContent = `(${cfg.merchantToken.slice(0, 8)}...)`;
+      } else {
+        if (badge) { badge.style.background = "rgba(148,163,184,0.15)"; badge.style.color = "#94a3b8"; badge.textContent = "未登录"; }
+        if (name) name.textContent = "尚未登录链动小铺商户";
+        if (details) details.textContent = "请点击右侧「登录」或在下方输入 Token";
+      }
+
+      // 获取所有商品列表
+      await loadLiandongModalGoods(cfg.goodsId);
+    }
+  } catch (err) {
+    console.warn("加载链动小铺配置失败:", err);
+  }
+}
+
+async function saveLiandongModalConfig() {
+  const tip = $("#ldStatusTip");
+  if (tip) tip.textContent = "正在保存配置…";
+  try {
+    const payload = {
+      merchantToken: ($("#ldCfgToken")?.value || "").trim(),
+      goodsId: Number($("#ldSelGoods")?.value) || undefined,
+      first: Number($("#ldCfgFirst")?.value) || 0,
+      cookie: ($("#ldCfgCookie")?.value || "").trim(),
+    };
+    const res = await api("/v1/liandong/config/save", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      toast("✅ 链动小铺配置保存成功！");
+      if (tip) tip.textContent = "✓ 配置已保存";
+      await loadLiandongModalGoods(payload.goodsId);
+    } else {
+      toast("❌ " + (res.error || "保存失败"), true);
+      if (tip) tip.textContent = "✗ 保存失败: " + (res.error || "未知");
+    }
+  } catch (e) {
+    toast("❌ " + e.message, true);
+  }
+}
+if ($("#btnSaveLiandongCfgModal")) $("#btnSaveLiandongCfgModal").onclick = saveLiandongModalConfig;
+
+async function doLdInventoryCompareAndFill(explicitKeys = null) {
+  const box = $("#ldUploadContent");
+  const banner = $("#ldCompareBanner");
+  const bannerText = $("#ldCompareBannerText");
+
+  let keys = [];
+  if (Array.isArray(explicitKeys)) {
+    keys = explicitKeys;
+  } else if (LD_CURRENT_SOURCE === "sel") {
+    const ids = Array.from(S.sel);
+    if (!ids.length) {
+      if (box) box.value = "";
+      updateLdContentLinesTip();
+      if (banner) banner.style.display = "none";
+      return;
+    }
+    try {
+      const r = await api("/v1/liandong/cards?mode=selected&ids=" + encodeURIComponent(ids.join(",")));
+      keys = (r.cards || []).filter(Boolean);
+    } catch (e) {
+      if (box) box.value = "读取所选账号失败: " + e.message;
+      return;
+    }
+  } else if (LD_CURRENT_SOURCE === "all") {
+    try {
+      const r = await api("/v1/liandong/cards?mode=all");
+      keys = (r.cards || []).filter(Boolean);
+    } catch (e) {
+      if (box) box.value = "读取全部有效账号失败: " + e.message;
+      return;
+    }
+  } else {
+    // 手动输入模式：从编辑框现有内容提取
+    const curVal = box ? box.value : "";
+    keys = curVal.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  }
+
+  // 本地去重清洗
+  const rawCount = keys.length;
+  keys = Array.from(new Set(keys.map(k => String(k || '').trim()).filter(Boolean)));
+
+  if (!keys.length) {
+    if (box) box.value = "";
+    updateLdContentLinesTip();
+    if (banner) banner.style.display = "none";
+    return;
+  }
+
+  if (box) {
+    box.value = keys.join("\n");
+    updateLdContentLinesTip();
+  }
+
+  if (banner) {
+    banner.style.display = "flex";
+    banner.style.background = "#f0fdf4";
+    banner.style.border = "1px solid #bbf7d0";
+    banner.style.color = "#15803d";
+    const dupNotice = rawCount > keys.length ? `（已过滤 ${rawCount - keys.length} 个重复项）` : "";
+    bannerText.innerHTML = `<span>✅ <b>已就绪 ${keys.length} 个账号 SessionKey${dupNotice}</b>，已自动本地去重。点击下方「🚀 确认添加库存到小铺」平台将自动排重入库！</span>`;
+  }
+}
+
+async function switchLdSourceTab(type) {
+  LD_CURRENT_SOURCE = type;
+  const tabSel = $("#tabLdSourceSel");
+  const tabAll = $("#tabLdSourceAll");
+  const tabCustom = $("#tabLdSourceCustom");
+  const box = $("#ldUploadContent");
+  const label = $("#ldContentLabel");
+  const resBox = $("#ldResultBox");
+  const banner = $("#ldCompareBanner");
+  const bannerText = $("#ldCompareBannerText");
+  if (resBox) resBox.style.display = "none";
+
+  tabSel?.classList.remove("primary");
+  tabAll?.classList.remove("primary");
+  tabCustom?.classList.remove("primary");
+
+  if (type === "sel") {
+    tabSel?.classList.add("primary");
+    if (label) label.textContent = "已勾选账号 (已自动本地去重)：";
+    box.readOnly = false;
+    const ids = Array.from(S.sel);
+    if (!ids.length) {
+      box.value = "";
+      updateLdContentLinesTip();
+      if (banner) banner.style.display = "none";
+      return toast("未勾选任何账号，已清空内容", true);
+    }
+    await doLdInventoryCompareAndFill();
+  } else if (type === "all") {
+    tabAll?.classList.add("primary");
+    if (label) label.textContent = "账号池全部有效账号 (已自动本地去重)：";
+    box.readOnly = false;
+    await doLdInventoryCompareAndFill();
+  } else {
+    tabCustom?.classList.add("primary");
+    if (label) label.textContent = "手动输入 / 粘贴 sessionKey（每行一个）：";
+    box.readOnly = false;
+    box.focus();
+    updateLdContentLinesTip();
+    if (banner) {
+      banner.style.display = "flex";
+      banner.style.background = "#f8fafc";
+      banner.style.border = "1px solid #e2e8f0";
+      banner.style.color = "#64748b";
+      bannerText.innerHTML = `<span>✍️ 手动输入模式：粘贴或输入卡密后，点击右侧「重新去重提取」可自动完成本地去重。</span>`;
+    }
+  }
+}
+
+if ($("#tabLdSourceSel")) $("#tabLdSourceSel").onclick = () => switchLdSourceTab("sel");
+if ($("#tabLdSourceAll")) $("#tabLdSourceAll").onclick = () => switchLdSourceTab("all");
+if ($("#tabLdSourceCustom")) $("#tabLdSourceCustom").onclick = () => switchLdSourceTab("custom");
+if ($("#btnReCompareLdInventory")) $("#btnReCompareLdInventory").onclick = () => doLdInventoryCompareAndFill();
+
+let LIANDONG_DATES_CACHE = [];
+
+async function loadLiandongDatesSummary() {
+  const selDate = $("#ldSelectRegisterDate");
+  const tip = $("#ldSelectedDateStatusTip");
+  if (!selDate) return;
+  selDate.innerHTML = '<option value="">正在分析账号池注册日期与小铺商品匹配度…</option>';
+
+  try {
+    const res = await api("/v1/liandong/dates-summary");
+    if (!res.ok || !Array.isArray(res.dates)) {
+      selDate.innerHTML = '<option value="">加载注册日期失败</option>';
+      return;
+    }
+    LIANDONG_DATES_CACHE = res.dates;
+    if (res.dates.length === 0) {
+      selDate.innerHTML = '<option value="">本地账号池中暂无可上传的未售出账号</option>';
+      if (tip) tip.textContent = "提示：账号池中没有未售出账号，绝不创建空商品。";
+      return;
+    }
+
+    const todayStr = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10).replace(/-/g, '/');
+
+    selDate.innerHTML = res.dates.map(d => {
+      const isToday = d.dateStr === todayStr;
+      const tag = isToday ? '【今日新号】' : '【往日历史】';
+      const g = d.matchedGoods;
+      const gInfo = g ? `[ID:${g.id}] ￥${g.price}` : '未建商品(点击一键自动创建)';
+      const total = d.total || 0;
+      const pending = d.pendingCount != null ? d.pendingCount : total;
+      const statusText = pending > 0 ? `待上架 ${pending} 张` : '已全部在库';
+      return `<option value="${d.dateStr}">${tag} ${d.dateStr} 注册 (${total}个账号 · ${gInfo} · ${statusText})</option>`;
+    }).join('');
+
+    await onLiandongDateChanged();
+  } catch (err) {
+    selDate.innerHTML = `<option value="">加载失败: ${err.message}</option>`;
+  }
+}
+
+async function onLiandongDateChanged() {
+  const selDate = $("#ldSelectRegisterDate");
+  const tip = $("#ldSelectedDateStatusTip");
+  if (!selDate || !tip) return;
+  const dStr = selDate.value;
+  if (!dStr) { tip.textContent = ""; return; }
+
+  const d = LIANDONG_DATES_CACHE.find(x => x.dateStr === dStr);
+  if (!d) return;
+
+  const g = d.matchedGoods;
+  const total = d.total || 0;
+  const pending = d.pendingCount != null ? d.pendingCount : total;
+
+  if (g) {
+    tip.innerHTML = `✅ 已精准匹配小铺现有商品：<b>[${g.id}] ${esc(g.name)}</b> (单价: ￥${g.price}) · 该日期共 <b>${total}</b> 个账号，其中 <b>${pending}</b> 张待上传。`;
+  } else {
+    tip.innerHTML = `💡 检测到小铺尚无 <b>${dStr}</b> 商品。若点击上方绿色按钮，系统将<b>按模板自动创建当天商品并直接灌入库存</b>（新号 2.00 元，历史每日+0.50元，封顶 10.00 元）。`;
+  }
+
+  // 自动将选定日期的账号提取并填入卡密框（格式：Email：...----SessionKey：...）
+  await fillSelectedDateCardsToBox(false);
+}
+
+async function fillSelectedDateCardsToBox(silentToast = true) {
+  const selDate = $("#ldSelectRegisterDate");
+  const dStr = selDate?.value;
+  if (!dStr) return;
+
+  try {
+    const res = await api("/v1/liandong/cards?mode=date&date=" + encodeURIComponent(dStr));
+    if (!res.ok || !Array.isArray(res.cards)) throw new Error(res.error || "获取账号列表失败");
+
+    const cards = res.cards;
+    if (!cards.length) {
+      if (!silentToast) toast(`未找到注册日期为 ${dStr} 的有效未售出账号`, true);
+      return;
+    }
+
+    const box = $("#ldUploadContent");
+    if (box) {
+      box.value = cards.join("\n");
+      updateLdContentLinesTip();
+      if (!silentToast) toast(`已成功载入 ${dStr} 的 ${cards.length} 张卡密！`);
+    }
+  } catch (err) {
+    if (!silentToast) toast("提取卡密失败: " + err.message, true);
+  }
+}
+
+async function uploadSelectedDateDirect() {
+  const selDate = $("#ldSelectRegisterDate");
+  const dStr = selDate?.value;
+  if (!dStr) return toast("请先选择账号注册日期", true);
+
+  const dCache = LIANDONG_DATES_CACHE.find(x => x.dateStr === dStr);
+  const accN = dCache ? (dCache.total || 0) : 0;
+  if (accN === 0) {
+    return toast(`该日期（${dStr}）在账号池中无未售账号，绝不创建空商品！`, true);
+  }
+
+  const btn = $("#btnUploadSelectedDateDirect");
+  const oldText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "⏳ 正在匹配商品并上传库存…";
+
+  try {
+    const res = await api("/v1/liandong/upload-by-date", {
+      method: "POST",
+      body: JSON.stringify({ dateStr: dStr })
+    });
+    if (res.ok) {
+      const g = res.goods || {};
+      const uploaded = res.uploadedCount != null ? res.uploadedCount : (res.result?.success || 0);
+      const skipped = res.skippedCount != null ? res.skippedCount : 0;
+      const createdNote = res.isNewCreated ? "（已自动按模板新建商品）" : "（已关联已有商品）";
+      toast(res.msg || `🎉 上传成功！商品：[${g.id}] ${g.name} ${createdNote}，成功添加 ${uploaded} 张卡密（跳过已在库 ${skipped} 张）！`);
+      await loadLiandongDatesSummary();
+      if (typeof loadLiandongModalGoods === 'function') await loadLiandongModalGoods();
+    } else {
+      toast("上传失败: " + (res.error || res.message || "未知错误"), true);
+    }
+  } catch (err) {
+    toast("上传异常: " + err.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = oldText;
+  }
+}
+
+async function loadLiandongAutoUploadConfig() {
+  const chk = $("#chkLdAutoUploadOnRegister");
+  if (!chk) return;
+  try {
+    const res = await api("/v1/liandong/auto-upload-config");
+    if (res.ok) {
+      chk.checked = !!res.autoUploadOnRegister;
+    }
+  } catch {}
+}
+
+async function toggleLiandongAutoUploadConfig(enabled) {
+  try {
+    const res = await api("/v1/liandong/auto-upload-config", {
+      method: "POST",
+      body: JSON.stringify({ enabled })
+    });
+    if (res.ok) {
+      toast(enabled ? "⚡ 已开启：新账号注册入池时自动创建当天商品并上架" : "已关闭自动入池上架联动");
+    }
+  } catch (err) {
+    toast("切换自动上架配置失败: " + err.message, true);
+  }
+}
+
+async function openLiandongModal(defaultSource = "sel") {
+  const selN = S.sel.size;
+  if ($("#ldSelCount")) $("#ldSelCount").textContent = selN;
+  if ($("#ldResultBox")) $("#ldResultBox").style.display = "none";
+  if ($("#ldStatusTip")) $("#ldStatusTip").textContent = "";
+  $("#maskLiandong").classList.add("on");
+
+  // 并行立即拉取日期分组统计、自动同步配置与商品列表
+  loadLiandongDatesSummary();
+  loadLiandongAutoUploadConfig();
+  await loadLiandongModalConfig();
+  if (defaultSource === "sel" && !selN) {
+    defaultSource = "all";
+  }
+  await switchLdSourceTab(defaultSource);
+}
+
+function closeLiandongModal() {
+  $("#maskLiandong").classList.remove("on");
+}
+
+if ($("#btnLiandongModal")) $("#btnLiandongModal").onclick = () => openLiandongModal("sel");
+if ($("#btnUploadLiandongSel")) $("#btnUploadLiandongSel").onclick = () => openLiandongModal("sel");
+
+if ($("#btnLiandongUploadGo")) {
+  $("#btnLiandongUploadGo").onclick = async () => {
+    const btn = $("#btnLiandongUploadGo");
+    const tip = $("#ldStatusTip");
+    const resBox = $("#ldResultBox");
+    const content = ($("#ldUploadContent")?.value || "").trim();
+    const token = ($("#ldCfgToken")?.value || "").trim();
+    const goodsId = Number($("#ldSelGoods")?.value);
+    const first = Number($("#ldCfgFirst")?.value) || 0;
+    const cookie = ($("#ldCfgCookie")?.value || "").trim();
+
+    if (!goodsId) return toast("请选择要加库存的目标商品", true);
+    if (!content) return toast("待上传卡密内容不能为空（可能所选账号已全部在库）", true);
+
+    btn.disabled = true;
+    if (tip) tip.textContent = "正在上传到链动小铺库存…";
+    if (resBox) resBox.style.display = "none";
+
+    try {
+      const payload = {
+        content,
+        merchantToken: token,
+        goodsId,
+        first,
+        cookie,
+      };
+      const res = await api("/v1/liandong/upload", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) {
+        toast("🎉 " + (res.msg || "卡密库存添加成功！"));
+        if (tip) tip.textContent = "✓ 加库存完成";
+        if (resBox) {
+          resBox.style.display = "block";
+          resBox.style.background = "rgba(16, 185, 129, 0.15)";
+          resBox.style.color = "#059669";
+          resBox.style.border = "1px solid rgba(16, 185, 129, 0.3)";
+          const newStockInfo = res.goodsInfo ? `<br><b>📦 该商品最新可用库存: ${res.goodsInfo.stockCount} 件</b>` : "";
+          resBox.innerHTML = `<b>🎉 加库存成功！</b><br>${res.msg || "添加成功"}${newStockInfo}<br><span style="font-size:11.5px;color:var(--sub)">本次已入库 ${res.uploadedCount} 张卡密</span>`;
+        }
+        // 自动更新商品列表与库存数值
+        await loadLiandongModalGoods(goodsId);
+        // 上传完成后清空输入框并显示完成提示
+        if (box) {
+          box.value = "";
+          updateLdContentLinesTip();
+        }
+        if (banner) {
+          banner.style.display = "flex";
+          banner.style.background = "#f0fdf4";
+          banner.style.border = "1px solid #bbf7d0";
+          banner.style.color = "#15803d";
+          bannerText.innerHTML = `<span>🎉 <b>添加库存完成！</b> 本次已上传卡密入库，商品库存已自动刷新。</span>`;
+        }
+      } else {
+        toast("❌ " + (res.error || res.msg || "添加库存失败"), true);
+        if (tip) tip.textContent = "✗ 加库存失败";
+        if (resBox) {
+          resBox.style.display = "block";
+          resBox.style.background = "rgba(239, 68, 68, 0.15)";
+          resBox.style.color = "#dc2626";
+          resBox.style.border = "1px solid rgba(239, 68, 68, 0.3)";
+          resBox.innerHTML = `<b>❌ 添加库存失败</b><br>${res.error || res.msg || "未知错误"}`;
+        }
+      }
+    } catch (err) {
+      toast("❌ " + err.message, true);
+      if (tip) tip.textContent = "✗ 错误: " + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+
+/* ---------------- 链动小铺库存体检与格式规范 ---------------- */
+if ($("#btnValidateAndPruneLdStorage")) {
+  $("#btnValidateAndPruneLdStorage").onclick = async () => {
+    const isAll = $("#chkLdCheckAllGoods") ? $("#chkLdCheckAllGoods").checked : true;
+    const targetGoodsId = $("#ldUploadGoodsId")?.value;
+    const scopeName = isAll ? "小铺所有卡密类商品的全部库存" : ("当前选定商品 [ID:" + (targetGoodsId || "默认") + "]");
+
+    if (!confirm("确定要对【" + scopeName + "】进行有效性检测吗？\n\n【检测规则】：\n1. 系统将提取库存中的每个 SessionKey 并向 Claude 校验存活状态。\n2. 若检测到已失效（401过期 / 403被封禁 / 账号注销），将自动从商品库存中彻底删除，杜绝卖出死号！\n3. 检测为只读安全探测，不消耗对话额度。")) {
+      return;
+    }
+
+    const btn = $("#btnValidateAndPruneLdStorage");
+    const statusBox = $("#ldHealthStatusBox");
+    btn.disabled = true;
+    const oldText = btn.textContent;
+    btn.textContent = "⏳ 正在检测并剔除失效卡密…";
+
+    if (statusBox) {
+      statusBox.style.display = "block";
+      statusBox.style.background = "#fffbeb";
+      statusBox.style.borderColor = "#fcd34d";
+      statusBox.style.color = "#b45309";
+      statusBox.innerHTML = "<span>⏳ <b>正在全方位检测库存卡密有效性…</b> 正在连接 Claude API 逐一验证凭据状态，请耐心等待（通常需几秒至几十秒）…</span>";
+    }
+
+    try {
+      const res = await api("/v1/liandong/validate-and-prune-storage", {
+        method: "POST",
+        body: JSON.stringify({
+          goodsId: isAll ? "all" : targetGoodsId,
+          prune: true,
+        }),
+      });
+
+      if (res.ok) {
+        toast("✅ 检测完成！有效: " + res.validCount + " 条，已剔除失效: " + res.deletedCount + " 条");
+        if (statusBox) {
+          statusBox.style.background = res.invalidCount > 0 ? "#fef2f2" : "#f0fdf4";
+          statusBox.style.borderColor = res.invalidCount > 0 ? "#fecaca" : "#bbf7d0";
+          statusBox.style.color = res.invalidCount > 0 ? "#991b1b" : "#166534";
+          statusBox.innerHTML =
+            "<b>" + (res.invalidCount > 0 ? "⚠️ 检测与清理报告" : "✅ 全部在库账号健康！") + "</b><br>" +
+            res.msg + "<br>" +
+            '<div style="margin-top:6px;font-size:11.5px">' +
+              '<span style="color:#16a34a;font-weight:600">● 有效在库: ' + res.validCount + ' 张</span> &nbsp;|&nbsp; ' +
+              '<span style="color:#dc2626;font-weight:600">● 已发现失效并删除: ' + res.deletedCount + ' 张</span>' +
+              (res.skippedCount ? (' &nbsp;|&nbsp; <span style="color:#d97706">● 网络超时保留: ' + res.skippedCount + ' 张</span>') : '') +
+            '</div>';
+        }
+        await loadLiandongDatesSummary();
+        if (typeof loadLiandongModalGoods === 'function') await loadLiandongModalGoods();
+      } else {
+        toast("❌ 检测失败: " + (res.error || res.message || "未知错误"), true);
+        if (statusBox) {
+          statusBox.style.background = "#fef2f2";
+          statusBox.style.borderColor = "#fecaca";
+          statusBox.style.color = "#dc2626";
+          statusBox.innerHTML = "<b>❌ 检测异常</b>: " + (res.error || "请求失败");
+        }
+      }
+    } catch (err) {
+      toast("❌ 检测出错: " + err.message, true);
+      if (statusBox) {
+        statusBox.style.background = "#fef2f2";
+        statusBox.style.borderColor = "#fecaca";
+        statusBox.style.color = "#dc2626";
+        statusBox.innerHTML = "<b>❌ 请求出错</b>: " + err.message;
+      }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = oldText;
+    }
+  };
+}
+
+if ($("#btnFillEmailsAndUpdateStorage")) {
+  $("#btnFillEmailsAndUpdateStorage").onclick = async () => {
+    const isAll = $("#chkLdCheckAllGoods") ? $("#chkLdCheckAllGoods").checked : true;
+    const targetGoodsId = $("#ldUploadGoodsId")?.value;
+    const scopeName = isAll ? "小铺所有卡密类商品的全部库存" : ("当前选定商品 [ID:" + (targetGoodsId || "默认") + "]");
+
+    if (!confirm("确定要对【" + scopeName + "】执行【邮箱自动补齐与格式规范化】吗？\n\n【处理流程】：\n1. 系统将找出库存中未包含邮箱的纯 SessionKey 卡密。\n2. 自动模拟 Web 端免密查询绑定的官方真实注册邮箱。\n3. 按标准格式规范更新回小铺库存：\n   Email：xxxx@xx.com----SessionKey：sk-ant-sid02-...\n4. 同时自动剔除其中已失效的死号！")) {
+      return;
+    }
+
+    const btn = $("#btnFillEmailsAndUpdateStorage");
+    const statusBox = $("#ldHealthStatusBox");
+    btn.disabled = true;
+    const oldText = btn.textContent;
+    btn.textContent = "⏳ 正在通过 Web 端补齐邮箱并更新…";
+
+    if (statusBox) {
+      statusBox.style.display = "block";
+      statusBox.style.background = "#f0f9ff";
+      statusBox.style.borderColor = "#bae6fd";
+      statusBox.style.color = "#0369a1";
+      statusBox.innerHTML = "<span>⏳ <b>正在免密向 Claude Web 端获取邮箱信息…</b> 正在分析并规范重构在库卡密，请稍候…</span>";
+    }
+
+    try {
+      const res = await api("/v1/liandong/fill-emails-and-update-storage", {
+        method: "POST",
+        body: JSON.stringify({
+          goodsId: isAll ? "all" : targetGoodsId,
+          pruneInvalid: true,
+        }),
+      });
+
+      if (res.ok) {
+        toast("🎉 规范更新完成！已更新: " + res.updatedCount + " 条，原有标准: " + res.alreadyFormattedCount + " 条");
+        if (statusBox) {
+          statusBox.style.background = "#f0fdf4";
+          statusBox.style.borderColor = "#bbf7d0";
+          statusBox.style.color = "#166534";
+          statusBox.innerHTML =
+            "<b>🎉 邮箱补齐与规范更新报告</b><br>" +
+            res.msg + "<br>" +
+            '<div style="margin-top:6px;font-size:11.5px">' +
+              '<span style="color:#0284c7;font-weight:600">● 成功补齐邮箱并规范更新: ' + res.updatedCount + ' 张</span> &nbsp;|&nbsp; ' +
+              '<span style="color:#16a34a">● 原有标准格式: ' + res.alreadyFormattedCount + ' 张</span>' +
+              (res.deletedInvalidCount ? (' &nbsp;|&nbsp; <span style="color:#dc2626">● 顺便清理失效死号: ' + res.deletedInvalidCount + ' 张</span>') : '') +
+            '</div>';
+        }
+        await loadLiandongDatesSummary();
+        if (typeof loadLiandongModalGoods === 'function') await loadLiandongModalGoods();
+      } else {
+        toast("❌ 更新失败: " + (res.error || res.message || "未知错误"), true);
+        if (statusBox) {
+          statusBox.style.background = "#fef2f2";
+          statusBox.style.borderColor = "#fecaca";
+          statusBox.style.color = "#dc2626";
+          statusBox.innerHTML = "<b>❌ 格式更新失败</b>: " + (res.error || "请求失败");
+        }
+      }
+    } catch (err) {
+      toast("❌ 更新出错: " + err.message, true);
+      if (statusBox) {
+        statusBox.style.background = "#fef2f2";
+        statusBox.style.borderColor = "#fecaca";
+        statusBox.style.color = "#dc2626";
+        statusBox.innerHTML = "<b>❌ 请求出错</b>: " + err.message;
+      }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = oldText;
+    }
+  };
+}
+
+if ($("#btnWebLoginWithKey")) {
+  $("#btnWebLoginWithKey").onclick = () => {
+    const key = prompt("请输入要免密登录的 SessionKey（以 sk-ant-sid02- 开头，亦可直接粘贴整行卡密）：");
+    if (!key) return;
+    const m = key.match(/(sk-ant-sid02-[a-zA-Z0-9_-]+)/);
+    if (!m) return toast("未识别到有效的 sk-ant-sid02- 格式密钥", true);
+    openWebLogin({
+      id: "manual",
+      label: "手动免密登录",
+      sessionKey: m[1],
+    });
+  };
+}
+
+// ==================== 肥猫猫流水线模式前端逻辑 ====================
+let PIPELINE_POLL_TIMER = null;
+
+function renderPipelineUI(p) {
+  if (!p) return;
+  const sec = $("#secPipelineLive");
+  const txtStat = $("#txtPipelineStatus");
+  const txtProg = $("#txtPipelineProgress");
+  const bar = $("#barPipelineProgress");
+  const txtDetail = $("#txtPipelineDetail");
+  const btnStart = $("#btnPipelineStart");
+  const btnCancel = $("#btnPipelineCancel");
+  const inputCount = $("#inputPipelineCount");
+  const tbody = $("#tbodyPipelineItems");
+
+  // 渲染每个流水线账号明细
+  if (tbody && Array.isArray(p.items)) {
+    if (p.items.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:8px;color:#047857">暂无流水线记录</td></tr>';
+    } else {
+      tbody.innerHTML = p.items.map(it => {
+        let badge = '<span class="badge" style="background:#e0e7ff;color:#4338ca">准备中</span>';
+        if (it.state === 'creating') badge = '<span class="badge" style="background:#fef3c7;color:#b45309">申请邮箱中</span>';
+        else if (it.state === 'logging_in') badge = '<span class="badge" style="background:#dbeafe;color:#1d4ed8">自动登录中</span>';
+        else if (it.state === 'success') badge = '<span class="badge" style="background:#d1fae5;color:#047857">✅ 成功入池</span>';
+        else if (it.state === 'failed') badge = '<span class="badge" style="background:#fee2e2;color:#b91c1c">❌ 失败</span>';
+
+        const emailText = it.email ? esc(it.email) : '<span style="color:#94a3b8">正在生成…</span>';
+        const msgText = esc(it.error ? it.error : (it.message || '-'));
+        const isCurrent = it.index === p.currentIndex && p.status === 'running';
+
+        return `<tr style="${isCurrent ? 'background:#ecfdf5;font-weight:600' : ''}">
+          <td style="padding:4px 8px;border-bottom:1px solid #f0fdf4">${it.index}</td>
+          <td style="padding:4px 8px;border-bottom:1px solid #f0fdf4;word-break:break-all">${emailText}</td>
+          <td style="padding:4px 8px;border-bottom:1px solid #f0fdf4">${badge}</td>
+          <td style="padding:4px 8px;border-bottom:1px solid #f0fdf4;color:${it.state === 'failed' ? '#b91c1c' : 'inherit'}">${msgText}</td>
+        </tr>`;
+      }).join('');
+    }
+  }
+
+  if (p.status === "running") {
+    if (sec) sec.style.display = "block";
+    if (btnStart) { btnStart.disabled = true; btnStart.textContent = "⏳ 流水线执行中…"; }
+    if (btnCancel) btnCancel.style.display = "inline-flex";
+    if (inputCount) inputCount.disabled = true;
+    if (txtStat) txtStat.textContent = `流水线运行中（当前处理第 ${p.currentIndex}/${p.targetCount} 个）`;
+    if (txtProg) txtProg.textContent = `成功 ${p.successCount} · 失败 ${p.failedCount} / 目标 ${p.targetCount}`;
+    const pct = Math.round((Math.max(0, p.currentIndex - 1) / (p.targetCount || 1)) * 100);
+    if (bar) bar.style.width = pct + "%";
+    if (txtDetail) txtDetail.textContent = p.message || "正在处理…";
+  } else if (p.status === "completed" || p.status === "cancelled" || p.status === "error") {
+    if (sec) sec.style.display = "block";
+    if (btnStart) { btnStart.disabled = false; btnStart.textContent = "✨ 启动自动创建并登录"; }
+    if (btnCancel) btnCancel.style.display = "none";
+    if (inputCount) inputCount.disabled = false;
+    if (txtStat) {
+      txtStat.textContent = p.status === "completed" ? "✅ 流水线已全部完成" : (p.status === "cancelled" ? "⏹ 流水线已终止" : "❌ 流水线异常中断");
+    }
+    if (txtProg) txtProg.textContent = `成功 ${p.successCount} · 失败 ${p.failedCount} / 目标 ${p.targetCount}`;
+    if (bar) bar.style.width = (p.status === "completed" ? 100 : Math.round((p.currentIndex / (p.targetCount || 1)) * 100)) + "%";
+    if (txtDetail) txtDetail.textContent = p.message || "";
+    if (PIPELINE_POLL_TIMER) {
+      clearInterval(PIPELINE_POLL_TIMER);
+      PIPELINE_POLL_TIMER = null;
+    }
+    load(true);
+    loadMaoMailboxes();
+  } else {
+    if (btnStart) { btnStart.disabled = false; btnStart.textContent = "✨ 启动自动创建并登录"; }
+    if (btnCancel) btnCancel.style.display = "none";
+    if (inputCount) inputCount.disabled = false;
+  }
+}
+
+function pollPipelineStatus() {
+  if (PIPELINE_POLL_TIMER) clearInterval(PIPELINE_POLL_TIMER);
+  PIPELINE_POLL_TIMER = setInterval(async () => {
+    try {
+      const res = await api("/v1/maomail/pipeline/status");
+      if (res.ok && res.pipeline) {
+        renderPipelineUI(res.pipeline);
+        if (res.pipeline.status !== "running") {
+          clearInterval(PIPELINE_POLL_TIMER);
+          PIPELINE_POLL_TIMER = null;
+        }
+      }
+    } catch {}
+  }, 1200);
+}
+
+if ($("#btnPipelineStart")) {
+  $("#btnPipelineStart").onclick = async () => {
+    const count = parseInt($("#inputPipelineCount")?.value || "1", 10) || 1;
+    if (count < 1) return toast("创建数量必须至少为 1", true);
+
+    const btn = $("#btnPipelineStart");
+    btn.disabled = true;
+    btn.textContent = "正在启动流水线…";
+
+    try {
+      const res = await api("/v1/maomail/pipeline/start", {
+        method: "POST",
+        body: JSON.stringify({ count })
+      });
+      if (res.ok && res.pipeline) {
+        toast(`✨ 已启动自动创建与登录流水线（目标 ${count} 个）`);
+        renderPipelineUI(res.pipeline);
+        pollPipelineStatus();
+      } else {
+        toast("启动失败: " + (res.message || "未知错误"), true);
+        btn.disabled = false;
+        btn.textContent = "✨ 启动自动创建并登录";
+      }
+    } catch (e) {
+      toast("启动流水线失败: " + e.message, true);
+      btn.disabled = false;
+      btn.textContent = "✨ 启动自动创建并登录";
+    }
+  };
+}
+
+if ($("#btnPipelineCancel")) {
+  $("#btnPipelineCancel").onclick = async () => {
+    if (!confirm("确定要终止自动创建并登录流水线吗？当前正在登录的账号完成后将停止创建下一个。")) return;
+    try {
+      const res = await api("/v1/maomail/pipeline/cancel", { method: "POST", body: "{}" });
+      toast("流水线已申请终止");
+      if (res.ok && res.pipeline) renderPipelineUI(res.pipeline);
+    } catch (e) {
+      toast("终止失败: " + e.message, true);
+    }
+  };
+}
+
+// 弹窗打开或初始化时检查流水线状态
+api("/v1/maomail/pipeline/status").then(res => {
+  if (res.ok && res.pipeline && res.pipeline.status === "running") {
+    renderPipelineUI(res.pipeline);
+    pollPipelineStatus();
+  }
+}).catch(() => {});
 </script>
 </body>
 </html>

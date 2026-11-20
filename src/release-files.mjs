@@ -44,6 +44,7 @@ export const RELEASE_FILES = Object.freeze([
     'test_accounts',
     'test_context_optimizer',
     'test_network_optimizer',
+    'test_local_plugin_views',
     'test_hardening',
     'test_gateway',
   ].map((n) => `tests/${n}.mjs`),

@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node start.mjs",
     "start:lan": "node start.mjs lan",
-    "test": "node tests/test_accounts.mjs && node tests/test_network_optimizer.mjs && node tests/test_context_optimizer.mjs && node --test tests/test_hardening.mjs tests/test_gateway.mjs",
+    "test": "node tests/test_accounts.mjs && node tests/test_network_optimizer.mjs && node tests/test_context_optimizer.mjs && node tests/test_local_plugin_views.mjs && node --test tests/test_hardening.mjs tests/test_gateway.mjs",
     "test:optimizer": "node tests/test_network_optimizer.mjs && node tests/test_context_optimizer.mjs",
     "doctor": "node src/doctor.mjs",
     "pack:release": "node start.mjs pack"
@@ -63,6 +63,7 @@
     "tests/test_accounts.mjs",
     "tests/test_context_optimizer.mjs",
     "tests/test_network_optimizer.mjs",
+    "tests/test_local_plugin_views.mjs",
     "tests/test_hardening.mjs",
     "tests/test_gateway.mjs"
   ],

@@ -6,6 +6,112 @@ const IDLE = Symbol('idle');
 const bad = (reason) =>
   Object.assign(new Error(`Invalid upstream stream: ${reason}`), { kind: 'upstream_stream', status: 502 });
 const object = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const DELTA_FIELDS = [
+  'partial_json', 'input', 'signature', 'text', 'thinking', 'summary',
+  'message', 'display_content', 'tool_use_id', 'arguments', 'args', 'input_json', 'json', 'delta',
+];
+const TOOL_ARGUMENT_FIELDS = ['partial_json', 'arguments', 'args', 'input_json', 'json', 'delta'];
+const TOOL_DELTA_METADATA = new Set([
+  'id', 'name', 'index', 'tool_use_id', 'tool_call_id', 'call_id', 'content_block_id',
+  'tool_name', 'function_name', 'sequence', 'offset',
+]);
+const TOOL_UPDATE_DELTA = Symbol('tool_update_delta');
+const TOOL_UPDATE_FIELDS = new Set(['type', 'message', 'display_content', 'tool_use_id']);
+const UNSUPPORTED_TOOL_TEXT = '上游请求了本次请求未声明的工具；未执行该调用。';
+function valueShape(value, depth = 0) {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  if (!object(value)) return typeof value;
+  if (depth >= 2) return 'object';
+  const keys = Object.keys(value);
+  const nested = keys.slice(0, 4).map((key) => `${safeFieldName(key)}:${valueShape(value[key], depth + 1)}`);
+  if (keys.length > nested.length) nested.push(`+${keys.length - nested.length}`);
+  return `object${nested.length ? `{${nested.join(',')}}` : ''}`;
+}
+function safeFieldName(key) {
+  return /^[A-Za-z_][A-Za-z0-9_.-]{0,39}$/.test(key) ? key : '<key>';
+}
+function safeTypeToken(type) {
+  return typeof type === 'string' && /^[A-Za-z_][A-Za-z0-9_.:-]{0,47}$/.test(type) ? type : 'other-string';
+}
+function invalidToolDelta(d) {
+  const type = typeof d?.type === 'string' ? safeTypeToken(d.type) : typeof d?.type;
+  const fields = object(d) ? DELTA_FIELDS.filter((key) => Object.hasOwn(d, key)) : [];
+  const entries = object(d) ? Object.entries(d).filter(([key]) => key !== 'type') : [];
+  const extras = entries.filter(([key]) => !DELTA_FIELDS.includes(key));
+  const extraFields = extras.length;
+  const shape = entries.slice(0, 8).map(([key, value]) => `${safeFieldName(key)}:${valueShape(value)}`);
+  if (entries.length > shape.length) shape.push(`+${entries.length - shape.length}`);
+  const partialJson = object(d) && Object.hasOwn(d, 'partial_json') ? typeof d.partial_json : 'missing';
+  return bad(`invalid tool delta (type=${type}, partial_json=${partialJson}, fields=${fields.join(',') || 'none'}, extra_fields=${extraFields}, shape=${shape.join(',') || 'none'})`);
+}
+function matchesToolId(value, block, sourceId) {
+  return typeof value === 'string' && value.trim() && (value === block.id || !sourceId || value === sourceId);
+}
+function toolUseBlockUpdate(d, blockIndex, block, sourceId) {
+  if (!object(d) || d.type !== 'tool_use_block_update_delta') return null;
+  if (
+    typeof d.message !== 'string' ||
+    !Object.hasOwn(d, 'display_content') ||
+    !(d.display_content === null || typeof d.display_content === 'string' || object(d.display_content) || Array.isArray(d.display_content)) ||
+    !matchesToolId(d.tool_use_id, block, sourceId) ||
+    Object.keys(d).some((key) => !TOOL_UPDATE_FIELDS.has(key))
+  ) return null;
+  return TOOL_UPDATE_DELTA;
+}
+function toolArgumentFragment(d, blockIndex, block, sourceId) {
+  if (!object(d)) return null;
+  const update = toolUseBlockUpdate(d, blockIndex, block, sourceId);
+  if (update) return update;
+  if (d.type === 'input_json_delta') return typeof d.partial_json === 'string' ? d.partial_json : null;
+  if (typeof d.type !== 'string' || !/^(?:tool|function|input|argument|json)(?:$|[_:.:-])/i.test(d.type)) return null;
+
+  const candidates = TOOL_ARGUMENT_FIELDS.filter((key) => typeof d[key] === 'string');
+  if (candidates.length !== 1) return null;
+  const allowed = new Set(['type', ...TOOL_ARGUMENT_FIELDS, ...TOOL_DELTA_METADATA]);
+  if (Object.keys(d).some((key) => !allowed.has(key))) return null;
+
+  for (const key of ['name', 'tool_name', 'function_name']) {
+    if (d[key] === undefined) continue;
+    if (typeof d[key] !== 'string' || resolveToolName(d[key], new Map([[block.name, null]])) !== block.name)
+      return null;
+  }
+  for (const key of ['id', 'tool_use_id', 'tool_call_id', 'call_id', 'content_block_id']) {
+    if (d[key] !== undefined && !matchesToolId(d[key], block, sourceId)) return null;
+  }
+  if (d.index !== undefined && d.index !== blockIndex) return null;
+  for (const key of ['sequence', 'offset']) {
+    if (d[key] !== undefined && (!Number.isSafeInteger(d[key]) || d[key] < 0)) return null;
+  }
+  return d[candidates[0]];
+}
+function invalidMessageStopReason(ev, state) {
+  const reason = ev?.delta?.stop_reason;
+  const token = typeof reason === 'string' ? safeTypeToken(reason) : typeof reason;
+  return bad(`invalid message stop reason (stop_reason=${token}, started=${state.started}, open_blocks=${state.openBlocks}, reason_seen=${state.reasonSeen})`);
+}
+function resolveToolName(name, declared) {
+  if (typeof name === 'string' && declared.has(name)) return name;
+  if (name == null || (typeof name === 'string' && !name.trim()))
+    return declared.size === 1 ? declared.keys().next().value : null;
+  if (typeof name !== 'string') return null;
+  let candidate = name.trim();
+  for (const prefix of ['functions.', 'function.']) {
+    if (candidate.toLowerCase().startsWith(prefix)) {
+      candidate = candidate.slice(prefix.length);
+      break;
+    }
+  }
+  const normalized = candidate.toLowerCase();
+  const matches = [...declared.keys()].filter((toolName) => toolName.toLowerCase() === normalized);
+  return matches.length === 1 ? matches[0] : null;
+}
+function uniqueToolId(id, index, used) {
+  if (typeof id === 'string' && id.trim() && !used.has(id)) return id;
+  let generated = `toolu_compat_${index}`;
+  while (used.has(generated)) generated += '_';
+  return generated;
+}
 function duration(value, fallback, min) {
   const n = Number(value);
   return Number.isSafeInteger(n) && n >= min && n <= 1800000 ? n : fallback;
@@ -71,7 +177,15 @@ async function* frames(stream, clock) {
       // A partially arrived frame is never an idle boundary. Give it the normal stall
       // timeout; if it still doesn't finish, report an error rather than dropping it.
       const grace = !size && clock.graceAt !== null && clock.graceAt <= clock.stallAt;
-      const r = await readBy(reader, grace ? clock.graceAt : clock.stallAt);
+      let r;
+      try {
+        r = await readBy(reader, grace ? clock.graceAt : clock.stallAt);
+      } catch (error) {
+        if (error?.name === 'AbortError') throw error;
+        const interrupted = bad('transport interrupted');
+        interrupted.code = 'UPSTREAM_TRANSPORT_INTERRUPTED';
+        throw interrupted;
+      }
       if (r === IDLE) {
         if (clock.ended) return;
         if (!grace) throw stalled(clock);
@@ -174,6 +288,7 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
   let held = null,
     heldBytes = 0,
     argBytes = 0,
+    executableTools = 0,
     started = false,
     lastWasTool = false,
     reason = false;
@@ -181,6 +296,17 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
   // order even when two tools' fragments/stops are interleaved. Text before it stays live.
   function* commit() {
     for (const entry of held || []) {
+      if (entry.unsupported) {
+        // Never forward an undeclared call as executable; make the compatibility fallback visible.
+        yield { type: 'content_block_start', index: entry.index, content_block: { type: 'text', text: '' } };
+        yield {
+          type: 'content_block_delta',
+          index: entry.index,
+          delta: { type: 'text_delta', text: UNSUPPORTED_TOOL_TEXT },
+        };
+        yield { type: 'content_block_stop', index: entry.index };
+        continue;
+      }
       if (entry.start) {
         const ev = entry.start;
         yield { ...ev, content_block: { ...ev.content_block, input: {} } };
@@ -192,6 +318,19 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
         yield { type: 'content_block_stop', index: ev.index };
       } else yield entry.event;
     }
+  }
+  function closeImplicitToolBlocks() {
+    if (!open.size) return true;
+    for (const [index, t] of open) {
+      if (!t) return false;
+      if (!t.unsupported) {
+        t.args = finishArgs(t);
+        t.parts = null;
+      }
+      open.delete(index);
+    }
+    lastWasTool = true;
+    return true;
   }
   try {
     for await (let ev of frames(stream, clock)) {
@@ -239,12 +378,21 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
         lastWasTool = false;
         const cb = ev.content_block;
         if (cb.type === 'tool_use') {
-          if (!declared.has(cb.name) || typeof cb.id !== 'string' || !cb.id || toolIds.has(cb.id))
-            throw bad('undeclared or unidentified tool');
-          toolIds.add(cb.id);
-          const t = { start: ev, parts: [], schema: declared.get(cb.name) };
           argBytes += Buffer.byteLength(JSON.stringify(cb));
           if (argBytes > MAX_ARGS) throw bad('tool arguments too large');
+          const name = resolveToolName(cb.name, declared);
+          if (!name) {
+            const t = { unsupported: true, index: ev.index };
+            (held ??= []).push(t);
+            open.set(ev.index, t);
+            continue;
+          }
+          const id = uniqueToolId(cb.id, ev.index, toolIds);
+          toolIds.add(id);
+          const start = { ...ev, content_block: { ...cb, id, name } };
+          const sourceId = typeof cb.id === 'string' && cb.id.trim() ? cb.id : null;
+          const t = { start, parts: [], schema: declared.get(name), sourceId };
+          executableTools++;
           (held ??= []).push(t);
           open.set(ev.index, t);
           continue;
@@ -255,11 +403,17 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
         const t = open.get(ev.index),
           d = ev.delta;
         if (t) {
-          if (d?.type !== 'input_json_delta' || typeof d.partial_json !== 'string')
-            throw bad('invalid tool delta');
-          argBytes += Buffer.byteLength(d.partial_json);
+          if (t.unsupported) {
+            argBytes += Buffer.byteLength(JSON.stringify(ev));
+            if (argBytes > MAX_ARGS) throw bad('tool arguments too large');
+            continue;
+          }
+          const partialJson = toolArgumentFragment(d, ev.index, t.start.content_block, t.sourceId);
+          if (partialJson === TOOL_UPDATE_DELTA) continue;
+          if (partialJson === null) throw invalidToolDelta(d);
+          argBytes += Buffer.byteLength(partialJson);
           if (argBytes > MAX_ARGS) throw bad('tool arguments too large');
-          if (d.partial_json) t.parts.push(d.partial_json);
+          if (partialJson) t.parts.push(partialJson);
           continue;
         }
         if (d?.type === 'input_json_delta') throw bad('tool delta outside tool block');
@@ -267,24 +421,32 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
         if (!open.has(ev.index)) throw bad('stop without an open block');
         const t = open.get(ev.index);
         open.delete(ev.index);
-        if (t) {
+        if (t && !t.unsupported) {
           t.args = finishArgs(t);
           t.parts = null;
         }
         lastWasTool = !!t || (!open.size && !!held);
         if (t) continue; // commit emits the complete block in start order
       } else if (ev.type === 'message_delta' && ev.delta?.stop_reason) {
-        if (!started || open.size || reason) throw bad('invalid message stop reason');
+        if (!started || reason || typeof ev.delta.stop_reason !== 'string')
+          throw invalidMessageStopReason(ev, { started, openBlocks: open.size, reasonSeen: reason });
+        if (open.size && !closeImplicitToolBlocks())
+          throw invalidMessageStopReason(ev, { started, openBlocks: open.size, reasonSeen: reason });
         if (!held && ev.delta.stop_reason === 'tool_use') throw bad('tool stop without a tool block');
-        if (held && !['tool_use', 'end_turn'].includes(ev.delta.stop_reason))
+        if (executableTools && !['tool_use', 'end_turn', 'pause_turn'].includes(ev.delta.stop_reason))
           throw bad('tool turn ended without completing normally');
         reason = true;
-        if (held) ev = { ...ev, delta: { ...ev.delta, stop_reason: 'tool_use' } };
+        if (held) {
+          const stopReason = executableTools
+            ? 'tool_use'
+            : ev.delta.stop_reason === 'tool_use' ? 'end_turn' : ev.delta.stop_reason;
+          ev = { ...ev, delta: { ...ev.delta, stop_reason: stopReason } };
+        }
       } else if (ev.type === 'message_stop') {
-        if (!started || open.size) throw bad('message stopped before block completion');
+        if (!started || (open.size && !closeImplicitToolBlocks())) throw bad('message stopped before block completion');
         yield* commit();
         if (held && !reason)
-          yield { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null } };
+          yield { type: 'message_delta', delta: { stop_reason: executableTools ? 'tool_use' : 'end_turn', stop_sequence: null } };
         yield ev;
         if (process.env.SSE_END_ON_STOP !== '0') return;
         clock.ended = true;
@@ -301,10 +463,12 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
     if (clock.ended) return;
     if (!held || open.size || clock.graceAt === null) throw bad('unexpected EOF before message completion');
     yield* commit();
-    if (!reason) yield { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null } };
+    if (!reason) yield { type: 'message_delta', delta: { stop_reason: executableTools ? 'tool_use' : 'end_turn', stop_sequence: null } };
     yield { type: 'message_stop' };
   } catch (e) {
     if (e.kind === 'upstream_stream' || e.name === 'AbortError') throw e;
-    throw bad('transport interrupted');
+    const interrupted = bad('transport interrupted');
+    interrupted.code = 'UPSTREAM_TRANSPORT_INTERRUPTED';
+    throw interrupted;
   }
 }

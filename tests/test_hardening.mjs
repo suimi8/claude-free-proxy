@@ -316,7 +316,7 @@ test('long thinking gaps, regular output, and finite heartbeat-only waits', asyn
   }
 });
 
-test('silent stall, undeclared calls and strict ping mode fail closed', async () => {
+test('silent stall, incomplete tool turns and strict ping mode fail closed', async () => {
   const make = (events) =>
     new ReadableStream({
       start(c) {
@@ -335,7 +335,254 @@ test('silent stall, undeclared calls and strict ping mode fail closed', async ()
     for await (const _ of validatedEvents(s, tools, opts)) {
     }
   };
-  await assert.rejects(drain(make(turn), [], {}), /undeclared/);
   await assert.rejects(drain(make(turn), [{ name: 'note' }], { graceMs: 0 }), /unexpected EOF/);
   await assert.rejects(drain(new ReadableStream({}), [], { idleMs: 25 }), /progress/);
+});
+
+test('invalid tool delta reports its shape without exposing field values', async () => {
+  const secret = 'SYNTHETIC-DELTA-SECRET';
+  const events = [
+    { type: 'message_start' },
+    {
+      type: 'content_block_start', index: 0,
+      content_block: { type: 'tool_use', name: 'note', id: 't', input: {} },
+    },
+    {
+      type: 'content_block_delta', index: 0,
+      delta: { type: 'signature_delta', signature: secret, extra: secret },
+    },
+  ];
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const event of events) controller.enqueue(Buffer.from(`data: ${JSON.stringify(event)}\n\n`));
+      controller.close();
+    },
+  });
+  await assert.rejects(async () => {
+    for await (const _ of validatedEvents(stream, [{ name: 'note' }])) {
+    }
+  }, (error) => {
+    assert.match(error.message, /invalid tool delta \(type=signature_delta/);
+    assert.match(error.message, /fields=signature, extra_fields=1/);
+    assert.match(error.message, /shape=signature:string,extra:string/);
+    assert.doesNotMatch(error.message, new RegExp(secret));
+    return true;
+  });
+});
+
+test('tool argument delta aliases are normalized only inside a matching declared tool block', async () => {
+  const events = [
+    { type: 'message_start' },
+    {
+      type: 'content_block_start', index: 0,
+      content_block: { type: 'tool_use', name: 'lookup', id: 'call-1', input: {} },
+    },
+    {
+      type: 'content_block_delta', index: 0,
+      delta: { type: 'tool_use_delta', tool_use_id: 'call-1', name: 'lookup', arguments: '{"q":' },
+    },
+    {
+      type: 'content_block_delta', index: 0,
+      delta: { type: 'tool_use_delta', tool_use_id: 'call-1', name: 'lookup', arguments: '"compat"}' },
+    },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'tool_use' } },
+    { type: 'message_stop' },
+  ];
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const event of events) controller.enqueue(Buffer.from(`data: ${JSON.stringify(event)}\n\n`));
+      controller.close();
+    },
+  });
+  const normalized = [];
+  for await (const event of validatedEvents(stream, [{
+    name: 'lookup', input_schema: { type: 'object', properties: { q: { type: 'string' } }, required: ['q'] },
+  }])) normalized.push(event);
+
+  const argumentDelta = normalized.find((event) => event.delta?.type === 'input_json_delta');
+  assert.equal(JSON.parse(argumentDelta.delta.partial_json).q, 'compat');
+  assert.equal(normalized.some((event) => event.delta?.type === 'tool_use_delta'), false);
+});
+
+test('Claude tool block update deltas are accepted as non-argument metadata', async () => {
+  const events = [
+    { type: 'message_start' },
+    {
+      type: 'content_block_start', index: 0,
+      content_block: { type: 'tool_use', name: 'lookup', id: 'call-1', input: { q: 'compat' } },
+    },
+    {
+      type: 'content_block_delta', index: 0,
+      delta: {
+        type: 'tool_use_block_update_delta',
+        message: '正在执行工具', display_content: null, tool_use_id: 'call-1',
+      },
+    },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'tool_use' } },
+    { type: 'message_stop' },
+  ];
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const event of events) controller.enqueue(Buffer.from(`data: ${JSON.stringify(event)}\n\n`));
+      controller.close();
+    },
+  });
+  const normalized = [];
+  for await (const event of validatedEvents(stream, [{
+    name: 'lookup', input_schema: { type: 'object', properties: { q: { type: 'string' } }, required: ['q'] },
+  }])) normalized.push(event);
+
+  assert.equal(normalized.some((event) => event.delta?.type === 'tool_use_block_update_delta'), false);
+  const argument = normalized.find((event) => event.delta?.type === 'input_json_delta');
+  assert.deepEqual(JSON.parse(argument.delta.partial_json), { q: 'compat' });
+});
+
+test('complete tool blocks may be implicitly closed before a message stop', async () => {
+  const events = [
+    { type: 'message_start' },
+    {
+      type: 'content_block_start', index: 0,
+      content_block: { type: 'tool_use', name: 'lookup', id: 'call-1', input: { q: 'implicit' } },
+    },
+    { type: 'message_delta', delta: { stop_reason: 'tool_use' } },
+    { type: 'message_stop' },
+  ];
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const event of events) controller.enqueue(Buffer.from(`data: ${JSON.stringify(event)}\n\n`));
+      controller.close();
+    },
+  });
+  const normalized = [];
+  for await (const event of validatedEvents(stream, [{
+    name: 'lookup', input_schema: { type: 'object', properties: { q: { type: 'string' } }, required: ['q'] },
+  }])) normalized.push(event);
+
+  assert.equal(normalized.find((event) => event.content_block?.type === 'tool_use').content_block.id, 'call-1');
+  assert.equal(normalized.find((event) => event.type === 'message_delta').delta.stop_reason, 'tool_use');
+  assert.equal(normalized.at(-1).type, 'message_stop');
+});
+
+test('pause_turn is a valid upstream stop reason', async () => {
+  const events = [
+    { type: 'message_start' },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'pause_turn' } },
+    { type: 'message_stop' },
+  ];
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const event of events) controller.enqueue(Buffer.from(`data: ${JSON.stringify(event)}\n\n`));
+      controller.close();
+    },
+  });
+  const normalized = [];
+  for await (const event of validatedEvents(stream)) normalized.push(event);
+  assert.equal(normalized.find((event) => event.type === 'message_delta').delta.stop_reason, 'pause_turn');
+});
+
+test('unknown text stop reasons remain forward-compatible', async () => {
+  const events = [
+    { type: 'message_start' },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'future_provider_reason' } },
+    { type: 'message_stop' },
+  ];
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const event of events) controller.enqueue(Buffer.from(`data: ${JSON.stringify(event)}\n\n`));
+      controller.close();
+    },
+  });
+  const normalized = [];
+  for await (const event of validatedEvents(stream)) normalized.push(event);
+  assert.equal(normalized.find((event) => event.type === 'message_delta').delta.stop_reason, 'future_provider_reason');
+});
+
+test('unknown tool delta errors report bounded field shapes without values', async () => {
+  const secret = 'SYNTHETIC-DELTA-SECRET';
+  const events = [
+    { type: 'message_start' },
+    {
+      type: 'content_block_start', index: 0,
+      content_block: { type: 'tool_use', name: 'note', id: 'call-1', input: {} },
+    },
+    {
+      type: 'content_block_delta', index: 0,
+      delta: { type: 'vendor_tool_delta', call_id: 'call-1', payload: { args: secret }, revision: 1 },
+    },
+  ];
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const event of events) controller.enqueue(Buffer.from(`data: ${JSON.stringify(event)}\n\n`));
+      controller.close();
+    },
+  });
+  await assert.rejects(async () => {
+    for await (const _ of validatedEvents(stream, [{ name: 'note' }])) {
+    }
+  }, (error) => {
+    assert.match(error.message, /type=vendor_tool_delta/);
+    assert.match(error.message, /extra_fields=3/);
+    assert.match(error.message, /shape=call_id:string,payload:object\{args:string\},revision:number/);
+    assert.doesNotMatch(error.message, new RegExp(secret));
+    return true;
+  });
+});
+
+test('tool stream compatibility repairs identifiers and only uniquely resolvable names', async () => {
+  const encode = (events) => new ReadableStream({
+    start(controller) {
+      for (const event of events) controller.enqueue(Buffer.from(`data: ${JSON.stringify(event)}\n\n`));
+      controller.close();
+    },
+  });
+  const collect = async (events, tools) => {
+    const result = [];
+    for await (const event of validatedEvents(encode(events), tools)) result.push(event);
+    return result;
+  };
+  const begin = { type: 'message_start' };
+  const finish = { type: 'message_stop' };
+  const reason = { type: 'message_delta', delta: { stop_reason: 'tool_use' } };
+  const schema = { type: 'object', properties: { q: { type: 'string' } }, required: ['q'] };
+  const tools = [{ name: 'lookup', input_schema: schema }];
+
+  const repaired = await collect([
+    begin,
+    { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', name: 'FUNCTIONS.lookup', input: { q: 'ok' } } },
+    { type: 'content_block_stop', index: 0 }, reason, finish,
+  ], tools);
+  const repairedCall = repaired.find((event) => event.content_block?.type === 'tool_use');
+  assert.equal(repairedCall.content_block.name, 'lookup');
+  assert.match(repairedCall.content_block.id, /^toolu_compat_0/);
+  assert.deepEqual(JSON.parse(repaired.find((event) => event.delta?.type === 'input_json_delta').delta.partial_json), { q: 'ok' });
+
+  const duplicateIds = await collect([
+    begin,
+    { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', name: 'lookup', id: 'same', input: {} } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', name: 'lookup', id: 'same', input: {} } },
+    { type: 'content_block_stop', index: 1 }, reason, finish,
+  ], [{ name: 'lookup', input_schema: { type: 'object', properties: {} } }]);
+  const ids = duplicateIds.filter((event) => event.content_block?.type === 'tool_use').map((event) => event.content_block.id);
+  assert.deepEqual(ids, ['same', 'toolu_compat_1']);
+
+  const secret = 'SYNTHETIC-UNKNOWN-TOOL-PAYLOAD';
+  const unavailable = await collect([
+    begin,
+    { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', name: 'not_declared', id: 'x', input: {} } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: secret } },
+    { type: 'content_block_stop', index: 0 }, reason, finish,
+  ], tools);
+  assert.equal(unavailable.some((event) => event.content_block?.type === 'tool_use'), false);
+  assert.equal(unavailable.find((event) => event.delta?.type === 'text_delta').delta.text,
+    '上游请求了本次请求未声明的工具；未执行该调用。');
+  assert.equal(unavailable.find((event) => event.type === 'message_delta').delta.stop_reason, 'end_turn');
+  assert.doesNotMatch(JSON.stringify(unavailable), new RegExp(secret));
 });
