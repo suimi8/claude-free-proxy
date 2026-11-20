@@ -31,7 +31,7 @@ test('release archive is exactly the manifest; pack does not load or overwrite p
     'trace.har',
     'notes/recording.json',
     'logs/requests.log',
-    'plugins/test/plugin.mjs',
+    'private-extra.txt',
     'web/webui.local.html',
     'src/private.mjs',
     'config/accounts.json',

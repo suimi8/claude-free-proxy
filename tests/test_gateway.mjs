@@ -324,7 +324,7 @@ function calls(api, stream, r) {
   return [...slots.values()].map((t) => [t.id, JSON.parse(t.args)]);
 }
 
-// Construct the runtime image layout in a directory that has no private config, plugins or tools.
+// Construct the runtime image layout in a clean isolated directory.
 function stageApp(root) {
   const app = path.join(root, 'app');
   const files = fs
@@ -363,12 +363,6 @@ test('isolated gateway with loopback mock upstream', { timeout: 100000 }, async 
   mock.server.listen(0, '127.0.0.1');
   await once(mock.server, 'listening');
   const base = 'http://127.0.0.1:' + mock.server.address().port;
-  const pluginDir = path.join(app, 'plugins', 'fixture');
-  fs.mkdirSync(pluginDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(pluginDir, 'plugin.mjs'),
-    "export function registerPlugin({onRoute,json}){onRoute('/v1/private-plugin',(req,res)=>json(res,200,{fixture:true}));}"
-  );
   fs.writeFileSync(path.join(app, 'web/webui.local.html'), 'PRIVATE-LAYOUT-FIXTURE');
   let gw = startGateway(app, env),
     port;
@@ -378,8 +372,7 @@ test('isolated gateway with loopback mock upstream', { timeout: 100000 }, async 
       cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
     const admin = cfg.keys.find((k) => k.role === 'admin').key,
       user = cfg.keys.find((k) => k.role === 'inference').key;
-    const acctSecret = 'SYNTHETIC-account-credential',
-      mail = 'SYNTHETIC-mail-secret';
+    const acctSecret = 'SYNTHETIC-account-credential';
     const call = (route, opts) => request(port, route, opts);
     const logs = async () => (await call('/v1/usage/logs?range=all&limit=1000', { key: admin })).json().logs;
     const countRoute = '/v1/messages/count_tokens';
@@ -448,9 +441,6 @@ test('isolated gateway with loopback mock upstream', { timeout: 100000 }, async 
       ])
         assert(!ui.text.includes(s), s);
       assert(!ui.text.includes('PRIVATE-LAYOUT-FIXTURE'));
-      assert(ui.text.includes('id="tabPlugins"'));
-      assert.deepEqual((await call('/v1/local-plugins', { key: admin })).json(), { plugins: [] });
-      assert.equal((await call('/v1/private-plugin', { key: admin })).status, 404);
       const status = await call('/login/fixture');
       assert.equal(status.status, 200);
       assert(!status.text.includes(admin));
@@ -462,45 +452,16 @@ test('isolated gateway with loopback mock upstream', { timeout: 100000 }, async 
       assert([200, 201].includes(a.status), a.text);
       const setting = await call('/v1/pool', {
         key: admin,
-        body: { maomailToken: mail, pricePerMillionTokens: 7 },
+        body: { pricePerMillionTokens: 7 },
       });
       assert.equal(setting.status, 200, setting.text);
-      assert(!setting.text.includes(mail));
       assert(fs.existsSync(path.join(data, 'accounts.json')));
       assert(!fs.existsSync(path.join(app, 'accounts.json')));
       assert(!fs.existsSync(path.join(app, 'config.json')));
       await gw.stop();
-      // A private manifest opts in only its selected resource, even when other local plugins are enabled.
-      const localDir = path.join(app, 'plugins');
-      const views = [
-        { id: 'box-fixture', title: '邮箱示例', namespace: 'box', collection: 'mailboxes' },
-        { id: 'absent-fixture', title: '未安装示例', namespace: 'none', collection: 'goods' },
-        { id: 'shop-fixture', title: '商品示例', namespace: 'shop', collection: 'goods' },
-      ];
-      fs.writeFileSync(path.join(localDir, 'local-views.json'), JSON.stringify(views));
-      for (const spec of [views[0], views[2]]) {
-        const dir = path.join(localDir, spec.id);
-        fs.mkdirSync(dir);
-        const route = `/v1/${spec.namespace}/${spec.collection}`;
-        const providerBody = spec.collection === 'goods'
-          ? { ok: true, list: [{ name: '测试商品', stockCount: 0, price: '2.00', privateField: acctSecret }] }
-          : { ok: true, mailboxes: [{ address: 'test@example.com', createdAt: '2025-05-08', privateField: mail }] };
-        fs.writeFileSync(path.join(dir, 'plugin.mjs'), `
-          export function registerPlugin({onRoute, json, KEYS, POOL, LOGIN}) {
-            onRoute('/v1/${spec.namespace}/other', (req,res) => json(res,200,{ unexpected:true }));
-            onRoute('${route}', (req, res, ctx) => {
-              if (req.headers.authorization || req.headers.cookie || ctx.url.search || req.method !== 'GET' || POOL || LOGIN) throw Error('unexpected context');
-              const settings = KEYS.settings();
-              if (${spec.collection === 'mailboxes'} && settings.maomailToken !== '${mail}') throw Error('missing mail settings');
-              if ('pricePerMillionTokens' in settings || (${spec.collection === 'goods'} && Object.keys(settings).length)) throw Error('unexpected settings');
-              return ctx.json(res, 200, ${JSON.stringify(providerBody)});
-            });
-          }
-        `);
-      }
-      gw = startGateway(app, { ...env, ENABLE_LOCAL_PLUGINS: '1' });
+
+      gw = startGateway(app, env);
       port = await gw.ready;
-      assert.deepEqual((await call('/v1/private-plugin', { key: admin })).json(), { fixture: true });
       assert.equal(
         JSON.parse(fs.readFileSync(cfgFile, 'utf8')).keys.find((k) => k.role === 'admin').key,
         admin
@@ -508,30 +469,6 @@ test('isolated gateway with loopback mock upstream', { timeout: 100000 }, async 
       const st = (await call('/v1/accounts', { key: admin })).json();
       assert.equal(st.total, 1);
       assert.equal(st.price_per_million_tokens, 7);
-      assert.equal(st.has_mail_token, true);
-    });
-    await t.test('local plugin tab exposes authenticated same-host lists with filtered rows', async () => {
-      const route = '/v1/local-plugins';
-      const catalog = await call(route, { key: admin });
-      assert.equal(catalog.status, 200);
-      assert.deepEqual(catalog.json().plugins.map(p => [p.id, p.available]), [
-        ['box-fixture', true], ['absent-fixture', false], ['shop-fixture', true],
-      ]);
-      for (const target of [route, route + '/shop-fixture']) {
-        assert.equal((await call(target)).status, 401);
-        assert.equal((await call(target, { key: user })).status, 403);
-        assert.equal((await call(target, { key: admin, body: {} })).status, 405);
-      }
-      const box = await call(route + '/box-fixture?unused=value', { key: admin, headers: { cookie: 'synthetic-cookie' } });
-      assert.equal(box.status, 200);
-      assert.deepEqual(box.json(), { columns: ['邮箱', '创建时间'], total: 1, rows: [['test@example.com', '2025-05-08']] });
-      const shop = await call(route + '/shop-fixture', { key: admin });
-      assert.equal(shop.status, 200);
-      assert.deepEqual(shop.json(), { columns: ['商品', '库存', '单价（元）'], total: 1, rows: [['测试商品', 0, '2.00']] });
-      assert.equal((await call(route + '/absent-fixture', { key: admin })).status, 503);
-      for (const target of [route + '/unknown', '/v1/box/other', '/v1/shop/other', '/v1/shop/goods']) {
-        assert.equal((await call(target, { key: admin })).status, 404);
-      }
     });
     const secondKey = (await call('/v1/keys', { key: admin, body: { name: 'second caller' } })).json();
     const second = secondKey.secret;
@@ -544,7 +481,6 @@ test('isolated gateway with loopback mock upstream', { timeout: 100000 }, async 
         '/v1/keys',
         '/login/fixture/state',
         '/v1/operations',
-        '/v1/private-plugin',
       ]) {
         assert.equal((await call(route)).status, 401, route);
         for (const key of [user, env.LOCAL_API_KEY])
@@ -553,7 +489,7 @@ test('isolated gateway with loopback mock upstream', { timeout: 100000 }, async 
       for (const route of ['/v1/keys', '/v1/accounts', '/v1/pool', '/healthz']) {
         const r = await call(route, { key: admin });
         assert.equal(r.status, 200, route);
-        for (const s of [acctSecret, admin, user, second, mail])
+        for (const s of [acctSecret, admin, user, second])
           assert(!r.text.includes(s), 'secret in ' + route);
       }
       const id = (await call('/v1/accounts', { key: admin })).json().accounts[0].id;
