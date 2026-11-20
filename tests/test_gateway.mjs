@@ -484,7 +484,7 @@ test('isolated gateway with loopback mock upstream', { timeout: 100000 }, async 
         const route = `/v1/${spec.namespace}/${spec.collection}`;
         const providerBody = spec.collection === 'goods'
           ? { ok: true, list: [{ name: '测试商品', stockCount: 0, price: '2.00', privateField: acctSecret }] }
-          : { ok: true, mailboxes: [{ address: 'test@example.com', unread_count: 3, privateField: mail }] };
+          : { ok: true, mailboxes: [{ address: 'test@example.com', createdAt: '2025-05-08', privateField: mail }] };
         fs.writeFileSync(path.join(dir, 'plugin.mjs'), `
           export function registerPlugin({onRoute, json, KEYS, POOL, LOGIN}) {
             onRoute('/v1/${spec.namespace}/other', (req,res) => json(res,200,{ unexpected:true }));
@@ -524,7 +524,7 @@ test('isolated gateway with loopback mock upstream', { timeout: 100000 }, async 
       }
       const box = await call(route + '/box-fixture?unused=value', { key: admin, headers: { cookie: 'synthetic-cookie' } });
       assert.equal(box.status, 200);
-      assert.deepEqual(box.json(), { columns: ['邮箱', '未读邮件'], total: 1, rows: [['test@example.com', 3]] });
+      assert.deepEqual(box.json(), { columns: ['邮箱', '创建时间'], total: 1, rows: [['test@example.com', '2025-05-08']] });
       const shop = await call(route + '/shop-fixture', { key: admin });
       assert.equal(shop.status, 200);
       assert.deepEqual(shop.json(), { columns: ['商品', '库存', '单价（元）'], total: 1, rows: [['测试商品', 0, '2.00']] });

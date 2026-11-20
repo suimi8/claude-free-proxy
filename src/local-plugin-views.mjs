@@ -13,8 +13,8 @@ function quantity(value) {
 }
 const lists = new Map([
   ['mailboxes', {
-    field: 'mailboxes', columns: ['邮箱', '未读邮件'], action: '查看邮箱列表',
-    row: m => [text(m.email || m.address || m.name), quantity(m.unread_count)],
+    field: 'mailboxes', columns: ['邮箱', '创建时间'], action: '查看邮箱列表',
+    row: m => [text(m.email || m.address || m.name), text(m.createdAt ?? m.created_at) || quantity(m.createdAt ?? m.created_at)],
   }],
   ['goods', {
     field: 'list', columns: ['商品', '库存', '单价（元）'], action: '查看商品库存',
@@ -44,7 +44,7 @@ async function readList(plugin) {
     const items = body?.[plugin.list.field];
     if (response.status === 200 && body?.ok === true && Array.isArray(items)) {
       return [200, { columns: plugin.list.columns, total: items.length,
-        rows: items.slice(0, 500).map(item => plugin.list.row(item || {})) }];
+        rows: items.map(item => plugin.list.row(item || {})) }];
     }
   } catch { /* Provider errors may include credentials. */ }
   return [502, { error: { message: '列表读取失败，请检查插件的服务连接和登录配置后重试' } }];

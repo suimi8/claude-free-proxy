@@ -1299,7 +1299,7 @@ function pluginCard(plugin) {
     status.textContent = "正在读取…";
     try {
       const { columns, rows, total } = await api("/v1/local-plugins/" + encodeURIComponent(plugin.id));
-      status.textContent = total ? (rows.length < total ? `显示前 ${rows.length} 条，共 ${total} 条` : `共 ${total} 条`) : "列表为空";
+      status.textContent = total ? `共 ${total} 条` : "列表为空";
       if (rows.length) {
         const table = document.createElement("table");
         table.className = "tbl";

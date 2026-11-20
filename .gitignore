@@ -7,13 +7,6 @@ plugins/
 web/webui.local.html
 *.local.html
 src/*.local.mjs
-tools/cage-domestic-relay.mjs
-tools/detect_login_coords.py
-tools/启动虚拟机国内直连中继.cmd
-tools/*relay*
-tools/*中继*
-tools/make-canvas-solvers.mjs
-tools/test-canvas-solvers.mjs
 .env
 .env.*
 !.env.example
@@ -41,7 +34,6 @@ tests/do_*
 tests/fill_*
 tests/shot.*
 tests/test_concurrent.*
-tests/test_fill_cage.*
 tests/test_tab.*
 __pycache__/
 *.py[cod]
