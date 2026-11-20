@@ -2,7 +2,8 @@
 /**
  * usage-log.mjs —— 请求级 token 用量日志与聚合
  *
- * 上游 claude.ai 不返回 usage 字段，token 全部按「字符数 / 4」本地估算，
+ * 输入按渲染后的上下文和 tools 估算，输出包含正文、思考和工具参数。
+ * 汉字等 CJK 字符各计 1，其余每 4 个字符计 1，
  * 每条日志带 estimated: true，绝不冒充官方计费数字。
  *
  * 按天存 usage/YYYY-MM-DD.jsonl（追加写、重启不丢、不覆盖），
@@ -88,6 +89,7 @@ export function createUsageLog(opts = {}) {
   function rebuild() {
     const rows = readLines(dayFile(dir, Date.now()));
     for (const e of rows) {
+      if (e.ok === false) continue;
       for (const c of (e.prefix_candidates || [])) {
         const k = key(e.account_id, c.hash);
         const prev = idx.get(k);
@@ -108,6 +110,7 @@ export function createUsageLog(opts = {}) {
       account_label: e.account_label || '',
       model: e.model || '',
       api: e.api || 'chat.completions',
+      attempts: e.attempts ?? 1,
       input_tokens: e.input_tokens || 0,
       output_tokens: e.output_tokens || 0,
       cached_tokens: 0,
@@ -158,6 +161,7 @@ export function createUsageLog(opts = {}) {
     try { fs.appendFileSync(dayFile(dir, ts), JSON.stringify(entry) + '\n', 'utf8'); }
     catch (err) { console.warn('[usage] append failed:', err.message); }
 
+    if (!entry.ok) return entry;
     for (const c of candidates) {
       const k = key(entry.account_id, c.hash);
       const prev = idx.get(k);

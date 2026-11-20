@@ -19,6 +19,7 @@ import net from 'node:net';
 import { spawn, execSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { dataFile } from './paths.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -1618,7 +1619,7 @@ export function createLoginManager(opts) {
 
       if (fs.existsSync(path.join(extDir, 'manifest.json'))) {
         try {
-          const cfgP = path.join(ROOT, 'config.json');
+          const cfgP = dataFile('config.json', process.env.CONFIG_FILE);
           let cfgObj = {};
           if (fs.existsSync(cfgP)) {
             try { cfgObj = JSON.parse(fs.readFileSync(cfgP, 'utf8')); } catch {}
@@ -2171,6 +2172,7 @@ export function loginPage(id) {
 </style></head><body><div class="card">
 <h1>🔗 链接登录</h1>
 <div class="sub">登录窗口已在桌面浏览器打开；本页实时显示进度</div>
+<form id="adminForm" hidden><label>管理 Key <input id="adminKey" type="password" autocomplete="off" required></label> <button>查看进度</button></form>
 <div class="st" id="st"><span class="dot"></span><b id="msg">正在连接…</b></div>
 <div class="mlink" id="mlinkRow">
   <input id="mlink" placeholder="粘贴邮件里的登录链接（https://claude.ai/…）" autocomplete="off">
@@ -2188,14 +2190,24 @@ export function loginPage(id) {
 const id=${JSON.stringify(id)};
 let busy=false,verifying=false,blinkTimer=null;
 const TERMINAL=['done','error','timeout','cancelled','closed'];
+const adminForm=document.getElementById('adminForm');
+function needKey(msg){adminForm.hidden=false;document.getElementById('msg').textContent=msg;}
+async function adminFetch(path,opts={}){
+  const key=sessionStorage.getItem('gateway_admin');
+  if (!key) throw new Error('请输入本机管理员 Key');
+  const r=await fetch(path,{...opts,redirect:'error',headers:{...opts.headers,authorization:'Bearer '+key}});
+  if(r.status===401||r.status===403){needKey('认证失败，请使用管理员 Key');throw new Error('需要管理员 Key');}
+  return r;
+}
+adminForm.onsubmit=e=>{e.preventDefault();const input=document.getElementById('adminKey');sessionStorage.setItem('gateway_admin',input.value.trim());input.value='';adminForm.hidden=true;tick();};
 function setTitleVerify(on){
   if(on&&!blinkTimer){let t=false;blinkTimer=setInterval(()=>{t=!t;document.title=(t?'⚠️ 需要验证 · ':'')+'链接登录 · Claude 反代';},1000);}
   if(!on&&blinkTimer){clearInterval(blinkTimer);blinkTimer=null;document.title='链接登录 · Claude 反代';}
 }
 async function tick(){
   try{
-    const r=await fetch('/login/'+id+'/state');const j=await r.json();
-    if(!j){document.getElementById('msg').textContent='登录流程不存在或已过期';return;}
+    const r=await adminFetch('/login/'+id+'/state');const j=await r.json();
+    if(!r.ok||!j){document.getElementById('msg').textContent='登录流程不存在或已过期';return;}
     const done=TERMINAL.includes(j.state);
     const st=document.getElementById('st');
     let cls='st'+(done?' '+j.state:(j.need_verify?' verify':''));
@@ -2209,11 +2221,11 @@ async function tick(){
     if(!done)setTitleVerify(!!j.need_verify);
     verifying=!!j.need_verify;
     if(!done)setTimeout(tick,1500);
-  }catch(e){document.getElementById('msg').textContent='状态获取失败：'+e.message;setTimeout(tick,2500);}
+  }catch(e){document.getElementById('msg').textContent='状态获取失败：'+e.message;if(adminForm.hidden)setTimeout(tick,2500);}
 }
 document.getElementById('reopen').onclick=async e=>{
   if(busy)return;busy=true;e.target.disabled=true;
-  try{const r=await fetch('/login/'+id+'/open',{method:'POST'});const j=await r.json();
+  try{const r=await adminFetch('/login/'+id+'/open',{method:'POST'});const j=await r.json();
     if(!j.ok)alert(j.message||'无法重新打开，请回控制台重新发起登录');}catch(err){alert(err.message)}
   busy=false;e.target.disabled=false;
 };
@@ -2223,7 +2235,7 @@ document.getElementById('mlinkGo').onclick=async e=>{
   if(!url){inp.focus();return;}
   if(busy)return;busy=true;e.target.disabled=true;
   try{
-    const r=await fetch('/login/'+id+'/goto',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({url})});
+    const r=await adminFetch('/login/'+id+'/goto',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({url})});
     const j=await r.json();
     if(j.ok){inp.value='';}
     else{alert(j.message||'跳转失败');}
@@ -2231,7 +2243,7 @@ document.getElementById('mlinkGo').onclick=async e=>{
   busy=false;e.target.disabled=false;
 };
 document.getElementById('mlink').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('mlinkGo').click();});
-tick();
+if(sessionStorage.getItem('gateway_admin'))tick();else needKey('查看登录状态需要管理 Key');
 </script></body></html>`;
 }
 

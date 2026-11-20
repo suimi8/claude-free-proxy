@@ -1,15 +1,12 @@
 services:
   claude-proxy:
     build: .
-    image: claude-free-proxy:latest
-    container_name: claude-free-proxy
     restart: unless-stopped
     ports:
-      - "8787:8787"
+      - "127.0.0.1:${PROXY_PORT:-8787}:8787"
     environment:
-      - HOST=0.0.0.0
-      - PORT=8787
-      - NODE_ENV=production
+      ALLOW_REMOTE_ADMIN: "${ALLOW_REMOTE_ADMIN:-0}"
     volumes:
-      - ./config.json:/app/config.json
-      - ./accounts.json:/app/accounts.json
+      - proxy-data:/app/data
+volumes:
+  proxy-data:

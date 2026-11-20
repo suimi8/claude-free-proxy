@@ -17,14 +17,13 @@ where node >nul 2>&1
 if errorlevel 1 (
   echo.
   echo   Node.js not found.
-  echo   Install Node.js 22 or newer:  https://nodejs.org/
+  echo   Install Node.js 22.19 or newer:  https://nodejs.org/
   echo.
   pause
   exit /b 1
 )
 
 node start.mjs %*
-if errorlevel 1 (
-  echo.
-  pause
-)
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" if "%~1"=="" pause
+exit /b %RC%

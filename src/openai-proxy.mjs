@@ -56,13 +56,16 @@ import http from 'node:http';
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID, createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { Readable, PassThrough } from 'node:stream';
+import { readChildResponse } from './child-http.mjs';
 import { AccountPool, discoverOrg, DEFAULT_UA, sleep } from './accounts.mjs';
 import { createLoginManager, createCfVerifyManager, loginPage, openClaudeWebBrowser } from './login-link.mjs';
-import { createConfigStore } from './config.mjs';
+import { createConfigStore, publicSettings } from './config.mjs';
+import { ROOT, DATA, dataFile } from './paths.mjs';
+import { fetchPublicBytes } from './public-http.mjs';
+import { validatedEvents } from './upstream-events.mjs';
 import { probeQuota } from './quota-probe.mjs';
 import { checkKyc } from './kyc.mjs';
 import { createUsageLog, prefixOf } from './usage-log.mjs';
@@ -72,12 +75,8 @@ import { getSharedDispatcher } from './network-optimizer.mjs';
 import { logOperation, queryOperations, getOperationStats, clearOperations } from './operation-log.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = fs.existsSync(path.join(HERE, '..', 'start.cmd')) || fs.existsSync(path.join(HERE, '..', 'LICENSE'))
-  ? path.resolve(HERE, '..')
-  : HERE;
-
-const UPSTREAM_FILE = process.env.UPSTREAM_FILE || (fs.existsSync(path.join(ROOT, 'upstream.json')) ? path.join(ROOT, 'upstream.json') : path.join(ROOT, 'config', 'upstream.json'));
-const ACCOUNTS_FILE = process.env.ACCOUNTS_FILE || (fs.existsSync(path.join(ROOT, 'accounts.json')) ? path.join(ROOT, 'accounts.json') : path.join(ROOT, 'config', 'accounts.json'));
+const UPSTREAM_FILE = dataFile('upstream.json', process.env.UPSTREAM_FILE);
+const ACCOUNTS_FILE = dataFile('accounts.json', process.env.ACCOUNTS_FILE);
 const SESSION_SCRIPT = fs.existsSync(path.join(ROOT, 'tools', 'desktop_session.py'))
   ? path.join(ROOT, 'tools', 'desktop_session.py')
   : path.join(HERE, 'desktop_session.py');
@@ -86,7 +85,7 @@ const SESSION_SCRIPT = fs.existsSync(path.join(ROOT, 'tools', 'desktop_session.p
  * 配置全部来自 config.json（端口 / 监听地址 / 各 API Key）。
  * 环境变量只作为临时覆盖，方便调试；代码里不内置任何密钥。
  */
-const CONFIG_FILE = process.env.CONFIG_FILE || (fs.existsSync(path.join(ROOT, 'config.json')) ? path.join(ROOT, 'config.json') : path.join(ROOT, 'config', 'config.json'));
+const CONFIG_FILE = dataFile('config.json', process.env.CONFIG_FILE);
 const KEYS = createConfigStore(CONFIG_FILE);
 KEYS.load();
 const _srv = KEYS.serverConfig();
@@ -95,35 +94,14 @@ const PORT = +(process.env.PORT || _srv.port || 8787);
 // 默认只监听回环（本机）。要让手机 / 另一台电脑用，在 config.json 里把 host 改成 0.0.0.0。
 const HOST = process.env.HOST || _srv.host || '127.0.0.1';
 const isLanExposed = HOST !== '127.0.0.1' && HOST !== 'localhost' && HOST !== '::1';
-// 兼容旧行为：仍支持 LOCAL_API_KEY 作为「额外」的等价 key（不再是唯一凭据）
+// 兼容旧客户端：LOCAL_API_KEY 仅有调用权限。
 const LEGACY_KEY = process.env.LOCAL_API_KEY || '';
 
-/** 本机所有地址（回环 + 各网卡），用于判断「是不是这台机器在访问」 */
-let _localIps = null;
-function localIpSet() {
-  if (!_localIps) {
-    _localIps = new Set(['127.0.0.1', '::1']);
-    try {
-      for (const n of Object.values(os.networkInterfaces()).flat()) {
-        if (n && n.address) _localIps.add(n.address.replace(/^::ffff:/, ''));
-      }
-    } catch (e) { /* 拿不到就只认回环 */ }
-  }
-  return _localIps;
-}
-
-/**
- * 请求是否来自「本机」（回环，或用本机的局域网 IP 访问自己）。
- * 用于限制「链接登录」等只该在运行反代的机器上操作的端点。
- */
 function isLoopbackReq(req) {
-  const ip = (req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
-  return localIpSet().has(ip);
+  const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  return ip === '::1' || /^127\./.test(ip);
 }
-
 function getReqIp(req) {
-  const forwarded = req.headers && (req.headers['x-forwarded-for'] || req.headers['x-real-ip']);
-  if (forwarded) return String(forwarded).split(',')[0].trim();
   return (req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
 }
 
@@ -147,7 +125,7 @@ const POOL = new AccountPool(ACCOUNTS_FILE, {
 
 /** 请求级用量日志（按账号 / 按小时 / 全局聚合；CACHE_MODE=off|stats|reuse） */
 const USAGE = createUsageLog({
-  dir: process.env.USAGE_DIR || path.join(ROOT, 'usage'),
+  dir: process.env.USAGE_DIR || path.join(DATA, 'usage'),
 });
 
 /**
@@ -408,75 +386,8 @@ async function curlFetch(url, { method = 'GET', headers = {}, body = null, signa
   if (body != null && method !== 'GET' && method !== 'HEAD') args.push('--data-binary', '@-');
   args.push(url);
   const child = spawn(CURL_EXE, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
-  if (signal) {
-    if (signal.aborted) { try { child.kill('killed'); } catch { /* noop */ } }
-    else signal.addEventListener('abort', () => { try { child.kill('killed'); } catch { /* noop */ } }, { once: true });
-  }
-  return await new Promise((resolve, reject) => {
-    let buf = Buffer.alloc(0), headersDone = false, settled = false, textPromise = null;
-    let status = 0;
-    const respHeaders = new Map();
-    const out = new PassThrough();
-    const fail = (msg) => { if (!settled) { settled = true; reject(Object.assign(new Error(`upstream network error: ${msg}`), { status: 0, kind: 'transient', retryable: true })); } };
-    child.on('error', e => fail(e.message));
-    child.stdout.on('data', chunk => {
-      if (headersDone) {
-        if (!out.write(chunk)) child.stdout.pause();
-        return;
-      }
-      buf = Buffer.concat([buf, chunk]);
-      const idx = buf.indexOf('\r\n\r\n');
-      if (idx < 0) return;
-      const head = buf.slice(0, idx).toString('utf8');
-      status = +(/^HTTP\/[\d.]+\s+(\d+)/.exec(head)?.[1] || 0);
-      for (const line of head.split(/\r?\n/).slice(1)) {
-        const c = line.indexOf(':');
-        if (c > 0) respHeaders.set(line.slice(0, c).trim().toLowerCase(), line.slice(c + 1).trim());
-      }
-      headersDone = true;
-      const rest = buf.slice(idx + 4);
-      buf = null;
-      if (rest.length && !out.write(rest)) child.stdout.pause();
-      settled = true;
-      resolve({
-        ok: status >= 200 && status < 300,
-        status,
-        headers: { get: n => respHeaders.get(String(n).toLowerCase()) ?? null },
-        text: () => {
-          if (!textPromise) {
-            textPromise = new Promise((res2, rej2) => {
-              const chunks = [];
-              out.on('data', c => chunks.push(c));
-              out.on('end', () => res2(Buffer.concat(chunks).toString('utf8')));
-              out.on('error', rej2);
-            });
-          }
-          return textPromise;
-        },
-        json: async () => {
-          if (!textPromise) {
-            textPromise = new Promise((res2, rej2) => {
-              const chunks = [];
-              out.on('data', c => chunks.push(c));
-              out.on('end', () => res2(Buffer.concat(chunks).toString('utf8')));
-              out.on('error', rej2);
-            });
-          }
-          return JSON.parse(await textPromise);
-        },
-        body: Readable.toWeb(out),
-      });
-    });
-    out.on('drain', () => child.stdout.resume());
-    child.stdout.on('end', () => out.end());
-    let errBuf = '';
-    child.stderr.on('data', c => { errBuf += c.toString('utf8'); });
-    child.on('close', code => { out.end(); if (!headersDone) fail(`curl exit ${code}${errBuf ? ': ' + errBuf.slice(0, 200) : ''} (no response headers)`); });
-    if (body != null && method !== 'GET' && method !== 'HEAD') {
-      const data = Buffer.isBuffer(body) ? body : typeof body === 'string' ? body : Buffer.from(String(body));
-      child.stdin.end(data);
-    } else child.stdin.end();
-  });
+  const requestBody = method === 'GET' || method === 'HEAD' ? undefined : body;
+  return readChildResponse(child, {signal, requestBody});
 }
 
 /**
@@ -603,26 +514,11 @@ async function resolveImage(ref, signal) {
     return { ...p, name: `image.${EXT_BY_MIME[p.mime] || 'bin'}` };
   }
   if (/^https?:\/\//i.test(s)) {
-    const sigs = [AbortSignal.timeout(30000)];
-    if (signal) sigs.push(signal);
-    let r;
+    let bytes, mime;
     try {
-      const dispatcher = getSharedDispatcher();
-      r = await undiciFetch(s, {
-        redirect: 'follow', signal: AbortSignal.any(sigs),
-        headers: { accept: 'image/*,*/*;q=0.8', 'user-agent': DEFAULT_UA },
-        dispatcher,
-      });
-    } catch (e) {
-      // 下载失败与账号无关，换账号也没用 -> 不可重试，由调用方记进失败说明
-      throw imgError(`下载远程图片失败: ${e?.message || e}`, false);
-    }
-    if (!r.ok) throw imgError(`下载远程图片 HTTP ${r.status}`, false);
-    const mime = (r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase() || 'application/octet-stream';
-    if (!mime.startsWith('image/')) throw imgError(`远程资源不是图片: ${mime}`, false);
-    const bytes = Buffer.from(await r.arrayBuffer());
+      ({bytes,mime} = await fetchPublicBytes(s, {signal, maxBytes:MAX_IMAGE_BYTES, timeoutMs:30000, accept:'image/*', image:true}));
+    } catch(e) { throw imgError(e.message, false, e.status || 502); }
     if (!bytes.length) throw imgError('远程图片内容为空', false);
-    if (bytes.length > MAX_IMAGE_BYTES) throw imgError(`远程图片过大 ${bytes.length}B > ${MAX_IMAGE_BYTES}B`, false);
     return { bytes, mime, name: `image.${EXT_BY_MIME[mime] || 'bin'}` };
   }
   throw imgError(`不支持的图片引用（仅 data URL / http(s)）: ${s.slice(0, 60)}`, false);
@@ -868,7 +764,7 @@ function renderPrompt(body) {
     } else if (m.role === 'assistant') {
       let t = textOf(m.content);
       for (const tc of m.tool_calls || []) {
-        t += `\n[TOOL_CALL ${tc.function?.name || 'unknown'}] ${tc.function?.arguments || '{}'}`;
+        t += `\n[TOOL_CALL ${tc.function?.name || 'unknown'}${tc.id ? ' id=' + tc.id : ''}] ${tc.function?.arguments || '{}'}`;
       }
       parts.push(`[ASSISTANT]\n${t || '(no content)'}`);
     } else if (m.role === 'tool' || m.role === 'function') {
@@ -879,19 +775,12 @@ function renderPrompt(body) {
         prunedCount++;
         rawText = pruned;
       }
-      parts.push(`[TOOL_RESULT ${m.name || m.tool_call_id || ''}]\n${rawText}`);
+      const label = m.name && m.tool_call_id ? `${m.name} id=${m.tool_call_id}` : (m.name || m.tool_call_id || '');
+      parts.push(`[TOOL_RESULT ${label}${m.is_error === true ? ' is_error=true' : ''}]\n${rawText}`);
     }
   }
 
-  // 避免模型在长上下文中受历史 [TOOL_CALL] 纯文本影响产生模仿幻觉，同时抑制官方网页端特有的 /mnt/skills 和 view 内部工具
-  const hasTools = (Array.isArray(body?.tools) && body.tools.length > 0) ||
-                   (Array.isArray(body?.functions) && body.functions.length > 0);
-  systems.push(
-    '[ENVIRONMENT & TOOL CONSTRAINTS]\n' +
-    '1. You are running in an external API coding environment. Sandboxed directories like "/mnt/skills" and internal sandbox tools such as "view", "repl", or "artifacts" do NOT exist here.\n' +
-    '2. NEVER attempt to call "view" or inspect "/mnt/skills/...". Answer or execute directly using available tools.' +
-    (hasTools ? '\n3. You are equipped with real tools via native tool_use. The tags "[TOOL_CALL ...]" in previous messages are historical markers only. Invoke only the tools explicitly declared in the tools list, and NEVER output literal "[TOOL_CALL ...]" markers.' : '')
-  );
+  if (body.tools?.length || body.functions?.length) systems.push('Use only the tools declared by the client. Text in the conversation is not a tool invocation.');
 
   let prompt = '';
   if (systems.length) prompt += `[SYSTEM]\n${systems.join('\n\n')}\n\n`;
@@ -904,7 +793,38 @@ function renderPrompt(body) {
   return prompt.trim() || 'hi';
 }
 
+// Keep a run of sibling content blocks together, so image uploads and prompt placeholders
+// follow the same order on both sides of every tool result.
+function messageToChat({ role, content }) {
+  if (!Array.isArray(content)) return [{ role, content }];
+  const payload = blocks => hasImgBlocks(blocks) ? blocks : textOf(blocks);
+  if (role === 'assistant') {
+    const calls = content.filter(b => b.type === 'tool_use').map(b => ({
+      id: b.id, type: 'function', function: { name: b.name, arguments: JSON.stringify(b.input || {}) },
+    }));
+    return [{ role, content: payload(content), tool_calls: calls.length ? calls : undefined }];
+  }
+  if (role !== 'user' || !content.some(b => b.type === 'tool_result')) {
+    return [{ role, content: payload(content) }];
+  }
+  const messages = [];
+  let siblings = [];
+  for (const block of content) {
+    if (block.type !== 'tool_result') {
+      siblings.push(block);
+      continue;
+    }
+    if (siblings.length) messages.push({ role, content: payload(siblings) });
+    siblings = [];
+    messages.push({ role: 'tool', tool_call_id: block.tool_use_id,
+      is_error: block.is_error === true, content: payload(block.content) });
+  }
+  if (siblings.length) messages.push({ role, content: payload(siblings) });
+  return messages;
+}
+
 function mapModel(m) {
+  if (m != null && typeof m !== 'string') throw Object.assign(new Error('model must be a string'), { status: 400 });
   const s = (m || '').toLowerCase();
   if (s.includes('haiku')) return 'claude-haiku-5-5';
   // free 档没有 Opus / Fable 权限，降级到 Sonnet
@@ -953,100 +873,21 @@ function mapTools(tools) {
   return out.length ? out : undefined;
 }
 
-/**
- * 伪工具调用提取器 (Fallback Tool Call Extractor):
- * 在多轮 Agent 长会话中，Claude 模型若产生幻觉直接在正文输出了
- * `[TOOL_CALL <func_name>] <json_arguments>`，本函数将其自动解析并剔除，
- * 转换为 OpenAI 标准的 tool_calls 列表，避免客户端卡死或断连。
- */
-function extractPseudoToolCalls(fullText) {
-  if (!fullText || typeof fullText !== 'string') return { cleanText: fullText || '', toolCalls: [] };
-  
-  const markerRegex = /\[TOOL_CALL(?::|\s+)?([a-zA-Z0-9_\-\.]+)\s*\]/g;
-  let match;
-  const matches = [];
-  while ((match = markerRegex.exec(fullText)) !== null) {
-    matches.push({
-      name: match[1],
-      startIndex: match.index,
-      argsStart: match.index + match[0].length,
-    });
+function prepareContext(body) {
+  // ── 上下文优化：修剪历史旧图片与冗长工具输出，大幅减小 prompt 体积 ──
+  // 仅当池配置启用 pruneContext 时生效（默认 true）
+  if (POOL?.data?.pruneContext !== false && Array.isArray(body.messages)) {
+    const maxToolChars = +(POOL?.data?.pruneMaxToolChars || 8000);
+    return {
+      ...body,
+      messages: optimizeContext(body.messages, {
+        keepRecentTurns: Math.max(2, +(POOL?.data?.pruneKeepRecentTools || 4)),
+        maxImages: 3,
+        maxChars: maxToolChars,
+      }),
+    };
   }
-
-  if (matches.length === 0) {
-    return { cleanText: fullText, toolCalls: [] };
-  }
-
-  const toolCalls = [];
-  let firstCallIdx = fullText.length;
-
-  for (let i = 0; i < matches.length; i++) {
-    const cur = matches[i];
-    const nextStart = (i + 1 < matches.length) ? matches[i + 1].startIndex : fullText.length;
-    let candidate = fullText.slice(cur.argsStart, nextStart).trim();
-
-    let parsedArgs = null;
-    let jsonStr = candidate;
-
-    const braceStart = candidate.indexOf('{');
-    if (braceStart !== -1) {
-      let depth = 0;
-      let inString = false;
-      let escape = false;
-      let braceEnd = -1;
-      for (let pos = braceStart; pos < candidate.length; pos++) {
-        const ch = candidate[pos];
-        if (escape) {
-          escape = false;
-          continue;
-        }
-        if (ch === '\\') {
-          escape = true;
-          continue;
-        }
-        if (ch === '"') {
-          inString = !inString;
-          continue;
-        }
-        if (!inString) {
-          if (ch === '{') depth++;
-          else if (ch === '}') {
-            depth--;
-            if (depth === 0) {
-              braceEnd = pos;
-              break;
-            }
-          }
-        }
-      }
-      if (braceEnd !== -1) {
-        jsonStr = candidate.slice(braceStart, braceEnd + 1);
-      }
-    }
-
-    try {
-      JSON.parse(jsonStr);
-      parsedArgs = jsonStr;
-    } catch {
-      parsedArgs = JSON.stringify({ input: jsonStr });
-    }
-
-    toolCalls.push({
-      id: 'call_' + randomUUID().replace(/-/g, '').slice(0, 9),
-      type: 'function',
-      function: {
-        name: cur.name,
-        arguments: parsedArgs,
-      },
-    });
-
-    if (cur.startIndex < firstCallIdx) {
-      firstCallIdx = cur.startIndex;
-    }
-  }
-
-  const cleanText = fullText.slice(0, firstCallIdx).trimEnd();
-  return { cleanText, toolCalls };
+  return body;
 }
 
 function buildUpstreamBody(body, model) {
@@ -1113,51 +954,10 @@ function mapStopReason(r) {
   }
 }
 
-/** 把上游 SSE 流解析成事件数组（流式时边解析边回调） */
-async function* parseSse(stream) {
-  const reader = stream.getReader();
-  const dec = new TextDecoder();
-  let buf = '';
-  try {
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let i;
-      while ((i = buf.indexOf('\n\n')) >= 0) {
-        const raw = buf.slice(0, i);
-        buf = buf.slice(i + 2);
-        for (const line of raw.split('\n')) {
-          if (!line.startsWith('data:')) continue;
-          const p = line.slice(5).trim();
-          if (!p || p === '[DONE]') continue;
-          try { yield JSON.parse(p); } catch { /* 忽略坏行 */ }
-        }
-      }
-    }
-  } finally {
-    // 提前收尾时（上游说完了但连接还吊着）把 body 取消掉：
-    // 既释放上游 socket，也让 undici 别继续往内存里灌这条流
-    try { await reader.cancel(); } catch { /* noop */ }
-    try { reader.releaseLock(); } catch { /* noop */ }
-  }
-}
-
 function newChatId() { return `chatcmpl-${randomUUID()}`; }
 
-/**
- * 归一化上游 SSE。
- *
- * 关键行为：上游发起 tool_use 后，会停在 content_block_stop 只发 ping，
- * 等客户端回传 tool_result（它是 agentic 多轮协议）。但本反代是无状态的 ——
- * 客户端拿到 tool_calls 后会自己执行工具、再发一个新请求。
- * 所以一旦 tool_use block 全部结束又只等到 ping，就主动补上
- * message_delta(stop_reason=tool_use) + message_stop 收尾，否则连接永远挂着。
- */
+/** Collect timing and quota information from validated upstream events. */
 async function* normalizeSse(stream, acct, ctx) {
-  const pending = new Set();
-  let sawTool = false;
-  let ended = false;
   // 真实输出速度要靠「文本 + 时间轴」两头都准，所以这里分开记：
   //   textStr  可见正文（用户真正看到的字）
   //   thinkStr 思考摘要（上游只给截断版）
@@ -1165,88 +965,68 @@ async function* normalizeSse(stream, acct, ctx) {
   let textStr = '';
   let thinkStr = '';
   let jsonStr = '';
+  // The validator closes all content blocks before the stop reason. Count each channel
+  // once, independent of delta boundaries, and share the result with the stream and log.
+  let totals;
+  function outputUsage() {
+    if (!totals) {
+      const text = countTokens(textStr), thinking = countTokens(thinkStr);
+      totals = { text, thinking, output: text + thinking + countTokens(jsonStr) };
+    }
+    return totals;
+  }
+  let sawStopReason = false;
   let firstDeltaAt = null;   // 第一个内容增量
   let firstTextAt = null;    // 第一个正文增量
   let lastDeltaAt = null;    // 最后一个内容增量
   let lastTextAt = null;     // 最后一个正文增量
 
   try {
-  for await (const ev of parseSse(stream)) {
-    // 上游会带 message_limit 事件（free 档 5h/7d 窗口用量），记到账号上供轮询策略用
-    if (ev.type === 'message_limit' && acct) {
-      POOL.updateQuota(acct, ev.message_limit);
-    }
-    if (ev.type === 'message_start' && ctx && ev.message?.uuid) {
-      ctx.parent_uuid = ev.message.uuid;      // 供 CACHE_MODE=reuse 续聊
-    }
-    // 本地估算输出 token（上游不返回 usage，只累计"已用"，不是配额）
-    if (ev.type === 'content_block_delta') {
-      const d = ev.delta || {};
-      const now = Date.now();
-      const piece = (typeof d.text === 'string' ? d.text.length : 0) +
-        (typeof d.partial_json === 'string' ? d.partial_json.length : 0) +
-        (typeof d.thinking === 'string' ? d.thinking.length : 0) +           // 思考增量
-        (typeof d.summary?.summary === 'string' ? d.summary.summary.length : 0);  // 思考摘要
-      if (piece) {
-        if (firstDeltaAt == null) firstDeltaAt = now;
-        lastDeltaAt = now;
-        if (ctx && ctx.ttfb_ms == null) ctx.ttfb_ms = now - ctx.startedAt;   // 首字
+    for await (let ev of validatedEvents(stream, ctx._tools)) {
+      // 上游会带 message_limit 事件（free 档 5h/7d 窗口用量），记到账号上供轮询策略用
+      if (ev.type === 'message_limit' && acct) {
+        POOL.updateQuota(acct, ev.message_limit);
       }
-      if (typeof d.text === 'string' && d.text) {
-        textStr += d.text;
-        if (firstTextAt == null) firstTextAt = now;
-        lastTextAt = now;
-      } else if (typeof d.partial_json === 'string' && d.partial_json) {
-        jsonStr += d.partial_json;
-      } else if (typeof d.thinking === 'string' && d.thinking) {
-        thinkStr += d.thinking;                       // 思考增量
-      } else if (typeof d.summary?.summary === 'string' && d.summary.summary) {
-        thinkStr += d.summary.summary;                // 思考摘要
+      if (ev.type === 'message_start') {
+        if (ev.message?.uuid) ctx.parent_uuid = ev.message.uuid;
+        ev = { ...ev, message: { ...ev.message, usage: { ...ev.message?.usage, input_tokens: ctx.input_tokens, output_tokens: 0 } } };
       }
-    }
-    if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use') {
-      sawTool = true;
-      pending.add(ev.index);
-      yield ev;
-      continue;
-    }
-    if (ev.type === 'content_block_stop') {
-      pending.delete(ev.index);
-      yield ev;
-      continue;
-    }
-    if (ev.type === 'ping') {
-      if (sawTool && pending.size === 0 && !ended) {
-        ended = true;
-        yield { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null } };
-        yield { type: 'message_stop' };
-        return;
+      // 本地估算输出 token（上游不返回 usage，只累计"已用"，不是配额）
+      if (ev.type === 'content_block_delta') {
+        const d = ev.delta || {};
+        const now = Date.now();
+        const piece = (typeof d.text === 'string' ? d.text.length : 0) +
+          (typeof d.partial_json === 'string' ? d.partial_json.length : 0) +
+          (typeof d.thinking === 'string' ? d.thinking.length : 0) +           // 思考增量
+          (typeof d.summary?.summary === 'string' ? d.summary.summary.length : 0);  // 思考摘要
+        if (piece) {
+          if (firstDeltaAt == null) firstDeltaAt = now;
+          lastDeltaAt = now;
+          if (ctx && ctx.ttfb_ms == null) ctx.ttfb_ms = now - ctx.startedAt;   // 首字
+        }
+        if (typeof d.text === 'string' && d.text) {
+          textStr += d.text;
+          if (firstTextAt == null) firstTextAt = now;
+          lastTextAt = now;
+        } else if (typeof d.partial_json === 'string' && d.partial_json) {
+          jsonStr += d.partial_json;
+        } else if (typeof d.thinking === 'string' && d.thinking) {
+          thinkStr += d.thinking;                       // 思考增量
+        } else if (typeof d.summary?.summary === 'string' && d.summary.summary) {
+          thinkStr += d.summary.summary;                // 思考摘要
+        }
       }
-      continue;   // 普通心跳，丢给上层没有意义
-    }
-    if (ev.type === 'message_stop') {
-      ended = true;
+      if (ev.type === 'message_delta' && ev.delta?.stop_reason) {
+        sawStopReason = true;
+        ev = { ...ev, usage: { ...ev.usage, input_tokens: ctx.input_tokens, output_tokens: outputUsage().output } };
+      } else if (ev.type === 'message_stop' && !sawStopReason) {
+        yield { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null },
+          usage: { input_tokens: ctx.input_tokens, output_tokens: outputUsage().output } };
+      }
       yield ev;
-      // 上游已经明确「这条回复结束了」，就立刻收尾，不要等它把连接关掉。
-      //
-      // claude.ai 的 free 档在内容发完后经常把 SSE 连接吊着不关（keep-alive），
-      // 我们要是傻等到 EOF，这段纯空闲会被算进 latency —— 而 latency 正是
-      // 客户端显示「输出速度」的分母，于是 258 个 token / 134 秒 = 1.9 tok/s。
-      // 实测 94 个慢请求里 78 个的生成时间 ≡ 14.1s (mod 15s)，与输出量完全无关，
-      // 就是这段吊着连接的时间。
-      //
-      // SSE_END_ON_STOP=0 可以恢复旧行为（等 EOF）。
-      if (process.env.SSE_END_ON_STOP !== '0') break;
-      continue;
     }
-    yield ev;
-  }
   } finally {
-    // 真实 token 数：中文 1 字 1 token，其余 4 字符 1 token（见 countTokens）
-    const textTokens = countTokens(textStr);
-    const thinkTokens = countTokens(thinkStr);
-    const jsonTokens = countTokens(jsonStr);
-    const outTokens = Math.max(1, textTokens + thinkTokens + jsonTokens);
+    const { text: textTokens, thinking: thinkTokens, output: outTokens } = outputUsage();
     if (acct) POOL.noteTokens(acct, 0, outTokens);
     if (ctx) {
       const end = Date.now();
@@ -1279,13 +1059,11 @@ async function* normalizeSse(stream, acct, ctx) {
 }
 
 /** 非流式：吃完整个 SSE 再组装 */
-async function collect(stream, acct, ctx, body = null) {
+async function collect(stream, acct, ctx) {
   let text = '';
-  const thinkParts = [];   // thinking 块内容（上游只给摘要，多段用换行连接）
+  const thoughtBlocks = new Map();
   const toolCalls = [];
   const slot = new Map();
-  const ignoredToolIndices = new Set();
-  const declaredToolNames = new Set((body?.tools || []).map(t => t.function?.name || t.name).filter(Boolean));
   let stop = null, model = null, id = null, limit = null;
 
   for await (const ev of normalizeSse(stream, acct, ctx)) {
@@ -1295,11 +1073,6 @@ async function collect(stream, acct, ctx, body = null) {
       case 'content_block_start': {
         const cb = ev.content_block || {};
         if (cb.type === 'tool_use') {
-          if (declaredToolNames.size > 0 && !declaredToolNames.has(cb.name) && (cb.name === 'view' || cb.name === 'repl' || cb.name === 'artifacts')) {
-            console.warn(`[tool] 拦截未在客户端声明的内部沙盒工具调用: ${cb.name}`);
-            ignoredToolIndices.add(ev.index);
-            break;
-          }
           const idx = slot.size;
           slot.set(ev.index, idx);
           toolCalls.push({ id: cb.id, type: 'function', function: { name: cb.name, arguments: '' } });
@@ -1311,11 +1084,14 @@ async function collect(stream, acct, ctx, body = null) {
         if (d.type === 'text_delta') text += d.text;
         else if (d.type === 'thinking_summary_delta' || d.type === 'thinking_delta') {
           const s = d.type === 'thinking_delta' ? (d.thinking || '') : (d.summary?.summary || '');
-          if (s) thinkParts.push(s);
+          if (s) {
+            const prev = thoughtBlocks.get(ev.index) || '';
+            const separator = prev && d.type === 'thinking_summary_delta' ? '\n' : '';
+            thoughtBlocks.set(ev.index, prev + separator + s);
+          }
         }
         else if (d.type === 'input_json_delta') {
-          if (ignoredToolIndices.has(ev.index)) break;
-          const idx = slot.get(ev.index) ?? 0;
+          const idx = slot.get(ev.index);
           if (toolCalls[idx]) toolCalls[idx].function.arguments += d.partial_json || '';
         }
         break;
@@ -1331,183 +1107,45 @@ async function collect(stream, acct, ctx, body = null) {
     }
   }
 
-  // 兜底补救：如果模型在正文中输出了伪工具指令且上游没出原生 tool_use，自动转换
-  if (toolCalls.length === 0 && text) {
-    const extracted = extractPseudoToolCalls(text);
-    if (extracted.toolCalls.length > 0) {
-      console.log(`[tool_fallback] (非流式) 检测到模型在正文中输出了伪工具指令，已自动转换为 ${extracted.toolCalls.length} 个原生 tool_calls`);
-      return {
-        text: extracted.cleanText,
-        toolCalls: extracted.toolCalls,
-        stop: 'tool_use',
-        model, id, limit,
-        reasoning: thinkParts.join('\n')
-      };
-    }
-  }
-
-  return { text, toolCalls, stop, model, id, limit, reasoning: thinkParts.join('\n') };
+  return { text, toolCalls, stop, model, id, limit, reasoning: [...thoughtBlocks.values()].join('\n') };
 }
 
 /** 流式：把上游事件逐个转成 OpenAI chunk 写出去 */
-async function streamToClient(res, stream, model, chatId, acct, ctx, body = null) {
-  const created = Math.floor(Date.now() / 1000);
-  try { res.on('error', () => {}); } catch {}
-  const send = o => {
-    if (!res.writableEnded && !res.destroyed) {
-      try { res.write(`data: ${JSON.stringify(o)}\n\n`); } catch {}
-    }
+function heartbeat(res) {
+  const timer = setInterval(() => { if (!res.destroyed && !res.writableEnded) res.write(': keep-alive\n\n'); }, 10000);
+  timer.unref(); return () => clearInterval(timer);
+}
+async function streamToClient(res, stream, model, chatId, acct, ctx, includeUsage) {
+  const created = Math.floor(Date.now()/1000), stopHeartbeat = heartbeat(res);
+  const send = (choices, usage) => {
+    const data = { id: chatId, object: 'chat.completion.chunk', created, model, choices };
+    if (includeUsage) data.usage = usage ?? null;
+    res.write('data: ' + JSON.stringify(data) + '\n\n');
   };
-  const chunk = (delta, finish = null) =>
-    send({ id: chatId, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta, finish_reason: finish }] });
-
-  // 定期发送 SSE 心跳保活，防止客户端或网关因空闲超时掐断连接（如 pi-ai stream idle timeout）
-  const keepAliveTimer = setInterval(() => {
-    if (!res.writableEnded && !res.destroyed) {
-      try { res.write(': keep-alive\n\n'); } catch { clearInterval(keepAliveTimer); }
-    } else {
-      clearInterval(keepAliveTimer);
-    }
-  }, 10000);
-
-  let started = false;
-  const slot = new Map();
-  let stop = null;
-  let sawTool = false;
-  let reasoning = '';   // 累积思考（用于段间补换行，最终与非流式拼接结果一致）
-  let accumulatedText = '';
-  let sentTextLength = 0;
-  let pseudoToolMode = false;
-  let finishedSent = false;
-
-  const declaredToolNames = new Set((body?.tools || []).map(t => t.function?.name || t.name).filter(Boolean));
-  const ignoredToolIndices = new Set();
-
-  const flushToolFallbackIfNeeded = () => {
-    if (sawTool) return;
-    if (pseudoToolMode || accumulatedText.includes('[TOOL_CALL')) {
-      const extracted = extractPseudoToolCalls(accumulatedText);
-      if (extracted.toolCalls.length > 0) {
-        console.log(`[tool_fallback] (流式) 拦截到模型输出伪工具指令，已自动下发 ${extracted.toolCalls.length} 个原生 tool_calls 给客户端`);
-        for (let i = 0; i < extracted.toolCalls.length; i++) {
-          const tc = extracted.toolCalls[i];
-          chunk({
-            tool_calls: [{
-              index: i,
-              id: tc.id,
-              type: 'function',
-              function: {
-                name: tc.function.name,
-                arguments: tc.function.arguments,
-              }
-            }]
-          });
-        }
-        sawTool = true;
-        stop = 'tool_use';
-        return;
-      }
-    }
-    // 未命中伪工具，把缓冲区剩余的文字发完
-    if (accumulatedText.length > sentTextLength) {
-      chunk({ content: accumulatedText.slice(sentTextLength) });
-      sentTextLength = accumulatedText.length;
-    }
-  };
-
+  const chunk = (delta, finish_reason = null) => send([{ index: 0, delta, finish_reason }]);
+  const slot = new Map(); let stop=null;
   try {
-    for await (const ev of normalizeSse(stream, acct, ctx)) {
-      switch (ev.type) {
-        case 'message_start':
-          if (!started) { started = true; chunk({ role: 'assistant', content: '' }); }
-          break;
-        case 'content_block_start': {
-          const cb = ev.content_block || {};
-          if (cb.type === 'tool_use') {
-            if (declaredToolNames.size > 0 && !declaredToolNames.has(cb.name) && (cb.name === 'view' || cb.name === 'repl' || cb.name === 'artifacts')) {
-              console.warn(`[tool] 拦截未在客户端声明的内部沙盒工具调用: ${cb.name}`);
-              ignoredToolIndices.add(ev.index);
-              break;
-            }
-            const idx = slot.size;
-            slot.set(ev.index, idx);
-            sawTool = true;
-            chunk({ tool_calls: [{ index: idx, id: cb.id, type: 'function', function: { name: cb.name, arguments: '' } }] });
-          }
-          break;
-        }
-        case 'content_block_delta': {
-          const d = ev.delta || {};
-          if (d.type === 'text_delta') {
-            accumulatedText += d.text;
-            if (!sawTool) {
-              if (pseudoToolMode) {
-                // 处于拦截状态，静默累积，不向客户端发 content
-              } else {
-                const toolIdx = accumulatedText.indexOf('[TOOL_CALL');
-                if (toolIdx !== -1) {
-                  pseudoToolMode = true;
-                  if (toolIdx > sentTextLength) {
-                    chunk({ content: accumulatedText.slice(sentTextLength, toolIdx) });
-                    sentTextLength = toolIdx;
-                  }
-                } else {
-                  // 安全窗口：暂存最后 15 字符防止 [TOOL_CALL 被断词
-                  const safeLen = Math.max(0, accumulatedText.length - 15);
-                  if (safeLen > sentTextLength) {
-                    chunk({ content: accumulatedText.slice(sentTextLength, safeLen) });
-                    sentTextLength = safeLen;
-                  }
-                }
-              }
-            } else {
-              chunk({ content: d.text });
-            }
-          }
-          else if (d.type === 'thinking_summary_delta' || d.type === 'thinking_delta') {
-            // 思考过程：上游只回摘要（thinking_summary_delta），转成 OpenAI 生态通用的
-            // reasoning_content 增量下发（DeepSeek/Qwen 系客户端都认这个字段）
-            const s = d.type === 'thinking_delta' ? (d.thinking || '') : (d.summary?.summary || '');
-            if (s) {
-              const piece = reasoning ? '\n' + s : s;
-              reasoning += piece;
-              chunk({ reasoning_content: piece });
-            }
-          }
-          else if (d.type === 'input_json_delta') {
-            if (ignoredToolIndices.has(ev.index)) break;
-            const idx = slot.get(ev.index) ?? 0;
-            chunk({ tool_calls: [{ index: idx, function: { arguments: d.partial_json || '' } }] });
-          }
-          break;
-        }
-        case 'message_delta':
-          flushToolFallbackIfNeeded();
-          if (ev.delta?.stop_reason) {
-            stop = sawTool ? 'tool_use' : ev.delta.stop_reason;
-            chunk({}, sawTool ? 'tool_calls' : mapStopReason(stop));
-            finishedSent = true;
-          }
-          break;
-        case 'error':
-          send({ error: { message: ev.error?.message || 'upstream error', type: 'upstream_error' } });
-          break;
-        default: break;
+    for await (const ev of normalizeSse(stream,acct,ctx)) {
+      const d=ev.delta || {}, cb=ev.content_block || {};
+      if (ev.type==='message_start') chunk({role:'assistant',content:''});
+      if (ev.type==='content_block_start' && cb.type==='tool_use') {
+        slot.set(ev.index, {index:slot.size, id:cb.id, name:cb.name});
       }
+      if (ev.type==='content_block_delta') {
+        if (d.type==='text_delta') chunk({content:d.text});
+        else if (d.type==='input_json_delta') {
+          // One complete call per chunk: a reader never sees a name without its arguments.
+          const {index,id,name} = slot.get(ev.index);
+          chunk({tool_calls:[{index,id,type:'function',function:{name,arguments:d.partial_json}}]});
+        }
+        else if (d.thinking || d.summary?.summary) chunk({reasoning_content:d.thinking || d.summary.summary});
+      }
+      if (ev.type==='message_delta' && d.stop_reason) stop=d.stop_reason;
     }
-
-    flushToolFallbackIfNeeded();
-    if (!finishedSent) {
-      chunk({}, sawTool ? 'tool_calls' : mapStopReason(stop));
-    }
-    if (!started) chunk({ role: 'assistant', content: '' });
-    if (!res.writableEnded && !res.destroyed) {
-      try { res.write('data: [DONE]\n\n'); } catch {}
-    }
-  } finally {
-    clearInterval(keepAliveTimer);
-    try { if (!res.writableEnded) res.end(); } catch {}
-  }
+    chunk({}, slot.size ? 'tool_calls' : mapStopReason(stop));
+    if (includeUsage) send([], chatUsage(ctx));
+    res.end('data: [DONE]\n\n');
+  } finally { stopHeartbeat(); }
 }
 
 // ------------------------------------------------------------- 估算 usage
@@ -1536,10 +1174,15 @@ function countTokens(s) {
   return Math.ceil(cjk + other / 4);
 }
 
-function estimateUsage(prompt, completion) {
-  const pt = Math.max(1, countTokens(prompt));
-  const ct = Math.max(1, countTokens(completion));
-  return { prompt_tokens: pt, completion_tokens: ct, total_tokens: pt + ct };
+// Count the logical input after context pruning, including mapped tool schemas. Images
+// contribute their prompt placeholders only. This also works offline before account selection.
+function estimateInputTokens({ prompt, tools }) {
+  return Math.max(1, countTokens(prompt) + (tools ? countTokens(JSON.stringify(tools)) : 0));
+}
+
+function chatUsage(ctx) {
+  return { prompt_tokens: ctx.input_tokens, completion_tokens: ctx.output_tokens,
+    total_tokens: ctx.input_tokens + ctx.output_tokens };
 }
 
 /**
@@ -1551,7 +1194,7 @@ function resolveFinish(result) {
   return mapStopReason(result.stop);
 }
 
-function ant2oaiText(result, model, prompt) {
+function ant2oaiText(result, model, ctx) {
   const toolCalls = result.toolCalls.length ? result.toolCalls : undefined;
   const text = toolCalls && !result.text ? null : (result.text || null);
   const message = { role: 'assistant', content: text };
@@ -1567,7 +1210,7 @@ function ant2oaiText(result, model, prompt) {
       message,
       finish_reason: resolveFinish(result),
     }],
-    usage: estimateUsage(prompt, (result.text || '') + (result.reasoning || '')),
+    usage: chatUsage(ctx),
   };
 }
 
@@ -1581,8 +1224,9 @@ const KYC_CACHE = new Map();    // account_id -> {at, data}，KYC 查询结果�
 function newRespId() { return `resp_${randomUUID().replace(/-/g, '')}`; }
 function newItemId(prefix) { return `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 24)}`; }
 
-function rememberResponse(id, response, messages) {
-  RESP_STORE.set(id, { response, messages });
+function rememberResponse(owner, id, response, messages) {
+  if (!response.store) return;
+  RESP_STORE.set(id, { owner, response, messages });
   while (RESP_STORE.size > 50) RESP_STORE.delete(RESP_STORE.keys().next().value);
 }
 
@@ -1666,7 +1310,7 @@ function responsesInputToMessages(input) {
 }
 
 /** Responses 请求体 -> chat 形状（messages/tools/system），供 runCompletion 消费 */
-function responsesToChat(rb) {
+function responsesToChat(rb, owner) {
   const systems = [];
   if (typeof rb.instructions === 'string' && rb.instructions.trim()) systems.push(rb.instructions);
 
@@ -1684,8 +1328,8 @@ function responsesToChat(rb) {
   const messages = [];
   if (rb.previous_response_id) {
     const prev = RESP_STORE.get(rb.previous_response_id);
-    if (prev) messages.push(...prev.messages);
-    else console.warn(`[responses] previous_response_id=${rb.previous_response_id} 不在内存缓存，忽略（上下文可能不完整）`);
+    if (!prev || prev.owner !== owner) throw Object.assign(new Error('previous_response_id not found'), {status:404});
+    messages.push(...prev.messages);
   }
   messages.push(...responsesInputToMessages(rb.input));
 
@@ -1713,54 +1357,30 @@ function responsesToChat(rb) {
   return chat;
 }
 
-function usageOf(prompt, completion, reasoning) {
-  const r = typeof reasoning === 'string' ? reasoning : '';
-  const u = estimateUsage(prompt, (completion || '') + r);
+function responsesUsage(ctx) {
   return {
-    input_tokens: u.prompt_tokens,
-    output_tokens: u.completion_tokens,
-    total_tokens: u.total_tokens,
+    input_tokens: ctx.input_tokens, output_tokens: ctx.output_tokens,
+    total_tokens: ctx.input_tokens + ctx.output_tokens,
     input_tokens_details: { cached_tokens: 0 },
-    output_tokens_details: { reasoning_tokens: countTokens(r) },
+    output_tokens_details: { reasoning_tokens: ctx.think_tokens },
   };
 }
 
-function resultToItems(result) {
-  const items = [];
-  if (result.reasoning) {
-    // 思考摘要在最前（与上游事件顺序一致）
-    items.push({
-      type: 'reasoning', id: newItemId('rs'), status: 'completed',
-      summary: [{ type: 'summary_text', text: result.reasoning }],
-    });
-  }
-  if (result.text) {
-    items.push({
-      type: 'message', id: newItemId('msg'), status: 'completed', role: 'assistant',
-      content: [{ type: 'output_text', text: result.text, annotations: [] }],
-    });
-  }
-  for (const tc of result.toolCalls) {
-    items.push({
-      type: 'function_call', id: newItemId('fc'), call_id: tc.id,
-      name: tc.function?.name || 'unknown', arguments: tc.function?.arguments || '{}',
-      status: 'completed',
-    });
-  }
-  return items;
+function responseStatus(stop) {
+  return stop === 'max_tokens' ? 'incomplete' : 'completed';
 }
 
 function respShell(rb, model, id, created, status, output, usage) {
   return {
     id, object: 'response', created_at: created, status,
-    error: null, incomplete_details: null,
+    error: null, incomplete_details: status === 'incomplete' ? { reason: 'max_output_tokens' } : null,
     instructions: typeof rb.instructions === 'string' ? rb.instructions : null,
     max_output_tokens: rb.max_output_tokens ?? null,
     model, output: output || [],
     parallel_tool_calls: rb.parallel_tool_calls !== false,
     previous_response_id: rb.previous_response_id || null,
     reasoning: null,
-    store: !!rb.store,
+    store: rb.store !== false,
     temperature: rb.temperature ?? null,
     text: { format: (rb.text && rb.text.format) || { type: 'text' }, verbosity: (rb.text && rb.text.verbosity) || 'medium' },
     tool_choice: rb.tool_choice || 'auto',
@@ -1772,41 +1392,30 @@ function respShell(rb, model, id, created, status, output, usage) {
   };
 }
 
-function resultToAssistantMessage(result) {
-  const m = { role: 'assistant', content: result.text || '' };
-  if (result.toolCalls.length) {
-    m.tool_calls = result.toolCalls.map(tc => ({
-      id: tc.id, type: 'function',
-      function: { name: tc.function?.name || 'unknown', arguments: tc.function?.arguments || '{}' },
-    }));
-  }
-  return m;
-}
-
 /**
- * 流式：按 Responses 官方事件序列输出
+ * JSON、SSE 和存储结果共享按块组装的同一个 response。流式事件顺序为
  * response.created -> response.in_progress ->
  *   output_item.added / content_part.added / output_text.delta（文本）
  *   output_item.added / function_call_arguments.delta（工具）->
- *   ...done -> response.completed
+ *   ...done -> response.completed / response.incomplete
  */
-async function streamResponses(res, run, model, id, rb, promptText, baseMessages) {
+async function sendResponsesResult(res, run, model, id, rb, baseMessages, owner) {
   const created = Math.floor(Date.now() / 1000);
   let seq = 0;
   const shell = (status, output, usage) => respShell(rb, model, id, created, status, output, usage);
-  const send = (type, payload) =>
-    res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: seq++, ...payload })}\n\n`);
+  const send = rb.stream === true ? (type, payload) =>
+    res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: seq++, ...payload })}\n\n`) : undefined;
 
-  send('response.created', { response: shell('in_progress') });
-  send('response.in_progress', { response: shell('in_progress') });
+  send?.('response.created', { response: shell('in_progress') });
+  send?.('response.in_progress', { response: shell('in_progress') });
 
   const items = [];
   const slot = new Map();          // 上游 content_block index -> {item, index}
-  const rsSlot = new Map();        // 思考块 -> {item, index, snap}（与工具块分开，收尾逻辑不同）
+  const rsSlot = new Map();        // 上游思考块索引 -> 对应输出条目
   let msgRef = null;
   let text = '';
-  let rsText = '';                 // 思考摘要全文（供 usage reasoning_tokens 估算）
-  let failed = null;
+  let stop = null;
+  let lastItem = null;
 
   try {
     for await (const ev of normalizeSse(run.stream, run.account, run.ctx)) {
@@ -1817,11 +1426,12 @@ async function streamResponses(res, run, model, id, rb, promptText, baseMessages
             const item = { type: 'reasoning', id: newItemId('rs'), summary: [], status: 'in_progress' };
             const index = items.length;
             items.push(item);
-            rsSlot.set(ev.index, { item, index, snap: '' });
-            send('response.output_item.added', { output_index: index, item: { ...item } });
-            send('response.reasoning_summary_part.added', {
-              item_id: item.id, output_index: index, content_index: 0,
-              part: { type: 'summary_text', text: '' },
+            rsSlot.set(ev.index, { item, index });
+            lastItem = item;
+            send?.('response.output_item.added', { output_index: index, item: { ...item } });
+            item.summary = [{ type: 'summary_text', text: '' }];
+            send?.('response.reasoning_summary_part.added', {
+              item_id: item.id, output_index: index, summary_index: 0, part: item.summary[0],
             });
           } else if (cb.type === 'tool_use') {
             const item = {
@@ -1832,7 +1442,8 @@ async function streamResponses(res, run, model, id, rb, promptText, baseMessages
             const index = items.length;
             items.push(item);
             slot.set(ev.index, { item, index });
-            send('response.output_item.added', { output_index: index, item: { ...item } });
+            lastItem = item;
+            send?.('response.output_item.added', { output_index: index, item: { ...item } });
           }
           break;
         }
@@ -1844,89 +1455,79 @@ async function streamResponses(res, run, model, id, rb, promptText, baseMessages
               const index = items.length;
               items.push(item);
               msgRef = { item, index };
-              send('response.output_item.added', { output_index: index, item: { ...item, content: [] } });
-              send('response.content_part.added', {
+              send?.('response.output_item.added', { output_index: index, item: { ...item, content: [] } });
+              send?.('response.content_part.added', {
                 item_id: item.id, output_index: index, content_index: 0,
                 part: { type: 'output_text', text: '', annotations: [] },
               });
             }
+            lastItem = msgRef.item;
             text += d.text;
-            send('response.output_text.delta', {
+            send?.('response.output_text.delta', {
               item_id: msgRef.item.id, output_index: msgRef.index, content_index: 0,
-              delta: d.text, snapshot: text,
+              delta: d.text, logprobs: [],
             });
           } else if (d.type === 'thinking_summary_delta' || d.type === 'thinking_delta') {
             const s = d.type === 'thinking_delta' ? (d.thinking || '') : (d.summary?.summary || '');
             const rs = rsSlot.get(ev.index);
             if (!rs || !s) break;
-            const delta = rs.snap ? '\n' + s : s;
-            rs.snap += delta;
-            rsText += (rsText ? '\n' : '') + s;
-            send('response.reasoning_summary_text.delta', {
-              item_id: rs.item.id, output_index: rs.index, content_index: 0,
-              delta, snapshot: rs.snap,
+            const summary = rs.item.summary[0];
+            const delta = summary.text && d.type === 'thinking_summary_delta' ? '\n' + s : s;
+            summary.text += delta;
+            lastItem = rs.item;
+            send?.('response.reasoning_summary_text.delta', {
+              item_id: rs.item.id, output_index: rs.index, summary_index: 0,
+              delta,
             });
           } else if (d.type === 'input_json_delta') {
             const s = slot.get(ev.index);
             if (!s) break;
+            lastItem = s.item;
             s.item.arguments += d.partial_json || '';
-            send('response.function_call_arguments.delta', {
+            send?.('response.function_call_arguments.delta', {
               item_id: s.item.id, output_index: s.index,
-              delta: d.partial_json || '', snapshot: s.item.arguments,
+              delta: d.partial_json || '',
             });
           }
           break;
         }
-        case 'error':
-          failed = ev.error?.message || 'upstream error';
+        case 'message_delta':
+          if (ev.delta?.stop_reason) stop = ev.delta.stop_reason;
           break;
+        case 'error':
+          throw new Error(ev.error?.message || 'upstream error');
         default: break;
       }
     }
   } catch (e) {
-    // 客户端断连导致的中止：静默退出（handler 的 finally 会归还并发额度）
-    if (e?.name === 'AbortError' || res.destroyed) return;
-    failed = e.message;
+    if (res.destroyed || e.name === 'AbortError' || !send) throw e;
+    run.release(false, e.message);
+    const response = shell('failed', items, null);
+    response.error = { code: 'upstream_error', message: e.message };
+    send('response.failed', { response });
+    return res.end();
   }
 
-  if (failed) {
-    const r = shell('failed', items, null);
-    r.error = { code: 'upstream_error', message: failed };
-    send('response.failed', { response: r });
-    res.end();
-    return;
+  const status = responseStatus(stop);
+  for (const [index, item] of items.entries()) {
+    item.status = item === lastItem ? status : 'completed';
+    const ref = { item_id: item.id, output_index: index };
+    if (item.type === 'reasoning') {
+      const part = item.summary[0];
+      if (!part.text) item.summary = [];
+      send?.('response.reasoning_summary_text.done', { ...ref, summary_index: 0, text: part.text });
+      send?.('response.reasoning_summary_part.done', { ...ref, summary_index: 0, part,
+        ...(item.status === 'incomplete' ? { status: 'incomplete' } : {}) });
+    } else if (item.type === 'message') {
+      const part = { type: 'output_text', text, annotations: [] };
+      item.content = [part];
+      send?.('response.output_text.done', { ...ref, content_index: 0, text, logprobs: [] });
+      send?.('response.content_part.done', { ...ref, content_index: 0, part });
+    } else if (item.type === 'function_call') {
+      send?.('response.function_call_arguments.done', { ...ref, arguments: item.arguments });
+    }
+    send?.('response.output_item.done', { output_index: index, item });
   }
-
-  // 思考条目收尾（先于 message/function_call 发，保持 output 顺序与 stream 一致）
-  for (const { item, index, snap } of rsSlot.values()) {
-    const part = { type: 'summary_text', text: snap || '' };
-    item.summary = snap ? [part] : [];
-    item.status = 'completed';
-    send('response.reasoning_summary_part.done', {
-      item_id: item.id, output_index: index, content_index: 0, part,
-    });
-    send('response.output_item.done', { output_index: index, item: { ...item } });
-  }
-  if (msgRef) {
-    const part = { type: 'output_text', text, annotations: [] };
-    msgRef.item.content = [part];
-    msgRef.item.status = 'completed';
-    send('response.output_text.done', {
-      item_id: msgRef.item.id, output_index: msgRef.index, content_index: 0, text,
-    });
-    send('response.content_part.done', {
-      item_id: msgRef.item.id, output_index: msgRef.index, content_index: 0, part,
-    });
-    send('response.output_item.done', { output_index: msgRef.index, item: { ...msgRef.item } });
-  }
-  for (const { item, index } of slot.values()) {
-    item.status = 'completed';
-    send('response.function_call_arguments.done', { item_id: item.id, output_index: index, arguments: item.arguments });
-    send('response.output_item.done', { output_index: index, item: { ...item } });
-  }
-
-  send('response.completed', { response: shell('completed', items, usageOf(promptText, text, rsText)) });
-  res.end();
 
   // 存档以支持 previous_response_id 续聊
   const asst = { role: 'assistant', content: text };
@@ -1935,7 +1536,11 @@ async function streamResponses(res, run, model, id, rb, promptText, baseMessages
     function: { name: s.item.name, arguments: s.item.arguments },
   }));
   if (tcs.length) asst.tool_calls = tcs;
-  rememberResponse(id, shell('completed', items, usageOf(promptText, text, rsText)), [...baseMessages, asst]);
+  const response = shell(status, items, responsesUsage(run.ctx));
+  rememberResponse(owner, id, response, [...baseMessages, asst]);
+  if (!send) return json(res, 200, response);
+  send(`response.${status}`, { response });
+  res.end();
 }
 
 // ---------------------------------------------------------------- HTTP 服务
@@ -1944,7 +1549,7 @@ function json(res, code, obj, headers) {
   res.writeHead(code, {
     'content-type': 'application/json; charset=utf-8',
     'content-length': b.length,
-    'access-control-allow-origin': '*',
+
     ...(headers || {}),
   });
   res.end(b);
@@ -1963,12 +1568,18 @@ function onClientGone(res) {
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
-    let d = '';
+    let size = 0, chunks = [];
     req.on('data', c => {
-      d += c;
-      if (d.length > 64 * 1024 * 1024) reject(new Error('body too large'));
+      if (!chunks) return; // discard rather than accumulating after rejection
+      size += c.length;
+      if (size > 64 * 1024 * 1024) { chunks=null; reject(Object.assign(new Error('body too large'),{status:413})); }
+      else chunks.push(c);
     });
-    req.on('end', () => { try { resolve(d ? JSON.parse(d) : {}); } catch (e) { reject(e); } });
+    req.on('end', () => {
+      if (!chunks) return;
+      try { resolve(size ? JSON.parse(Buffer.concat(chunks,size).toString('utf8')) : {}); }
+      catch { reject(Object.assign(new Error('invalid JSON body'), {status:400})); }
+    });
     req.on('error', reject);
   });
 }
@@ -1983,11 +1594,11 @@ const LEGACY_KEY_OBJ = {
   models: [], rpm: 0, tpm: 0, ipWhitelist: [],
   quota: { limitTokens: 0, usedTokens: 0, limitRequests: 0, usedRequests: 0 },
 };
-function authenticate(req) {
-  const h = req.headers['authorization'] || '';
+function authenticate(req, management = false) {
+  const h = req.headers.authorization || req.headers['x-api-key'] || '';
   const raw = String(h).replace(/^Bearer\s+/i, '').trim();
 
-  if (LEGACY_KEY && raw === LEGACY_KEY) return { key: LEGACY_KEY_OBJ };
+  if (LEGACY_KEY && raw === LEGACY_KEY) return management ? {error:{status:403, message:'调用 Key 无管理权限', type:'permission_error'}} : { key: LEGACY_KEY_OBJ };
 
   if (KEYS.keyCount() === 0) {
     return {
@@ -1998,12 +1609,11 @@ function authenticate(req) {
     };
   }
   const ip = (req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
-  return KEYS.identify(raw, ip);
+  return KEYS.identify(raw, ip, { management });
 }
 
 const UI_FILE = [
-  path.join(ROOT, 'web', 'webui.local.html'),
-  path.join(ROOT, 'webui.local.html'),
+  ...(process.env.ENABLE_LOCAL_UI === '1' ? [path.join(ROOT, 'web', 'webui.local.html')] : []),
   path.join(ROOT, 'web', 'webui.html'),
   path.join(ROOT, 'webui.html'),
   path.join(HERE, 'webui.html'),
@@ -2067,32 +1677,37 @@ function cleanupConvRouting() {
 }
 setInterval(cleanupConvRouting, 60 * 1000);
 
+function completionErrorStatus(e) {
+  if (e.name === 'AbortError') return 499;
+  const kind = e.kind;
+  return kind === 'challenge' || kind === 'transient' || kind === 'upstream_stream' ? 502
+      : kind === 'rate_limit' || kind === 'concurrency' || e.status === 429 ? 429
+      : kind === 'auth' || e.status === 401 || e.status === 403 ? 401
+      : e.status >= 400 && e.status < 500 ? e.status : 500;
+}
+
+function recordCompletion(ctx, status, error = '') {
+  ctx.status = status;
+  ctx.ok = status >= 200 && status < 300;
+  ctx.error = String(error).slice(0, 200);
+  ctx.latency_ms = Date.now() - ctx.startedAt;
+  USAGE.record(ctx);
+}
+
 /**
  * 核心：选一个账号跑一次 completion，失败自动换下一个账号（failover）。
  *
  * 返回 { stream, upBody, account, release } —— 调用方消费完流后必须调 release()
  * 释放并发额度（无论成功失败）。
  */
-async function runCompletion(body, model, signal, apiKey, req) {
-  const convKey = getConversationKey(body, req);
+async function runCompletion(body, model, signal, req, ctx) {
+  const session = getConversationKey(body, req);
+  const convKey = session && `${req.keyScope}:${session}`;
   let preferredId = convKey ? CONV_ROUTING.get(convKey)?.accountId : null;
 
-  // ── 上下文优化：修剪历史旧图片与冗长工具输出，大幅减小 prompt 体积 ──
-  // 仅当池配置启用 pruneContext 时生效（默认 true）
-  if (POOL?.data?.pruneContext !== false && Array.isArray(body.messages)) {
-    const maxToolChars = +(POOL?.data?.pruneMaxToolChars || 8000);
-    const keepRecentTools = +(POOL?.data?.pruneKeepRecentTools || 4);
-    body = {
-      ...body,
-      messages: optimizeContext(body.messages, {
-        keepRecentTurns: Math.max(2, +(POOL?.data?.pruneKeepRecentTools || 4)),
-        maxImages: 3,
-        maxChars: maxToolChars,
-      }),
-    };
-  }
-
+  body = prepareContext(body);
   const upBody = buildUpstreamBody(body, model);
+  const inputTokens = estimateInputTokens(upBody);
   const images = collectImages(body);          // 本轮要上传的图片（与 prompt 里 [image] 占位同序同集合）
   const tried = new Set();
   let lastErr = null;
@@ -2133,38 +1748,29 @@ async function runCompletion(body, model, signal, apiKey, req) {
       break;
     }
 
-    if (convKey) {
-      CONV_ROUTING.set(convKey, { accountId: acct.id, at: Date.now() });
-    }
-
-    // 稳定前缀链（按账号隔离）——缓存命中率与「新增输入」都基于它
-    const pfx = prefixOf(body, acct.id, model);
-    const hist = (body.messages || []).filter(m => m.role !== 'system' && m.role !== 'developer');
-    // 会话复用保护：只用于纯多轮文本对话。工具调用 / 工具结果 / 并发同会话会串台，
-    // 这些场景一律新建会话走全量 prompt（正确性优先于命中率）。
-    const hasToolFlow = hist.some(m => m.role === 'tool' || m.role === 'function' ||
-      (m.role === 'assistant' && (m.tool_calls || []).length));
-    const canReuse = images.length === 0 && hist.length >= 2 &&
-      hist[hist.length - 1].role === 'user' && !hasToolFlow;   // 有图片必须走全量（复用增量会丢图）
-    const reuse = canReuse ? USAGE.reusable(acct.id, pfx.candidates) : null;
-    const ctx = {
-      startedAt: Date.now(),
-      account_id: acct.id, account_label: acct.label,
-      model, api: 'chat.completions',
-      input_tokens: 0, output_tokens: 0,
-      prefix_hash: pfx.hash, prefix_tokens: pfx.tokens,
-      prefix_candidates: pfx.candidates,
-      conv_id: '', parent_uuid: '',
-      ttfb_ms: null, latency_ms: 0, status: 200, ok: true, error: '',
-      // 真实输出速度相关（normalizeSse 的 finally 里回填）
-      text_tokens: 0, think_tokens: 0,
-      gen_ms: 0, write_ms: 0, think_ms: 0, idle_ms: 0,
-      tps: 0, tps_e2e: 0, tps_legacy: 0,
-      effort: upBody.effort || '',        // 本轮实际用的思考档位（排查「输出速度慢」用）
-      reused_upstream: false, _logged: false,
-    };
-
+    ctx.attempts++;
+    Object.assign(ctx, { account_id: acct.id, account_label: acct.label, input_tokens: 0,
+      conv_id: '', parent_uuid: '', reused_upstream: false });
     try {
+      if (convKey) {
+        CONV_ROUTING.set(convKey, { accountId: acct.id, at: Date.now() });
+      }
+
+      // 稳定前缀链（按账号隔离）——缓存命中率与「新增输入」都基于它
+      const pfx = prefixOf(body, JSON.stringify([req.keyScope, acct.id]), model);
+      const hist = (body.messages || []).filter(m => m.role !== 'system' && m.role !== 'developer');
+      // 会话复用保护：只用于纯多轮文本对话。工具调用 / 工具结果 / 并发同会话会串台，
+      // 这些场景一律新建会话走全量 prompt（正确性优先于命中率）。
+      const hasToolFlow = hist.some(m => m.role === 'tool' || m.role === 'function' ||
+        (m.role === 'assistant' && (m.tool_calls || []).length));
+      const canReuse = images.length === 0 && hist.length >= 2 &&
+        hist[hist.length - 1].role === 'user' && !hasToolFlow;   // 有图片必须走全量（复用增量会丢图）
+      const reuse = canReuse ? USAGE.reusable(acct.id, pfx.candidates) : null;
+      Object.assign(ctx, {
+        _tools: upBody.tools || [], effort: upBody.effort || '',
+        prefix_hash: pfx.hash, prefix_tokens: pfx.tokens, prefix_candidates: pfx.candidates,
+      });
+
       let conv, reqBody = upBody;
       if (images.length) {
         // 图片上传放在选中账号之后：uuid 按账号隔离缓存，failover 换账号要重传
@@ -2192,7 +1798,7 @@ async function runCompletion(body, model, signal, apiKey, req) {
         conv = await createConversation(acct, 'proxy', signal);
       }
       ctx.conv_id = conv;
-      ctx.input_tokens = Math.max(1, Math.ceil((reqBody.prompt || '').length / 4));
+      ctx.input_tokens = inputTokens;
 
       const stream = await callCompletion(acct, conv, reqBody, signal);
       let released = false;
@@ -2203,18 +1809,12 @@ async function runCompletion(body, model, signal, apiKey, req) {
         if (signal?.aborted) { POOL.release(acct, false); }
         else if (ok) POOL.release(acct, true);
         else POOL.fail(acct, kind, why || 'stream failed');
-        // 统一在这里落请求级用量日志（流式 / 非流式 / Responses / Messages 全覆盖）
-        if (!ctx._logged) {
-          ctx._logged = true;
-          ctx.ok = ok && !signal?.aborted;
-          ctx.status = ctx.ok ? 200 : 499;
-          if (!ctx.ok) ctx.error = String(why || (signal?.aborted ? 'client disconnected' : '') || '').slice(0, 200);
-          ctx.latency_ms = ctx.latency_ms || Date.now() - ctx.startedAt;
-          USAGE.record(ctx);
-          // 计入该 API Key 的额度（含缓存命中的输入，口径与账号用量一致）
-          if (apiKey && apiKey.id !== '_legacy') {
-            KEYS.noteTokens(apiKey, (ctx.input_tokens || 0) + (ctx.output_tokens || 0));
-          }
+        if (!ok) {
+          ctx.status = 502;
+          ctx.error = why;
+        }
+        if (req.apiKey && req.apiKey !== LEGACY_KEY_OBJ) {
+          KEYS.noteTokens(req.apiKey, ctx.input_tokens + ctx.output_tokens);
         }
       };
       if (failovers > 0 || queueWaits > 0) {
@@ -2224,13 +1824,6 @@ async function runCompletion(body, model, signal, apiKey, req) {
       if (ctx.input_tokens) POOL.noteTokens(acct, ctx.input_tokens, 0);
       return { stream, upBody: reqBody, account: acct, release, ctx };
     } catch (e) {
-      if (!ctx._logged) {
-        ctx._logged = true;
-        ctx.ok = false; ctx.status = e.status || 502;
-        ctx.error = String(e.message || '').slice(0, 200);
-        ctx.latency_ms = Date.now() - ctx.startedAt;
-        USAGE.record(ctx);
-      }
       if (e?.name === 'AbortError' || signal?.aborted) {
         POOL.release(acct, false);   // 中性归还 inflight（fail 会记失败+冷却，不能用）
         throw clientGoneError();
@@ -2313,7 +1906,7 @@ async function loadLocalPlugins() {
       if (d.isDirectory()) {
         const entry = path.join(pDir, d.name, 'plugin.mjs');
         if (fs.existsSync(entry)) {
-          const mod = await import(`file://${entry}`);
+          const mod = await import(pathToFileURL(entry).href);
           if (typeof mod.registerPlugin === 'function') {
             await mod.registerPlugin({
               onRoute: (p, fn) => PLUGIN_ROUTES.set(p, fn),
@@ -2332,7 +1925,7 @@ async function loadLocalPlugins() {
     console.warn('[plugin] 加载本地扩展异常:', err.message);
   }
 }
-await loadLocalPlugins();
+if (process.env.ENABLE_LOCAL_PLUGINS === '1') await loadLocalPlugins();
 
 /**
  * HTML 实体解码工具
@@ -2354,25 +1947,14 @@ function decodeHtmlEntities(str) {
  * 免费 DuckDuckGo 网页搜索
  * 兼容 DeepSeek Search API 的数据格式返回
  */
-async function searchDuckDuckGo(query, count = 10) {
+async function searchDuckDuckGo(query, count = 10, signal) {
   if (!query || typeof query !== 'string' || !query.trim()) {
     return [];
   }
   const cleanQuery = query.trim();
   const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(cleanQuery)}`;
-  const res = await undiciFetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-    },
-  });
-
-  if (!res.ok) {
-    throw new Error(`DuckDuckGo 搜索请求失败: HTTP ${res.status}`);
-  }
-
-  const html = await res.text();
+  const {bytes} = await fetchPublicBytes(url,{signal,accept:'text/html'});
+  const html = bytes.toString('utf8');
   const results = [];
   const parts = html.split(/class="[^"]*result\s+results_links[^"]*"/i);
 
@@ -2412,16 +1994,9 @@ async function searchDuckDuckGo(query, count = 10) {
 /**
  * 免费网页抓取
  */
-async function fetchWebContent(targetUrl) {
-  if (!targetUrl || typeof targetUrl !== 'string') throw new Error('url 参数缺失');
-  const res = await undiciFetch(targetUrl, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,text/plain,*/*',
-    },
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const html = await res.text();
+async function fetchWebContent(targetUrl, signal) {
+  const {bytes} = await fetchPublicBytes(targetUrl,{signal,accept:'text/html,text/plain'});
+  const html = bytes.toString('utf8');
   const text = html
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '')
@@ -2432,20 +2007,72 @@ async function fetchWebContent(targetUrl) {
   return text.slice(0, 50000);
 }
 
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+const COMPLETION_APIS = new Map([
+  ['/v1/chat/completions', 'chat.completions'], ['/v1/messages', 'messages'], ['/v1/responses', 'responses'],
+]);
+const MESSAGES_POST_ALIASES = new Map([
+  ['/v1/v1/messages', '/v1/messages'],
+  ['/v1/v1/messages/count_tokens', '/v1/messages/count_tokens'],
+]);
+const INFERENCE_ROUTES = new Set([...COMPLETION_APIS.keys(), '/v1/models', '/v1/messages/count_tokens',
+  '/v1/tools/search', '/tools/search', '/v1/search', '/search', '/v1/tools/fetch', '/tools/fetch', '/v1/fetch', '/fetch']);
+async function handleRequest(req, res) {
+  let url;
+  try { url = new URL(req.url, 'http://gateway.invalid'); } catch { return json(res, 400, {error:{message:'Invalid URL'}}); }
+  const origin = req.headers.origin;
+  if ((origin && !['http://'+req.headers.host, 'https://'+req.headers.host].includes(origin)) || req.headers['sec-fetch-site'] === 'cross-site') {
+    return json(res, 403, { error: { type:'permission_error', message:'不允许跨站访问' } });
+  }
+  res.setHeader('cache-control', 'no-store');
+  res.setHeader('x-content-type-options', 'nosniff');
+  res.setHeader('referrer-policy', 'no-referrer');
+  res.setHeader('x-frame-options', 'DENY');
 
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, {
-      'access-control-allow-origin': '*',
-      'access-control-allow-headers': '*',
-      'access-control-allow-methods': '*',
-    });
+    res.writeHead(204);
     return res.end();
   }
 
-  // 优先执行本地扩展插件注册的自定义路由
+  if (req.method === 'GET' && url.pathname === '/readyz') {
+    return json(res, 200, {status:'ready'}, {'x-gateway-service':'claude-desktop-proxy'});
+  }
+  // ---------------------------------------------------------- WebUI（页面本身免鉴权，本机回环访问；
+  // 页面里的 API 调用仍要带 Bearer key）
+  if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/ui' || url.pathname === '/ui/')) {
+    let html = uiHtml();
+    if (!html) {
+      return json(res, 500, { error: { message: 'webui.html 不在反代同目录，无法提供管理界面', type: 'proxy_error' } });
+    }
+    const b = Buffer.from(html);
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'content-length': b.length,
+      'cache-control': 'no-store',
+    });
+    return res.end(b);
+  }
+
+  // An inert local HTML shell can be opened by navigation; its state/actions still require an admin header.
+  const loginShell = req.method === 'GET' && /^\/login\/[a-zA-Z0-9_-]+$/.test(url.pathname) && isLoopbackReq(req);
+  if (loginShell) {
+    res.writeHead(200, {'content-type':'text/html; charset=utf-8'});
+    return res.end(loginPage(url.pathname.slice(7)));
+  }
+  // DSH appends /v1/messages even when the configured base already includes /v1.
+  // Resolve only these two POST routes before auth, usage accounting and dispatch.
+  const messagesPath = req.method === 'POST' && MESSAGES_POST_ALIASES.get(url.pathname);
+  if (messagesPath && !PLUGIN_ROUTES.has(url.pathname)) url.pathname = messagesPath;
   const pluginHandler = PLUGIN_ROUTES.get(url.pathname);
+  const inference = !pluginHandler && (INFERENCE_ROUTES.has(url.pathname) || /^\/v1\/responses\/[^/]+$/.test(url.pathname));
+  const auth = authenticate(req, !inference);
+  if (auth.error) return json(res, auth.error.status, {error:auth.error});
+  if (!inference && !isLoopbackReq(req) && process.env.ALLOW_REMOTE_ADMIN !== '1') {
+    return json(res, 403, {error:{message:'远程管理未启用', type:'permission_error'}});
+  }
+  req.apiKey = auth.key;
+  // Scope private history to the credential, not a mutable/imported display ID.
+  req.keyScope = createHash('sha256').update(auth.key === LEGACY_KEY_OBJ ? LEGACY_KEY : auth.key.key).digest('hex');
+  // 优先执行本地扩展插件注册的自定义路由
   if (pluginHandler) {
     try {
       const handled = await pluginHandler(req, res, { url, json, readBody });
@@ -2455,51 +2082,14 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // ---------------------------------------------------------- WebUI（页面本身免鉴权，本机回环访问；
-  // 页面里的 API 调用仍要带 Bearer key）
-  if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/ui' || url.pathname === '/ui/')) {
-    let html = uiHtml();
-    if (!html) {
-      return json(res, 500, { error: { message: 'webui.html 不在反代同目录，无法提供管理界面', type: 'proxy_error' } });
-    }
-    // 本机访问：把 config.json 里第一个可用 key 注入页面，省去手填。
-    // 安全边界不变——本机用户本来就能直接读 config.json；局域网访问绝不注入。
-    // 想关掉：config.json 里 settings.injectKeyToLocalUI = false
-    if (isLoopbackReq(req) && KEYS.settings().injectKeyToLocalUI !== false) {
-      const cand = KEYS.list().find(x => x.enabled !== false && !x.expired);
-      if (cand && cand.key) {
-        const boot = `<script>window.__BOOT_KEY__=${JSON.stringify(cand.key)};</script>\n</head>`;
-        html = html.replace('</head>', boot);
-      }
-    }
-    const b = Buffer.from(html);
-    res.writeHead(200, {
-      'content-type': 'text/html; charset=utf-8',
-      'content-length': b.length,
-      'cache-control': 'no-cache',
-    });
-    return res.end(b);
-  }
-
-    // ---------------------------------------------------------- API Key 管理（仅本机可操作）
-    // 放在统一鉴权之前：只校验「本机 + key 有效」，不检查该 key 的额度 / 到期 / 限速。
-    // 否则额度用尽后连管理接口都进不去，无法自救。
-    if (url.pathname === '/v1/keys' || url.pathname.startsWith('/v1/keys/')) {
-      if (!isLoopbackReq(req)) {
-        return json(res, 403, { error: { message: 'Key 管理只能在运行反代的机器上操作（需本机访问）', type: 'permission_error' } });
-      }
-      const rawKey = String(req.headers['authorization'] || '').replace(/^Bearer\s+/i, '').trim();
-      const known = (LEGACY_KEY && rawKey === LEGACY_KEY) || KEYS.list().some(k => k.key === rawKey);
-      if (!known) {
-        return json(res, 401, { error: { message: 'invalid api key', type: 'authentication_error', hint: '管理接口也要带一个有效的 Bearer key' } });
-      }
+  if (url.pathname === '/v1/keys' || url.pathname.startsWith('/v1/keys/')) {
       const rest = url.pathname.slice('/v1/keys'.length).replace(/^\//, '');
       const parts = rest ? rest.split('/') : [];
       const kid = parts[0] || '';
       const action = parts[1] || '';
 
       if (!kid && req.method === 'GET') {
-        return json(res, 200, { keys: KEYS.list(), settings: KEYS.settings(), config_file: path.basename(CONFIG_FILE) });
+        return json(res, 200, { keys: KEYS.list(), settings: publicSettings(KEYS.settings()), config_file: path.basename(CONFIG_FILE) });
       }
       if (!kid && req.method === 'POST') {
         const b = await readBody(req);
@@ -2521,7 +2111,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 405, { error: { message: 'method not allowed', type: 'invalid_request_error' } });
     }
 
-  // ---------------------------------------------------------- 链接登录状态页（免鉴权，仅本机回环；
+  // ---------------------------------------------------------- 链接登录状态与操作（管理鉴权 + 本机回环；
   // 不含任何凭据，方便把链接复制到任意浏览器查看进度 / 重新打开登录窗口）
   // 开放局域网后必须显式限制：远程设备既看不到本机弹出的浏览器窗口，
   // 也不该能触发「重新打开登录窗口」——这属于本机操作。
@@ -2611,39 +2201,12 @@ const server = http.createServer(async (req, res) => {
     const ok = CFVERIFY.cancel(fid);
     return json(res, ok ? 200 : 404, { ok, message: ok ? '已请求取消，当前账号完成后停止' : '流程不存在或已结束' });
   }
-  if (req.method === 'GET' && /^\/login\/[^/]+$/.test(url.pathname)) {
-    const id = url.pathname.slice('/login/'.length);
-    if (!LOGIN.get(id)) {
-      return json(res, 404, { error: { message: '登录流程不存在或已过期', type: 'invalid_request_error' } });
-    }
-    const b = Buffer.from(loginPage(id));
-    res.writeHead(200, {
-      'content-type': 'text/html; charset=utf-8',
-      'content-length': b.length,
-      'cache-control': 'no-cache',
-    });
-    return res.end(b);
-  }
-
-  const auth = authenticate(req);
-  if (auth.error) {
-    // 允许本机回环免 key 调用搜索与抓取
-    const isToolPath = url.pathname === '/v1/tools/search' || url.pathname === '/tools/search'
-      || url.pathname === '/v1/search' || url.pathname === '/search'
-      || url.pathname === '/v1/tools/fetch' || url.pathname === '/tools/fetch'
-      || url.pathname === '/v1/fetch' || url.pathname === '/fetch';
-    if (!isToolPath || !isLoopbackReq(req)) {
-      const e = auth.error;
-      return json(res, e.status, { error: { message: e.message, type: e.type, hint: e.hint } });
-    }
-  }
-  req.apiKey = auth.key;
-  // 计入该 key 的请求数与 RPM 窗口（额度检查在 authenticate 里已经做过）
-  if (req.apiKey && req.apiKey.id !== '_legacy') {
-    KEYS.noteRequest(req.apiKey, (req.socket?.remoteAddress || '').replace(/^::ffff:/, ''));
-  }
+  if (inference && req.apiKey !== LEGACY_KEY_OBJ) KEYS.noteRequest(req.apiKey, getReqIp(req));
   // 每个请求都挂断连检测；补全类端点把它传给上游 fetch（见 runCompletion）
   const gone = onClientGone(res);
+  // One terminal record per authenticated generation request, including validation and queue failures.
+  const api = req.method === 'POST' && COMPLETION_APIS.get(url.pathname);
+  const usage = api ? { api, startedAt: Date.now(), attempts: 0, input_tokens: 0, output_tokens: 0 } : null;
 
   try {
     if (req.method === 'GET' && url.pathname === '/healthz') {
@@ -2715,13 +2278,13 @@ const server = http.createServer(async (req, res) => {
           return json(res, 200, { results: [] });
         }
 
-        console.log(`[web-search] DuckDuckGo 搜索: "${query}" (期望结果数: ${count})`);
-        const results = await searchDuckDuckGo(query, Math.min(Math.max(1, count), 30));
+
+        const results = await searchDuckDuckGo(query, Math.min(Math.max(1, count), 30), gone.signal);
         console.log(`[web-search] 返回 ${results.length} 条搜索结果`);
         return json(res, 200, { results });
       } catch (e) {
         console.error('[web-search] 搜索异常:', e.message);
-        return json(res, 500, { error: { message: `搜索失败: ${e.message}`, type: 'search_error' } });
+        return json(res, e.status || 502, { error: { message: `搜索失败: ${e.message}`, type: 'search_error' } });
       }
     }
 
@@ -2743,12 +2306,12 @@ const server = http.createServer(async (req, res) => {
           return json(res, 400, { error: { message: 'url is required', type: 'invalid_request_error' } });
         }
 
-        console.log(`[web-fetch] 网页抓取: ${targetUrl}`);
-        const content = await fetchWebContent(targetUrl);
+
+        const content = await fetchWebContent(targetUrl, gone.signal);
         return json(res, 200, { content });
       } catch (e) {
         console.error('[web-fetch] 抓取异常:', e.message);
-        return json(res, 500, { error: { message: `抓取失败: ${e.message}`, type: 'fetch_error' } });
+        return json(res, e.status || 502, { error: { message: `抓取失败: ${e.message}`, type: 'fetch_error' } });
       }
     }
 
@@ -2756,10 +2319,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/v1/accounts' && req.method === 'GET') {
       const st = POOL.status();
       const setts = KEYS.settings() || {};
-      Object.assign(st, setts);
-      st.price_per_million_tokens = setts.pricePerMillionTokens || 0;
-      st.maomail_token = setts.maomailToken || setts.maomail_token || '';
-      st.maomail_base_url = setts.maomailBaseUrl || setts.maomail_base_url || 'https://zjkdongao.cn';
+      Object.assign(st, publicSettings(setts));
       st.server = KEYS.serverConfig();
       st.cf_storm = cfStormActive(); // CF 风暴状态，WebUI 顶部横幅用
       // 用请求级用量日志校准「已用 token」：
@@ -3023,7 +2583,7 @@ const server = http.createServer(async (req, res) => {
             const existing = POOL.accounts().find(a => a.sessionKey === item.sessionKey);
             if (existing && onConflict === 'skip') {
               results.skipped++;
-              results.accounts.push({ id: existing.id, label: existing.label, sessionKey: item.sessionKey, status: 'skipped' });
+              results.accounts.push({ id: existing.id, label: existing.label, status: 'skipped' });
               continue;
             }
             let org = item.org;
@@ -3193,94 +2753,8 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
-      if (rest === 'export') {
-        // 批量导出 sessionKey：给 WebUI 做一键复制 / TXT 导出用。
-        // 与 /v1/keys 同级安全：统一鉴权（Bearer）之外，还要求本机回环访问，局域网一律拒绝。
-        if (!isLoopbackReq(req)) {
-          return json(res, 403, { error: { message: '导出凭据只能在运行反代的机器上操作（需本机访问）', type: 'permission_error' } });
-        }
-        let body = {};
-        if (req.method === 'POST') {
-          try { body = await readBody(req); } catch {}
-        }
-        const format = body.format || url.searchParams.get('format') || 'json';
-        const onlyEnabled = body.enabled != null ? !!body.enabled : (url.searchParams.get('enabled') === '1');
-        let list = POOL.accounts();
-        if (onlyEnabled) list = list.filter(a => a.enabled);
-
-        const ids = body.ids || (url.searchParams.get('ids') ? url.searchParams.get('ids').split(',').map(s => s.trim()).filter(Boolean) : null);
-        if (Array.isArray(ids) && ids.length) {
-          const idSet = new Set(ids);
-          list = list.filter(a => idSet.has(a.id));
-        }
-
-        const keys = list.map(a => a.sessionKey).filter(Boolean);
-
-        if (format === 'txt') {
-          const txt = keys.join('\n');
-          logOperation({
-            category: '凭据密钥',
-            action: '导出密钥',
-            target: `${keys.length}个账号`,
-            status: 'success',
-            detail: `导出 TXT 格式密钥 (${keys.length} 行)`,
-            ip: getReqIp(req),
-          });
-          res.writeHead(200, {
-            'content-type': 'text/plain; charset=utf-8',
-            'content-disposition': 'attachment; filename="claude-sessionkeys.txt"',
-            'content-length': Buffer.byteLength(txt, 'utf8'),
-          });
-          return res.end(txt);
-        }
-
-        logOperation({
-          category: '凭据密钥',
-          action: '导出密钥',
-          target: `${keys.length}个账号`,
-          status: 'success',
-          detail: `导出 JSON 格式凭据 (共 ${keys.length} 条)`,
-          ip: getReqIp(req),
-        });
-        return json(res, 200, {
-          total: list.length,
-          count: keys.length,
-          keys,
-          accounts: list.map(a => ({
-            id: a.id,
-            label: a.label,
-            sessionKey: a.sessionKey || '',
-            org: a.org || '',
-            enabled: !!a.enabled,
-          })),
-        });
-      }
-
-      if (req.method === 'GET' && id.endsWith('/credentials')) {
-        // 完整凭据查询（sessionKey 明文 + org）：给 WebUI 的「密钥」按钮做复制/迁移用。
-        // 与 /v1/keys 同级安全：统一鉴权（Bearer）之外，还要求本机回环访问，局域网一律拒绝。
-        if (!isLoopbackReq(req)) {
-          return json(res, 403, { error: { message: '完整凭据只能在运行反代的机器上查询（需本机访问）', type: 'permission_error' } });
-        }
-        const acct = POOL.get(id.slice(0, -'/credentials'.length));
-        if (!acct) return json(res, 404, { error: { message: 'account not found', type: 'invalid_request_error' } });
-        logOperation({
-          category: '凭据密钥',
-          action: '查看密钥',
-          target: acct.label || acct.id,
-          status: 'success',
-          detail: `查看明文 sessionKey (org: ${acct.org || '-'})`,
-          ip: getReqIp(req),
-        });
-        return json(res, 200, {
-          id: acct.id,
-          label: acct.label,
-          sessionKey: acct.sessionKey || '',
-          org: acct.org || '',
-          base: acct.base || '',
-          ua: acct.ua || '',
-          enabled: !!acct.enabled,
-        });
+      if (rest === 'export' || id.endsWith('/credentials')) {
+        return json(res, 410, {error:{type:'permission_error', message:'明文凭据不再通过 HTTP 导出；请在主机上管理私有数据文件。'}});
       }
 
       if (req.method === 'GET' && id.endsWith('/test')) {
@@ -3430,17 +2904,20 @@ const server = http.createServer(async (req, res) => {
           prune_max_tool_chars: st.prune_max_tool_chars,
           prune_keep_recent_tools: st.prune_keep_recent_tools,
           default_effort: st.default_effort,
-          price_per_million_tokens: setts.pricePerMillionTokens || 0,
-          maomail_token: setts.maomailToken || setts.maomail_token || '',
-          maomail_base_url: setts.maomailBaseUrl || setts.maomail_base_url || 'https://zjkdongao.cn',
+          ...publicSettings(setts),
           server: KEYS.serverConfig(),
         });
       }
       if (req.method === 'POST') {
         const b = await readBody(req);
         try {
-          KEYS.updateSettings(b);
           const cfg = POOL.configure(b);
+          const patch = {};
+          if (typeof b.pricePerMillionTokens === 'number' && Number.isFinite(b.pricePerMillionTokens) && b.pricePerMillionTokens >= 0) patch.pricePerMillionTokens = b.pricePerMillionTokens;
+          for (const k of ['maomailToken','maomail_token','maomailBaseUrl','maomail_base_url']) {
+            if (typeof b[k] === 'string' && b[k].trim()) patch[k] = b[k].trim();
+          }
+          if (Object.keys(patch).length) KEYS.updateSettings(patch);
           logOperation({
             category: '系统配置',
             action: '修改系统设置',
@@ -3451,8 +2928,7 @@ const server = http.createServer(async (req, res) => {
           });
           return json(res, 200, {
             ...cfg,
-            ...(KEYS.settings() || {}),
-            price_per_million_tokens: KEYS.settings()?.pricePerMillionTokens || 0,
+            ...publicSettings(KEYS.settings()),
           });
         } catch (e) {
           logOperation({
@@ -3566,7 +3042,6 @@ const server = http.createServer(async (req, res) => {
           ok: true,
           installed,
           extDir,
-          clientKey: key,
           hasKey: !!key,
           enabled: curSettings.yescaptchaEnabled !== false,
         });
@@ -3627,7 +3102,7 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, {
           ok: true,
           message: enabled ? 'YesCaptcha 智能打码已开启！' : 'YesCaptcha 智能打码已关闭（后续登录将使用纯净浏览器）',
-          clientKey,
+          hasKey: !!clientKey,
           enabled,
           installed,
           balanceInfo,
@@ -3671,14 +3146,16 @@ const server = http.createServer(async (req, res) => {
     // ---------------------------------------------------------- 补全
     if (req.method === 'POST' && url.pathname === '/v1/chat/completions') {
       const body = await readBody(req);
+      if (!Array.isArray(body?.messages) || !body.messages.length || body.messages.some(m => !m || typeof m.role !== 'string')) {
+        return json(res, 400, { error: { type: 'invalid_request_error', message: 'messages must be a nonempty array of messages' } });
+      }
       const model = mapModel(body.model);
+      usage.model = model;
       // 模型范围限制：Key 配了 models 白名单就只允许那些模型
       if (req.apiKey && !KEYS.modelAllowed(req.apiKey, model)) {
         return json(res, 403, { error: { message: `模型 ${model} 不在该 Key 的允许范围内`, type: 'permission_error' } });
       }
-      const prompt = renderPrompt(body);
-
-      const run = await runCompletion(body, model, gone.signal, req.apiKey, req);
+      const run = await runCompletion(body, model, gone.signal, req, usage);
       const chatId = newChatId();
 
       if (body.stream) {
@@ -3686,14 +3163,14 @@ const server = http.createServer(async (req, res) => {
           'content-type': 'text/event-stream; charset=utf-8',
           'cache-control': 'no-cache, no-transform',
           connection: 'keep-alive',
-          'access-control-allow-origin': '*',
+
         });
         try {
-          return await streamToClient(res, run.stream, model, chatId, run.account, run.ctx, body);
+          return await streamToClient(res, run.stream, model, chatId, run.account, run.ctx, body.stream_options?.include_usage === true);
         } catch (streamErr) {
+          run.release(false,streamErr.message);
           if (!res.writableEnded && !res.destroyed) {
             try { res.write(`data: ${JSON.stringify({ error: { message: streamErr.message, type: 'proxy_error' } })}\n\n`); } catch {}
-            try { res.write('data: [DONE]\n\n'); } catch {}
             try { res.end(); } catch {}
           }
           throw streamErr;
@@ -3703,8 +3180,10 @@ const server = http.createServer(async (req, res) => {
       }
 
       try {
-        const result = await collect(run.stream, run.account, run.ctx, body);
-        return json(res, 200, ant2oaiText(result, model, prompt));
+        const result = await collect(run.stream, run.account, run.ctx);
+        return json(res, 200, ant2oaiText(result, model, run.ctx));
+      } catch (e) {
+        run.release(false,e.message); throw e;
       } finally {
         run.release();
       }
@@ -3713,41 +3192,42 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/v1/responses') {
       // OpenAI Responses API -> 复用同一条上游链路
       const rb = await readBody(req);
-      const chat = responsesToChat(rb);
+      if (!rb || typeof rb !== 'object' || Array.isArray(rb)) {
+        return json(res, 400, { error: { type: 'invalid_request_error', message: 'request body must be an object' } });
+      }
+      if (rb.stream != null && typeof rb.stream !== 'boolean') {
+        return json(res, 400, { error: { type: 'invalid_request_error', message: 'stream must be a boolean', param: 'stream' } });
+      }
+      const chat = responsesToChat(rb, req.keyScope);
       if (!chat.messages.length) {
         return json(res, 400, { error: { message: 'input is required', type: 'invalid_request_error', param: 'input' } });
       }
       const model = mapModel(rb.model);
+      usage.model = model;
       // 模型范围限制：Key 配了 models 白名单就只允许那些模型
       if (req.apiKey && !KEYS.modelAllowed(req.apiKey, model)) {
         return json(res, 403, { error: { message: `模型 ${model} 不在该 Key 的允许范围内`, type: 'permission_error' } });
       }
-      const prompt = renderPrompt(chat);
       const id = newRespId();
-      const stream = rb.stream !== false;   // Responses 默认流式
+      const stream = rb.stream === true;
 
-      const run = await runCompletion(chat, model, gone.signal, req.apiKey, req); run.ctx.api = 'responses';
-      if (stream) {
-        res.writeHead(200, {
-          'content-type': 'text/event-stream; charset=utf-8',
-          'cache-control': 'no-cache, no-transform',
-          connection: 'keep-alive',
-          'access-control-allow-origin': '*',
-        });
-        try {
-          return await streamResponses(res, run, model, id, rb, prompt, chat.messages);
-        } finally {
-          run.release();
-        }
-      }
-
+      const run = await runCompletion(chat, model, gone.signal, req, usage);
+      let stopHeartbeat;
       try {
-        const result = await collect(run.stream, run.account, run.ctx, chat);
-        const resp = respShell(rb, model, id, Math.floor(Date.now() / 1000), 'completed',
-          resultToItems(result), usageOf(prompt, result.text || '', result.reasoning));
-        rememberResponse(id, resp, [...chat.messages, resultToAssistantMessage(result)]);
-        return json(res, 200, resp);
+        if (stream) {
+          res.writeHead(200, {
+            'content-type': 'text/event-stream; charset=utf-8',
+            'cache-control': 'no-cache, no-transform',
+            connection: 'keep-alive',
+          });
+          stopHeartbeat = heartbeat(res);
+        }
+        return await sendResponsesResult(res, run, model, id, rb, chat.messages, req.keyScope);
+      } catch (e) {
+        run.release(false, e.message);
+        throw e;
       } finally {
+        stopHeartbeat?.();
         run.release();
       }
     }
@@ -3755,7 +3235,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname.startsWith('/v1/responses/')) {
       const id = url.pathname.slice('/v1/responses/'.length);
       const hit = RESP_STORE.get(id);
-      if (!hit) {
+      if (!hit || hit.owner !== req.keyScope) {
         return json(res, 404, {
           error: { message: `response ${id} not found (本反代仅内存保留最近 50 条)`, type: 'invalid_request_error' },
         });
@@ -3763,58 +3243,35 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, hit.response);
     }
 
-    if (req.method === 'POST' && url.pathname === '/v1/messages') {
+    if (req.method === 'POST' && (url.pathname === '/v1/messages' || url.pathname === '/v1/messages/count_tokens')) {
       // Anthropic 格式 -> 复用同一条链路
       const body = await readBody(req);
+      const validContent = content => typeof content === 'string' || (Array.isArray(content) &&
+        content.every(block => block && typeof block === 'object' && !Array.isArray(block)));
+      if (!Array.isArray(body?.messages) || !body.messages.length || body.messages.some(m => !validContent(m?.content))) {
+        return json(res,400,{error:{type:'invalid_request_error',message:'messages[].content must be a string or an array of blocks'}});
+      }
       const oai = {
         model: body.model,
         stream: !!body.stream,
         thinking: body.thinking,               // 供 pickEffort 映射上游 effort（不进 prompt）
+        effort: body.output_config?.effort,
         reasoning_effort: body.reasoning_effort,
         system: body.system,
-        messages: (body.messages || []).flatMap(m => {
-          if (m.role === 'assistant') {
-            const text = textOf(m.content);
-            const tcs = (m.content || []).filter(c => c.type === 'tool_use')
-              .map(c => ({ id: c.id, type: 'function', function: { name: c.name, arguments: JSON.stringify(c.input || {}) } }));
-            // 有图片块时保留数组：压成字符串会把 [image] 变成纯文本，
-            // collectImages 就再也抽不出图，files 与占位对不上（模型看不到图）
-            const content = hasImgBlocks(m.content) ? m.content : text;
-            return [{ role: 'assistant', content, tool_calls: tcs.length ? tcs : undefined }];
-          }
-          if (m.role === 'user') {
-            const hasToolResult = Array.isArray(m.content) && m.content.some(c => c.type === 'tool_result');
-            if (hasToolResult) {
-              const res = [];
-              for (const c of m.content) {
-                if (c && c.type === 'tool_result') {
-                  const trc = hasImgBlocks(c.content) ? c.content : textOf(c.content);
-                  res.push({ role: 'tool', tool_call_id: c.tool_use_id, content: trc });
-                } else if (c && c.type === 'text' && c.text) {
-                  res.push({ role: 'user', content: c.text });
-                }
-              }
-              return res.length ? res : [{ role: 'user', content: textOf(m.content) }];
-            }
-            // 带图片时保留原始块（textOf 渲染 [image]，imagesOfContent 负责上传）
-            if (Array.isArray(m.content) && imagesOfContent(m.content).length) {
-              return [{ role: 'user', content: m.content }];
-            }
-            return [{ role: 'user', content: textOf(m.content) }];
-          }
-          // system 等其余角色：有图片块也保留数组（否则占位留得下、图抽不出）
-          if (hasImgBlocks(m.content)) return [{ role: m.role, content: m.content }];
-          return [{ role: m.role, content: textOf(m.content) }];
-        }),
+        messages: body.messages.flatMap(messageToChat),
         tools: body.tools,
       };
       const model = mapModel(oai.model);
+      if (usage) usage.model = model;
       // 模型范围限制：Key 配了 models 白名单就只允许那些模型
       if (req.apiKey && !KEYS.modelAllowed(req.apiKey, model)) {
         return json(res, 403, { error: { message: `模型 ${model} 不在该 Key 的允许范围内`, type: 'permission_error' } });
       }
-      const prompt = renderPrompt(oai);
-      const run = await runCompletion(oai, model, gone.signal, req.apiKey, req); run.ctx.api = 'messages';
+      if (url.pathname === '/v1/messages/count_tokens') {
+        const prepared = buildUpstreamBody(prepareContext(oai), model);
+        return json(res, 200, { input_tokens: estimateInputTokens(prepared) }, { 'x-token-count-source': 'local-estimate' });
+      }
+      const run = await runCompletion(oai, model, gone.signal, req, usage);
 
       try {
         if (oai.stream) {
@@ -3822,15 +3279,12 @@ const server = http.createServer(async (req, res) => {
             'content-type': 'text/event-stream; charset=utf-8',
             'cache-control': 'no-cache, no-transform',
             connection: 'keep-alive',
-            'access-control-allow-origin': '*',
+
           });
           // 转成 Anthropic 事件
           const send = o => res.write(`event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`);
-          const keepAliveTimer = setInterval(() => {
-            try { res.write(': keep-alive\n\n'); } catch { clearInterval(keepAliveTimer); }
-          }, 10000);
-          let started = false;
-          let rsnPieces = 0;   // 思考段计数（多段摘要之间补换行）
+          const stopHeartbeat = heartbeat(res);
+          const summaryBlocks = new Set();
           try {
             for await (const ev of normalizeSse(run.stream, run.account, run.ctx)) {
               // 上游思考只回摘要（thinking_summary_delta 不是 Anthropic 标准事件，
@@ -3839,22 +3293,24 @@ const server = http.createServer(async (req, res) => {
                 const s = ev.delta.summary?.summary || '';
                 if (s) {
                   send({ type: 'content_block_delta', index: ev.index,
-                    delta: { type: 'thinking_delta', thinking: (rsnPieces++ ? '\n' : '') + s } });
+                    delta: { type: 'thinking_delta', thinking: (summaryBlocks.has(ev.index) ? '\n' : '') + s } });
+                  summaryBlocks.add(ev.index);
                 }
                 continue;
               }
               send(ev);
-              if (ev.type === 'message_start') started = true;
             }
-            if (!started) send({ type: 'message_start', message: { id: 'msg_' + randomUUID(), model, content: [] } });
+          } catch(e) {
+            run.release(false,e.message);
+            if (!res.destroyed) send({type:'error',error:{type:'api_error',message:e.message}});
           } finally {
-            clearInterval(keepAliveTimer);
+            stopHeartbeat();
             res.end();
           }
           return;
         }
 
-        const result = await collect(run.stream, run.account, run.ctx, body);
+        const result = await collect(run.stream, run.account, run.ctx);
         const content = [];
         if (result.reasoning) {
           // Anthropic 规范：thinking 块在正文之前（signature 留空——摘要不是可回放的
@@ -3863,21 +3319,21 @@ const server = http.createServer(async (req, res) => {
         }
         if (result.text) content.push({ type: 'text', text: result.text });
         for (const tc of result.toolCalls) {
-          let input = {};
-          try { input = JSON.parse(tc.function.arguments || '{}'); } catch { /* noop */ }
+          const input = JSON.parse(tc.function.arguments);
           content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input });
         }
-        const u = estimateUsage(prompt, (result.text || '') + (result.reasoning || ''));
         return json(res, 200, {
           id: result.id || 'msg_' + randomUUID(),
           type: 'message',
           role: 'assistant',
           model: result.model || model,
           content,
-          stop_reason: result.stop || 'end_turn',
+          stop_reason: result.toolCalls.length ? 'tool_use' : (result.stop || 'end_turn'),
           stop_sequence: null,
-          usage: { input_tokens: u.prompt_tokens, output_tokens: u.completion_tokens },
+          usage: { input_tokens: run.ctx.input_tokens, output_tokens: run.ctx.output_tokens },
         });
+      } catch (e) {
+        run.release(false,e.message); throw e;
       } finally {
         run.release();
       }
@@ -3885,6 +3341,10 @@ const server = http.createServer(async (req, res) => {
 
     return json(res, 404, { error: { message: 'not found', type: 'invalid_request_error' } });
   } catch (e) {
+    if (usage) {
+      usage.status ??= completionErrorStatus(e);
+      usage.error = e.message;
+    }
     // 客户端提前断开（Codex 打断等）：无需也无法回写响应
     if (e?.name === 'AbortError') {
       console.log('[req] client disconnected -> upstream aborted');
@@ -3896,10 +3356,7 @@ const server = http.createServer(async (req, res) => {
     }
     const msg = String(e?.message || e);
     const kind = e.kind;
-    const code = kind === 'challenge' || kind === 'transient' ? 502
-      : kind === 'rate_limit' || kind === 'concurrency' || e.status === 429 ? 429
-      : kind === 'auth' || e.status === 401 || e.status === 403 ? 401
-      : e.status >= 400 && e.status < 500 ? e.status : 500;
+    const code = completionErrorStatus(e);
 
     // 429 按上游真实原因区分文案 + Retry-After（原来是通用兜底文案「配额用尽」，会误导排查）
     let hint;
@@ -3942,7 +3399,22 @@ const server = http.createServer(async (req, res) => {
         hint,
       },
     }, retryAfter ? { 'retry-after': String(retryAfter) } : undefined);
+  } finally {
+    if (usage) {
+      const status = gone.signal.aborted ? 499 : (usage.status ?? res.statusCode);
+      const error = status === 499 ? 'client disconnected' : usage.error || (status >= 400 ? http.STATUS_CODES[status] : '');
+      recordCompletion(usage, status, error);
+    }
   }
+}
+const server = http.createServer((req, res) => {
+  // Also contain errors from the control plane, before the inference handler's try block.
+  handleRequest(req, res).catch(e => {
+    if (res.destroyed || res.writableEnded) return;
+    if (res.headersSent) return res.end();
+    const status = e.status >= 400 && e.status < 500 ? e.status : 500;
+    json(res, status, {error:{type:'request_error', message: status < 500 ? e.message : 'Request failed'}});
+  });
 });
 
 function maskAccount(a) {
@@ -3950,7 +3422,7 @@ function maskAccount(a) {
   return {
     id: a.id, label: a.label, source: a.source, enabled: a.enabled, org: a.org,
     base: a.base,
-    session_key: sk ? sk.slice(0, 18) + '...' + sk.slice(-4) : '',
+    session_key: sk ? '••••' : '',
     cooldown_remaining_s: Math.max(0, Math.ceil((a.cooldownUntil - Date.now()) / 1000)),
     ok: a.stats.ok, fail: a.stats.fail, last_error: a.stats.lastError,
   };
@@ -3980,15 +3452,11 @@ setInterval(() => {
 server.listen(PORT, HOST, () => {
   refreshSession(false);
   const st = POOL.status();
-  console.log(`[openai-proxy] http://127.0.0.1:${PORT}/v1`);
-  // 首次启动会生成 config.json：把默认 key 打出来，否则用户不知道拿什么调
+  console.log(`[openai-proxy] http://127.0.0.1:${server.address().port}/v1`);
+  // 只提示配置位置，不把原始 Key 打进日志。
   if (KEYS.wasCreated()) {
-    const first = (KEYS.snapshot().keys || [])[0];
     console.warn(`[openai-proxy] 首次启动，已生成配置文件 ${path.basename(CONFIG_FILE)}`);
-    if (first) {
-      console.warn(`[openai-proxy]   默认 API Key: ${first.key}`);
-      console.warn('[openai-proxy]   端口 / 监听地址 / 所有 Key 都在这个文件里改，改完自动热加载');
-    }
+    console.warn('[openai-proxy] 请在主机私有配置中查看 Key；不会打印到日志。');
   }
   if (isLanExposed) {
     // 列出本机所有非回环 IPv4，方便直接把地址发给其他设备

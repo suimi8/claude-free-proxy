@@ -7,8 +7,10 @@
   "scripts": {
     "start": "node start.mjs",
     "start:lan": "node start.mjs lan",
-    "test": "node tests/test_accounts.mjs && node tests/test_network_optimizer.mjs && node tests/test_context_optimizer.mjs",
-    "test:optimizer": "node tests/test_network_optimizer.mjs && node tests/test_context_optimizer.mjs"
+    "test": "node tests/test_accounts.mjs && node tests/test_network_optimizer.mjs && node tests/test_context_optimizer.mjs && node --test tests/test_hardening.mjs tests/test_gateway.mjs",
+    "test:optimizer": "node tests/test_network_optimizer.mjs && node tests/test_context_optimizer.mjs",
+    "doctor": "node src/doctor.mjs",
+    "pack:release": "node start.mjs pack"
   },
   "keywords": [
     "claude",
@@ -20,5 +22,48 @@
   "license": "MIT",
   "dependencies": {
     "undici": "^8.12.4"
-  }
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    ".dockerignore",
+    "Dockerfile",
+    "docker-compose.yml",
+    "LICENSE",
+    "README.md",
+    "package.json",
+    "package-lock.json",
+    "start.cmd",
+    "start.sh",
+    "start.mjs",
+    "web/webui.html",
+    "config/accounts.example.json",
+    "config/config.example.json",
+    "config/upstream.example.json",
+    "src/accounts.mjs",
+    "src/config.mjs",
+    "src/context-optimizer.mjs",
+    "src/kyc.mjs",
+    "src/login-link.mjs",
+    "src/network-optimizer.mjs",
+    "src/openai-proxy.mjs",
+    "src/child-http.mjs",
+    "src/init-admin.mjs",
+    "src/operation-log.mjs",
+    "src/quota-probe.mjs",
+    "src/usage-log.mjs",
+    "src/paths.mjs",
+    "src/release-files.mjs",
+    "src/public-http.mjs",
+    "src/upstream-events.mjs",
+    "src/doctor.mjs",
+    "tests/offline-fixtures.mjs",
+    "tests/test_accounts.mjs",
+    "tests/test_context_optimizer.mjs",
+    "tests/test_network_optimizer.mjs",
+    "tests/test_hardening.mjs",
+    "tests/test_gateway.mjs"
+  ],
+  "private": true
 }

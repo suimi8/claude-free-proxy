@@ -3,7 +3,7 @@
  *
  * 设计要点：
  *   1. 端口、监听地址、所有 API Key 全部来自 config.json，代码里不内置任何密钥。
- *   2. 首次启动若没有 config.json，自动生成一份并随机生成一个 key（打印到控制台）。
+ *   2. 首次启动若没有 config.json，自动生成一份并分别生成调用和管理 Key（只写入私有配置）。
  *   3. 每个 key 独立限制：额度（tokens / 请求数）、到期时间、模型范围、RPM、TPM、IP 白名单。
  *   4. 用量在内存累加，debounce 落盘，重启不丢；运行时窗口（_win）不落盘。
  */
@@ -19,7 +19,18 @@ export function generateId() {
   return 'k_' + randomBytes(4).toString('hex');
 }
 
-/** 默认配置（keys 为空，由 ensureDefaultKey 生成） */
+// Write next to the destination so readers see either the old complete JSON or the new one.
+export function writePrivateJson(file, value) {
+  fs.mkdirSync(path.dirname(file), {recursive:true, mode:0o700});
+  const tmp = file + '.' + randomBytes(8).toString('hex') + '.tmp';
+  const fd = fs.openSync(tmp, 'wx', 0o600);
+  try {
+    try { fs.writeFileSync(fd, JSON.stringify(value, null, 2) + '\n'); } finally { fs.closeSync(fd); }
+    fs.renameSync(tmp, file);
+  } finally { fs.rmSync(tmp, {force:true}); }
+}
+
+/** 默认配置（仅新文件才生成 Key） */
 function blankConfig() {
   return {
     version: 1,
@@ -37,6 +48,7 @@ function normalizeKey(k) {
     id: k.id || generateId(),
     name: k.name || '未命名',
     key: k.key || generateKey(),
+    role: k.role === 'admin' ? 'admin' : 'inference',
     enabled: k.enabled !== false,
     createdAt: k.createdAt || Date.now(),
     expiresAt: k.expiresAt ?? null,      // null = 永不过期；数字 = 毫秒时间戳
@@ -85,7 +97,7 @@ export function createConfigStore(file) {
     } catch (e) {
       if (e.code !== 'ENOENT') throw e;
       data = blankConfig();
-      data.keys = [normalizeKey({ name: '默认 Key' })];
+      data.keys = [normalizeKey({ name: '调用 Key' }), normalizeKey({ name: '管理 Key', role: 'admin' })];
       created = true;
       writeNow();
       return data;
@@ -113,7 +125,7 @@ export function createConfigStore(file) {
         }
         data = fresh;
       }
-    } catch (e) { /* 文件不在了就按内存写 */ }
+    } catch (e) { if (e.code !== 'ENOENT') throw e; }
 
     const out = {
       version: data.version,
@@ -125,7 +137,7 @@ export function createConfigStore(file) {
         return clean;
       }),
     };
-    fs.writeFileSync(file, JSON.stringify(out, null, 2), 'utf8');
+    writePrivateJson(file, out);
     try { mtime = fs.statSync(file).mtimeMs; } catch (e) { /* ignore */ }
   }
 
@@ -134,7 +146,7 @@ export function createConfigStore(file) {
     if (saveTimer) return;
     saveTimer = setTimeout(() => {
       saveTimer = null;
-      try { writeNow(); } catch (e) { console.warn('[config] 保存失败:', e.message); }
+      try { writeNow(); } catch (e) { console.warn('[config] 保存失败:', e.code || e.name); }
     }, 1000);
     if (saveTimer.unref) saveTimer.unref();
   }
@@ -176,7 +188,7 @@ export function createConfigStore(file) {
   }
 
   /** 请求前检查：返回 { key } 或 { error: {status, message, type, hint} } */
-  function identify(rawKey, ip) {
+  function identify(rawKey, ip, { management = false } = {}) {
     if (!data) load();
     const key = String(rawKey || '').replace(/^Bearer\s+/i, '').trim();
     if (!key) {
@@ -197,6 +209,9 @@ export function createConfigStore(file) {
       if (!k.ipWhitelist.includes(bare)) {
         return { error: { status: 403, message: 'ip not allowed', type: 'permission_error', hint: `来源 IP ${bare} 不在白名单` } };
       }
+    }
+    if (management) {
+      return k.role === 'admin' ? { key: k } : { error: { status: 403, type: 'permission_error', message: '需要独立的管理员 Key' } };
     }
     const q = k.quota;
     if (q.limitRequests > 0 && q.usedRequests >= q.limitRequests) {
@@ -245,9 +260,9 @@ export function createConfigStore(file) {
   // ---------------------------------------------------------------- CRUD
   function list() {
     if (!data) load();
-    return data.keys.map(k => ({
+    return data.keys.map(({key, ...k}) => ({
       ...k,
-      key_masked: maskKey(k.key),
+      key_masked: maskKey(key),
       // 运行时状态
       rpm_current: windowStats(k).rpm,
       tpm_current: windowStats(k).tpm,
@@ -314,7 +329,7 @@ export function createConfigStore(file) {
 
   function serverConfig() {
     if (!data) load();
-    return data.server;
+    return {host:data.server.host, port:data.server.port};
   }
 
   function settings() {
@@ -356,6 +371,15 @@ export function createConfigStore(file) {
 
 export function maskKey(k) {
   if (!k) return '';
-  if (k.length <= 12) return k.slice(0, 3) + '***';
+  if (k.length <= 12) return '••••';
   return k.slice(0, 8) + '…' + k.slice(-4);
+}
+
+// Public projection; never spread the settings object into an HTTP response.
+export function publicSettings(settings = {}) {
+  const price = Number(settings.pricePerMillionTokens);
+  return {
+    price_per_million_tokens: Number.isFinite(price) && price >= 0 ? price : 0,
+    has_mail_token: !!(settings.maomailToken || settings.maomail_token),
+  };
 }

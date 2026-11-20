@@ -10,9 +10,9 @@
   "keys": [
     {
       "id": "k_example",
-      "name": "默认 Key",
+      "name": "调用 Key（示例已停用）",
       "key": "sk-your-random-generated-key",
-      "enabled": true,
+      "enabled": false,
       "createdAt": 1700000000000,
       "expiresAt": null,
       "models": [],
@@ -26,7 +26,15 @@
         "usedRequests": 0
       },
       "lastUsedAt": null,
-      "lastIp": null
+      "lastIp": null,
+      "role": "inference"
+    },
+    {
+      "name": "管理 Key（示例已停用，请生成独立随机值）",
+      "id": "k_admin_example",
+      "role": "admin",
+      "key": "replace-with-a-new-random-admin-key",
+      "enabled": false
     }
   ]
 }

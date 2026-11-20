@@ -51,3 +51,7 @@ Thumbs.db
 tools/curl-impersonate/
 
 NUL
+
+/data/
+*.tar.gz
+*.tgz

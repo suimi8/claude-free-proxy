@@ -6,12 +6,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const ROOT = path.resolve(__dirname, '..');
-const LOG_DIR = path.join(ROOT, 'logs');
+import { DATA } from './paths.mjs';
+const LOG_DIR = path.join(DATA, 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'operations.jsonl');
 
 const MAX_MEMORY_LOGS = 5000;

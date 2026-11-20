@@ -23,6 +23,7 @@
  * 运行时字段（不落盘）：inflight
  */
 import fs from 'node:fs';
+import path from 'node:path';
 import { hasRecentRateLimit, selectOptimalAccount } from './network-optimizer.mjs';
 
 export const DEFAULT_UA =
@@ -236,7 +237,8 @@ export class AccountPool {
       }),
     };
     const tmp = this.file + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(out, null, 2));
+    fs.mkdirSync(path.dirname(this.file), {recursive:true, mode:0o700});
+    fs.writeFileSync(tmp, JSON.stringify(out, null, 2), {mode:0o600});
     // Windows 上目标文件被别的进程短暂打开时，rename 会抛 EPERM/EACCES/EBUSY。
     // 以前直接往上抛，这一次的落盘就整个丢了（账号冷却、统计不落盘），
     // 这里重试几次，绕开那个毫秒级窗口。
@@ -702,7 +704,7 @@ export class AccountPool {
           source: a.source,
           enabled: a.enabled,
           org: a.org,
-          session_key: sk ? sk.slice(0, 18) + '...' + sk.slice(-4) : '',
+          session_key: sk ? '••••' : '',
           inflight: a.inflight,
           capacity: this.data.perAccountConcurrency,
           cooldown_remaining_s: Math.max(0, Math.ceil((a.cooldownUntil - now) / 1000)),

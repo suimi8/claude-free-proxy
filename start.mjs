@@ -13,23 +13,25 @@
  *   start.cmd pack       打包迁移到另一台电脑
  */
 import net from 'node:net';
+import { createInterface } from 'node:readline/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import fs from 'node:fs';
 import path from 'node:path';
-import readline from 'node:readline';
-import { spawn, spawnSync, execSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { dataFile } from './src/paths.mjs';
+import { packRelease } from './src/release-files.mjs';
 import { createConfigStore } from './src/config.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const CONFIG_FILE = path.join(HERE, 'config.json');
+const CONFIG_FILE = dataFile('config.json', process.env.CONFIG_FILE);
+const mode = (process.argv[2] || '').toLowerCase();
 
 // 端口 / 监听地址 / 所有 API Key 全部来自 config.json —— 这里不内置任何值
 const CFG = createConfigStore(CONFIG_FILE);
-CFG.load();
-const SRV = CFG.serverConfig();
+const SRV = mode === 'pack' ? {} : (CFG.load(), CFG.serverConfig());
 const PORT = +(process.env.PORT || SRV.port || 8787);
 
-const mode = (process.argv[2] || '').toLowerCase();
 const out = (s = '') => process.stdout.write(s + '\n');
 const bar = () => out('  ' + '='.repeat(58));
 
@@ -44,48 +46,27 @@ function portInUse(port) {
   });
 }
 
-/** 从系统工具里取出监听该端口的 PID */
-function listenPid(port) {
-  try {
-    if (process.platform === 'win32') {
-      const txt = execSync('netstat -ano -p tcp', { encoding: 'utf8' });
-      for (const ln of txt.split(/\r?\n/)) {
-        if (ln.includes(':' + port) && ln.includes('LISTENING')) {
-          const cols = ln.trim().split(/\s+/);
-          return cols[cols.length - 1];
-        }
-      }
-    } else {
-      const out = execSync(`fuser ${port}/tcp 2>/dev/null || ss -tulpn 2>/dev/null | grep ':${port} ' | grep -o 'pid=[0-9]*' | head -n 1 | cut -d= -f2 || lsof -ti:${port} 2>/dev/null`, { encoding: 'utf8', shell: '/bin/bash' }).trim();
-      const m = out.match(/\d+/);
-      if (m) return m[0];
-    }
-  } catch (e) { /* 工具不可用就算了 */ }
-  return null;
-}
-
-function stopProcess(pid, port) {
+// Only offer an interactive restart for a ready gateway from this exact checkout.
+function localGatewayPid(port) {
+  const entry = path.join(HERE, 'src', 'openai-proxy.mjs');
   if (process.platform === 'win32') {
-    if (pid) {
-      try { execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' }); } catch {}
-    }
-  } else {
-    if (pid) {
-      try { execSync(`kill -15 ${pid} 2>/dev/null`, { stdio: 'ignore' }); } catch {}
-      try { execSync(`kill -9 ${pid} 2>/dev/null`, { stdio: 'ignore' }); } catch {}
-    }
-    if (port) {
-      try { execSync(`fuser -k -9 ${port}/tcp 2>/dev/null`, { stdio: 'ignore' }); } catch {}
-    }
+    // No shell interpolation of entry/port. Return only the listener PID, not its command line.
+    const probe = [
+      "$ErrorActionPreference='Stop'",
+      "$ids=@(Get-NetTCPConnection -State Listen -LocalPort ([int]$env:GATEWAY_PROBE_PORT) | Select-Object -ExpandProperty OwningProcess -Unique)",
+      "if ($ids.Count -eq 1) { $p=Get-CimInstance Win32_Process -Filter ('ProcessId='+$ids[0]); if ($p.Name -eq 'node.exe' -and $p.CommandLine.IndexOf($env:GATEWAY_PROBE_ENTRY,[StringComparison]::OrdinalIgnoreCase) -ge 0) { $p.ProcessId } }",
+    ].join('; ');
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', probe], {
+      encoding:'utf8', windowsHide:true, timeout:5000, env:{...process.env,GATEWAY_PROBE_PORT:String(port),GATEWAY_PROBE_ENTRY:entry},
+    });
+    return r.status === 0 && /^\d+$/.test(r.stdout.trim()) ? Number(r.stdout.trim()) : null;
   }
+  const r = spawnSync('lsof',['-nP','-t',`-iTCP:${port}`,'-sTCP:LISTEN'],{encoding:'utf8',timeout:2000});
+  const pid = r.stdout?.trim();
+  if (!/^\d+$/.test(pid || '')) return null;
+  const args = spawnSync('ps',['-ww','-p',pid,'-o','args='],{encoding:'utf8',timeout:2000});
+  return args.stdout?.trimEnd().endsWith(entry) || args.stdout?.trimEnd().endsWith(entry+'"') ? Number(pid) : null;
 }
-
-function ask(question) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise(res => rl.question(question, a => { rl.close(); res(a.trim()); }));
-}
-
-const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /** 前台接管反代进程：Ctrl+C / 关窗口都会连带停掉它 */
 function runProxy(env) {
@@ -107,63 +88,8 @@ function runProxy(env) {
   });
 }
 
-/** 打包：排除凭据 / 用量 / 日志 */
-function pack(target) {
-  const name = target || 'claude-free-proxy-move.tar.gz';
-  out('');
-  out('  打包中（排除 accounts.json / config.json / usage / *.log）...');
-
-  // 用「明确文件列表」而不是遍历整个目录：
-  // 服务在运行时 config.json / usage / *.log 一直在变，tar 遍历目录会报
-  // "file changed as we read it" 并返回非 0（即使包其实是完整的）。
-  const SKIP = new Set(['accounts.json', 'config.json', 'node_modules', '.git', name, 'usage']);
-  let entries = [];
-  try {
-    entries = fs.readdirSync(HERE, { withFileTypes: true })
-      .filter(d => !SKIP.has(d.name) && !d.name.endsWith('.log'))
-      .map(d => d.name);
-  } catch (e) {
-    out('  读取目录失败：' + e.message);
-    process.exitCode = 1;
-    return;
-  }
-  if (!entries.length) {
-    out('  目录是空的，没什么可打包。');
-    process.exitCode = 1;
-    return;
-  }
-
-  const r = spawnSync('tar', ['-czf', name, ...entries], { cwd: HERE, stdio: 'inherit' });
-
-  if (r.error) {
-    out('');
-    out('  打包失败：系统没有可用的 tar.exe（Windows 10 1803+ 自带）。');
-    out('  可以手工拷贝本目录，但要先删掉 accounts.json、usage 文件夹和 *.log。');
-    process.exitCode = 1;
-    return;
-  }
-  if (r.status !== 0) {
-    out('');
-    out(`  打包出错（tar 退出码 ${r.status}）。先关闭正在运行的服务再试一次。`);
-    process.exitCode = 1;
-    return;
-  }
-  out('');
-  out('  完成: ' + path.join(HERE, name));
-  out('');
-  out('  新电脑上：');
-  out('    1. 装 Node.js 22+          https://nodejs.org/');
-  out('    2. tar -xzf ' + name);
-  out('    3. 双击 start.cmd');
-  out('    4. 浏览器打开 http://127.0.0.1:8787 点「链接登录」加账号');
-  out('');
-  out('  为什么没带 accounts.json / config.json：');
-  out('    cf_clearance 绑定当前网络的出口 IP 和浏览器 UA，换网络后必然失效，');
-  out('    第一个请求就会撞 Cloudflare 挑战。在新机器重新登录一次最干净。');
-}
-
 async function main() {
-  if (mode === 'pack') return pack(process.argv[3]);
+  if (mode === 'pack') return out('已校验发布包：' + packRelease(HERE, process.argv[3]));
 
   const isLan = mode === 'lan';
   const host = process.env.HOST || (isLan ? '0.0.0.0' : (SRV.host || '127.0.0.1'));
@@ -180,48 +106,25 @@ async function main() {
 
   // ---------------------------------------------------------- 已经在运行？
   if (await portInUse(PORT)) {
-    const pid = listenPid(PORT);
-    out('');
-    bar();
-    out(`   服务已经在运行${pid ? '   PID=' + pid : ''}   端口 ${PORT}`);
-    bar();
-    out('');
-    out('    [1] 使用已启动的服务（保持现有服务运行并退出）');
-    out('    [2] 关闭已启动服务并重启服务');
-    out('    [3] 取消退出');
-    out('');
-
-    let ans = '';
-    while (ans !== '1' && ans !== '2' && ans !== '3') {
-      ans = await ask('   请选择 [1-3] (默认 1): ');
-      if (!ans) ans = '1';
-      if (ans !== '1' && ans !== '2' && ans !== '3') out('   请输入 1、2 或 3。');
-    }
-
-    if (ans === '1') {
-      out('');
-      out(`   已选择使用现有服务：http://127.0.0.1:${PORT}`);
-      return;
-    }
-    if (ans === '3') {
-      out('');
-      out('   已取消操作，现有服务继续运行。');
-      return;
-    }
-
-    out('');
-    out(`   正在停止已运行服务 (PID: ${pid || '(未识别)'}) ...`);
-    stopProcess(pid, PORT);
-    for (let i = 0; i < 24; i++) {
-      if (!(await portInUse(PORT))) break;
-      await sleep(150);
-    }
-    if (await portInUse(PORT)) {
-      out(`   端口 ${PORT} 仍被占用，请手动结束占用它的进程后重试。`);
+    const check = spawnSync(process.execPath, [path.join(HERE, 'src/doctor.mjs'), String(PORT)], {stdio:'inherit', windowsHide:true});
+    if (check.status !== 0) {
+      out('   该端口被其他服务或旧版本占用；现有进程继续运行。请核对端口和原启动窗口。');
       process.exitCode = 1;
       return;
     }
-    out(`   旧服务已关闭，端口 ${PORT} 已释放，正在重新启动新服务...`);
+    out('   已有就绪网关在运行。');
+    if (!process.stdin.isTTY) return;
+    const pid = localGatewayPid(PORT);
+    if (!pid) { out('   如需更新，请从原启动窗口重启。'); return; }
+    const input = createInterface({input:process.stdin, output:process.stdout});
+    let choice;
+    try { choice = (await input.question('   [1] 使用现有服务（默认）  [2] 重启本项目服务  [3] 取消：')).trim(); }
+    finally { input.close(); }
+    if (choice !== '2') return;
+    if (localGatewayPid(PORT) !== pid) throw new Error('端口归属已变化，请重新检查');
+    process.kill(pid, 'SIGTERM');
+    for (let n = 0; n < 25 && await portInUse(PORT); n++) await delay(200);
+    if (await portInUse(PORT)) throw new Error('端口尚未释放，请检查原启动窗口');
   }
 
   // ---------------------------------------------------------- 启动
@@ -240,17 +143,14 @@ async function main() {
   }
   if (keyList.length > 5) out(`            · … 还有 ${keyList.length - 5} 个，去 WebUI 看`);
 
-  out('   停止   : 关闭本窗口，或再运行一次本脚本选 [1]');
+  out('   停止   : 在原启动窗口按 Ctrl+C');
   bar();
 
   if (CFG.wasCreated()) {
-    const first = (CFG.snapshot().keys || [])[0];
-    out('');
-    out(`   首次运行，已生成 ${path.basename(CONFIG_FILE)}`);
-    if (first) out('   默认 API Key: ' + first.key + '   （可以在配置文件里改，或去 WebUI 管理）');
+    out('首次运行：请在本机私有 config.json 中查看管理和调用 Key，不要分享该文件。');
   }
 
-  if (!fs.existsSync(path.join(HERE, 'accounts.json'))) {
+  if (!fs.existsSync(dataFile('accounts.json', process.env.ACCOUNTS_FILE))) {
     out('');
     out('   提示：还没有账号，启动后打开 WebUI 点「链接登录」添加。');
   }
