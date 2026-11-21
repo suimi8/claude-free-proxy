@@ -10,12 +10,8 @@ const root = fileURLToPath(new URL('../',import.meta.url));
 const out = process.argv[2];
 if (!out) throw Error('用法：npm run release:build -- <输出目录>');
 const tracked = execFileSync('git',['ls-files','-z'],{cwd:root,encoding:'utf8'}).split('\0').filter(Boolean);
-// Additional development sources belong in Git, but are not needed in an installation.
-const sourceOnly = [
-  '.gitignore', '.gitattributes', 'tools/accounts.ps1', 'tools/probe_upstream_timing.mjs',
-  ...['mock_claude', 'mock_upstream', 'smoke', 'test_e2e', 'test_image_collect', 'test_multi',
-      'test_pool_429', 'test_responses', 'test_search_endpoint', 'test_tps_record', 'test_tps_tail'].map(n => `tests/${n}.mjs`),
-];
+// Every path in the public Git tree is reviewed, including files outside the installers.
+const sourceOnly = ['.gitignore', '.gitattributes', 'tools/accounts.ps1'];
 const allowed = new Set([...RELEASE_FILES, ...sourceOnly]);
 for (const name of tracked) if (!allowed.has(name)) throw Error('请从公开发布工作区构建');
 const inputs = [...RELEASE_FILES.filter(name => name !== 'release-integrity.json'), ...sourceOnly];

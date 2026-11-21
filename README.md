@@ -55,13 +55,13 @@ docker run -d --name claude-free-proxy --restart unless-stopped \
 
 ## 版本与更新
 
-当前正式版为 **v0.4**。WebUI 顶栏显示当前版本和 GitHub 仓库入口。点击版本号可查看发布说明、作者主页和检查时间。网关在启动后检查正式 Release，此后每六小时检查一次。管理员可以手动检查或点击「立即更新」。
+当前正式版为 **v0.4.1**。WebUI 顶栏显示当前版本和 GitHub 仓库入口。点击版本号可查看发布说明、作者主页和检查时间。网关在启动后检查正式 Release，此后每六小时检查一次。管理员可以手动检查或点击「立即更新」。
 
 用 `npm start`、`start.cmd` 或 Compose 启动时可安装热更新。网关先核对发布附件的 SHA-256，再等待在途请求结束，随后短暂切换进程。新版通过就绪检查后才记为当前版本，启动失败会回到上一版。数据目录保存生效版本。运行依赖、启动器变化或本地代码与新版发生冲突时，界面会提示使用完整发布包。
 
 管理员可设置 `GATEWAY_UPDATE_CHECK=0` 关闭后台检查，仍可在版本弹窗手动检查。
 
-**发布后续版本。** 在公开源码工作区递增 `package.json` 和锁文件的版本，暂存要发布的文件，再运行 `npm run release:build -- <输出目录>` 和 `npm test`。把生成的 `release-integrity.json` 一并提交，用对应的标签创建 GitHub 正式 Release，并上传生成的 `.tgz` 安装包和 `.update.json.gz` 热更新包。客户端通过标记为 Latest 的正式 Release 发现更新。
+**发布后续版本。** 在公开源码工作区递增 `package.json` 和锁文件的版本，在本地完成回归验证，暂存要发布的文件，再运行 `npm run release:build -- <输出目录>`。源码和安装包均按公开文件清单发布。把生成的 `release-integrity.json` 一并提交，用对应的标签创建 GitHub 正式 Release，并上传生成的 `.tgz` 安装包和 `.update.json.gz` 热更新包。客户端通过标记为 Latest 的正式 Release 发现更新。
 
 [GitHub Releases](https://github.com/suimi8/claude-free-proxy/releases) · [作者主页](https://github.com/suimi8)
 
@@ -153,6 +153,10 @@ for chunk in response:
 
 ### `transport interrupted`、工具参数缺失或命令出现在正文
 
+并发代理可以共享一个调用 Key。网关会把同一条上游消息重复发送的起始事件合并为一个。若两个起始事件的消息身份冲突，网关只在尚未交付输出时重新建立一次请求。已交付输出的请求会返回流错误，以免客户端重复执行工具。
+
+默认 `CACHE_MODE=stats` 只统计前缀命中。启用 `CACHE_MODE=reuse` 时，纯文本续写需要显式会话标识和完整匹配的历史，每个父消息只供一个请求续写。并发分支及工具请求使用各自的上游会话。
+
 `transport interrupted` 表示网关在收到完整的上游结束事件前丢失了数据流。流式请求可能已经返回 HTTP 200，仍需读取末尾的 Chat `error`、Responses `response.failed` 或 Messages `error` 事件。
 
 遇到 `invalid tool delta` 或 `tool stop without a tool block` 时，检查客户端发送的工具名、参数声明和返回的错误。网关交付工具调用前会校验工具块、JSON 对象和声明的必填参数。正文里出现 `[TOOL_CALL …]` 或 `<function_calls>` 只说明收到了这些文字。涉及写文件、运行命令等操作时，先核对实际结果，再决定是否重试。
@@ -176,6 +180,5 @@ for chunk in response:
 | `src/accounts.mjs`、`src/config.mjs` | 账号池、服务配置及 Key 权限 |
 | `web/webui.html` | 管理控制台 |
 | `config/*.example.json` | 配置示例 |
-| `tests/` | 测试套件，可运行 `npm test` |
 
 提交 Issue 时请提供接口、错误类型和时间，并移除 Key、Cookie、账号标识及对话正文。请使用获准的会话，遵守上游服务条款。本项目采用 [MIT License](LICENSE)。

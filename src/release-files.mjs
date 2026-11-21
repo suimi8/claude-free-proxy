@@ -9,7 +9,6 @@ export const RELEASE_FILES = Object.freeze([
   '.dockerignore','Dockerfile','docker-compose.yml','LICENSE','README.md','start.cmd','start.sh','start.mjs',
   'config/accounts.example.json','config/config.example.json','config/upstream.example.json',
   ...RUNTIME,'src/release-files.mjs','release-integrity.json','tools/build-release.mjs',
-  ...['offline-fixtures','test_accounts','test_network_optimizer','test_context_optimizer','test_hardening','test_gateway','test_updates'].map(n=>`tests/${n}.mjs`),
 ]);
 
 const canonical = bytes => bytes.toString('utf8').replace(/\r\n/g, '\n');

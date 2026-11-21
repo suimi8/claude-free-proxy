@@ -94,7 +94,7 @@ export function createUsageLog(opts = {}) {
         const k = key(e.account_id, c.hash);
         const prev = idx.get(k);
         if (!prev || prev.ts < e.ts) {
-          idx.set(k, { ts: e.ts, tokens: c.tokens, conv_id: e.conv_id || '', parent_uuid: e.parent_uuid || '' });
+          idx.set(k, { ts: e.ts, tokens: c.tokens });
         }
       }
     }
@@ -166,23 +166,60 @@ export function createUsageLog(opts = {}) {
       const k = key(entry.account_id, c.hash);
       const prev = idx.get(k);
       if (!prev || prev.ts <= ts) {
-        idx.set(k, { ts, tokens: c.tokens, conv_id: entry.conv_id, parent_uuid: entry.parent_uuid });
+        idx.set(k, { ts, tokens: c.tokens });
       }
     }
     return entry;
   }
 
-  /** CACHE_MODE=reuse：找可复用的上游会话（返回最长命中项） */
-  function reusable(accountId, candidates = []) {
-    if (mode !== 'reuse' || !candidates.length) return null;
-    for (let i = candidates.length - 1; i >= 0; i--) {
-      const c = candidates[i];
-      const p = idx.get(key(accountId, c.hash));
-      if (p && Date.now() - p.ts <= ttl && p.conv_id && p.parent_uuid) {
-        return { ...p, hash: c.hash, tokens: c.tokens };
-      }
+  // Statistics may match a partial prefix. Only an exact, successfully delivered text transcript
+  // can own an upstream parent. Handles are process-local and claimed synchronously, once.
+  const continuations = new Map();
+  function beginTurn(body, owner, accountId, model, session) {
+    if (mode !== 'reuse' || !session || session.startsWith('fp:') || body.tools?.length) return null;
+    const messages = body.messages;
+    if (!Array.isArray(messages) || messages.at(-1)?.role !== 'user') return null;
+    const history = createHash('sha256').update(JSON.stringify([owner, accountId, model, session, body.system ?? null]));
+    const append = (role, digest) => history.update(JSON.stringify([role, digest]));
+    let parentKey;
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      if (!m || !['system','developer','user','assistant'].includes(m.role) || m.tool_calls?.length || m.function_call || m.name) return null;
+      const text = typeof m.content === 'string' ? m.content :
+        Array.isArray(m.content) && m.content.length === 1 && m.content[0]?.type === 'text' ? m.content[0].text : null;
+      if (typeof text !== 'string') return null;
+      if (i === messages.length - 1) parentKey = history.copy().digest('hex');
+      append(m.role, createHash('sha256').update(text, 'utf16le').digest('hex'));
     }
-    return null;
+    const cached = continuations.get(parentKey);
+    continuations.delete(parentKey);
+    const reply = createHash('sha256');
+    let uuid, textBlock = false, valid = true, ended = false, normalStop = false;
+    return {
+      parent: cached && Date.now() - cached.at <= ttl ? cached : null,
+      observe(ev) {
+        if (!valid) return;
+        if (ev.type === 'message_start') uuid = ev.message?.uuid;
+        if (ev.type === 'content_block_start') {
+          const b = ev.content_block;
+          if (textBlock || b.type !== 'text' || typeof (b.text ?? '') !== 'string') { valid = false; return; }
+          textBlock = true;
+          reply.update(b.text ?? '', 'utf16le');
+        } else if (ev.type === 'content_block_delta') {
+          if (ev.delta?.type !== 'text_delta' || typeof ev.delta.text !== 'string') { valid = false; return; }
+          reply.update(ev.delta.text, 'utf16le');
+        } else if (ev.type === 'message_delta' && ev.delta?.stop_reason) normalStop = ev.delta.stop_reason === 'end_turn';
+        else if (ev.type === 'message_stop') ended = true;
+      },
+      save(convId) {
+        if (!valid || !textBlock || !normalStop || !ended || typeof uuid !== 'string' || !uuid) return;
+        append('assistant', reply.digest('hex'));
+        const key = history.digest('hex');
+        continuations.delete(key);
+        continuations.set(key, { conv_id: convId, parent_uuid: uuid, at: Date.now() });
+        if (continuations.size > 1024) continuations.delete(continuations.keys().next().value);
+      },
+    };
   }
 
   function allEntries(range = 'today') {
@@ -278,5 +315,5 @@ export function createUsageLog(opts = {}) {
     return rows.reverse().slice(0, +(opts.limit || 100));
   }
 
-  return { record, summary, logs, reusable, prefixOf, mode, ttl, dir };
+  return { record, summary, logs, beginTurn, prefixOf, mode, ttl, dir };
 }

@@ -119,6 +119,31 @@ function duration(value, fallback, min) {
 
 // Keep the longer deadline through a gap between thinking and the first nonempty text.
 // Once a tool starts, its buffered arguments must still complete on the normal deadline.
+// Compare only stable envelope fields. Usage and other counters can change on a repeated header.
+function startIdentity(message) {
+  if (message !== undefined && !object(message)) throw bad('invalid message start');
+  if (message?.content !== undefined && (!Array.isArray(message.content) || message.content.length))
+    throw bad('unexpected initial message content');
+  const identity = {};
+  for (const key of ['id', 'uuid', 'role', 'model', 'type']) {
+    const value = message?.[key];
+    if (value == null || value === '') continue;
+    if (typeof value !== 'string' || !value.trim()) throw bad('invalid message start identity');
+    identity[key] = value;
+  }
+  return identity;
+}
+
+function mergeStartIdentity(first, next, inPrelude) {
+  const clash = Object.keys(next).some(key => first[key] && next[key] !== first[key]);
+  const shared = ['id', 'uuid'].some(key => first[key] && first[key] === next[key]);
+  const placeholder = !(first.id || first.uuid) || !(next.id || next.uuid);
+  if (clash || (!shared && !(inPrelude && placeholder))) {
+    throw Object.assign(bad('conflicting message start'), { code: 'UPSTREAM_MESSAGE_CONFLICT' });
+  }
+  return { ...first, ...next };
+}
+
 function progressPhase(ev, current, toolPending) {
   switch (ev.type) {
     case 'message_start': return 'initial';
@@ -289,7 +314,8 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
     heldBytes = 0,
     argBytes = 0,
     executableTools = 0,
-    started = false,
+    identity = null,
+    pendingStart = null,
     lastWasTool = false,
     reason = false;
   // Once a tool starts, hold the rest of the turn until commit. Preserve original START
@@ -347,6 +373,22 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
         if (graceMs && lastWasTool && !open.size) clock.graceAt ??= Date.now() + graceMs;
         continue;
       }
+      if (ev.type === 'message_start') {
+        const next = startIdentity(ev.message);
+        if (identity) {
+          // Repeated headers are metadata. They must not renew the progress or tool deadlines.
+          if (Date.now() >= clock.stallAt) throw stalled(clock);
+          identity = mergeStartIdentity(identity, next, !seen.size && !reason);
+          if (pendingStart && ev.message) pendingStart = { ...pendingStart,
+            message: { ...pendingStart.message, ...ev.message, ...identity } };
+          continue;
+        }
+        identity = next;
+        pendingStart = ev;
+      } else if (pendingStart) {
+        yield pendingStart;
+        pendingStart = null;
+      }
       const phase = progressPhase(ev, clock.phase, held !== null);
       if (phase !== null) {
         clock.phase = phase;
@@ -354,17 +396,10 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
         clock.stallAt = Date.now() + clock.timeoutMs;
       }
       if (ev.type === 'error') throw bad('upstream reported an error');
-      if (ev.type === 'message_start') {
-        if (started) throw bad('duplicate message start');
+      if (ev.type === 'message_start') continue;
+      if (ev.type === 'content_block_start') {
         if (
-          ev.message?.content !== undefined &&
-          (!Array.isArray(ev.message.content) || ev.message.content.length)
-        )
-          throw bad('unexpected initial message content');
-        started = true;
-      } else if (ev.type === 'content_block_start') {
-        if (
-          !started ||
+          !identity ||
           reason ||
           !Number.isSafeInteger(ev.index) ||
           ev.index < 0 ||
@@ -428,10 +463,10 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
         lastWasTool = !!t || (!open.size && !!held);
         if (t) continue; // commit emits the complete block in start order
       } else if (ev.type === 'message_delta' && ev.delta?.stop_reason) {
-        if (!started || reason || typeof ev.delta.stop_reason !== 'string')
-          throw invalidMessageStopReason(ev, { started, openBlocks: open.size, reasonSeen: reason });
+        if (!identity || reason || typeof ev.delta.stop_reason !== 'string')
+          throw invalidMessageStopReason(ev, { started: !!identity, openBlocks: open.size, reasonSeen: reason });
         if (open.size && !closeImplicitToolBlocks())
-          throw invalidMessageStopReason(ev, { started, openBlocks: open.size, reasonSeen: reason });
+          throw invalidMessageStopReason(ev, { started: !!identity, openBlocks: open.size, reasonSeen: reason });
         if (!held && ev.delta.stop_reason === 'tool_use') throw bad('tool stop without a tool block');
         if (executableTools && !['tool_use', 'end_turn', 'pause_turn'].includes(ev.delta.stop_reason))
           throw bad('tool turn ended without completing normally');
@@ -443,7 +478,7 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
           ev = { ...ev, delta: { ...ev.delta, stop_reason: stopReason } };
         }
       } else if (ev.type === 'message_stop') {
-        if (!started || (open.size && !closeImplicitToolBlocks())) throw bad('message stopped before block completion');
+        if (!identity || (open.size && !closeImplicitToolBlocks())) throw bad('message stopped before block completion');
         yield* commit();
         if (held && !reason)
           yield { type: 'message_delta', delta: { stop_reason: executableTools ? 'tool_use' : 'end_turn', stop_sequence: null } };

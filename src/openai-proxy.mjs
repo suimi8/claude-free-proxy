@@ -766,6 +766,7 @@ async function* normalizeSse(stream, acct, ctx) {
 
   try {
     for await (let ev of validatedEvents(stream, ctx._tools)) {
+      ctx._turn?.observe(ev);
       // 上游会带 message_limit 事件（free 档 5h/7d 窗口用量），记到账号上供轮询策略用
       if (ev.type === 'message_limit' && acct) {
         POOL.updateQuota(acct, ev.message_limit);
@@ -1493,6 +1494,7 @@ async function runCompletion(body, model, signal, req, ctx, excludedAccounts = [
   const convKey = session && `${req.keyScope}:${session}`;
   let preferredId = convKey ? CONV_ROUTING.get(convKey)?.accountId : null;
 
+  const originalBody = body;
   body = prepareContext(body);
   const upBody = buildUpstreamBody(body, model);
   const inputTokens = estimateInputTokens(upBody);
@@ -1547,13 +1549,10 @@ async function runCompletion(body, model, signal, req, ctx, excludedAccounts = [
       // 稳定前缀链（按账号隔离）——缓存命中率与「新增输入」都基于它
       const pfx = prefixOf(body, JSON.stringify([req.keyScope, acct.id]), model);
       const hist = (body.messages || []).filter(m => m.role !== 'system' && m.role !== 'developer');
-      // 会话复用保护：只用于纯多轮文本对话。工具调用 / 工具结果 / 并发同会话会串台，
-      // 这些场景一律新建会话走全量 prompt（正确性优先于命中率）。
-      const hasToolFlow = hist.some(m => m.role === 'tool' || m.role === 'function' ||
-        (m.role === 'assistant' && (m.tool_calls || []).length));
-      const canReuse = images.length === 0 && hist.length >= 2 &&
-        hist[hist.length - 1].role === 'user' && !hasToolFlow;   // 有图片必须走全量（复用增量会丢图）
-      const reuse = canReuse ? USAGE.reusable(acct.id, pfx.candidates) : null;
+      const turn = !images.length && ctx.attempts === 1
+        ? USAGE.beginTurn(originalBody, req.keyScope, acct.id, model, session) : null;
+      ctx._turn = turn;
+      const reuse = turn?.parent;
       Object.assign(ctx, {
         _tools: upBody.tools || [], effort: upBody.effort || '',
         prefix_hash: pfx.hash, prefix_tokens: pfx.tokens, prefix_candidates: pfx.candidates,
@@ -1581,7 +1580,6 @@ async function runCompletion(body, model, signal, req, ctx, excludedAccounts = [
           parent_message_uuid: reuse.parent_uuid,
         };
         ctx.reused_upstream = true;
-        ctx.parent_uuid = reuse.parent_uuid;
       } else {
         conv = await createConversation(acct, 'proxy', signal);
       }
@@ -1593,9 +1591,11 @@ async function runCompletion(body, model, signal, req, ctx, excludedAccounts = [
       const release = (ok = true, why = '', kind = 'transient') => {
         if (released) return;
         released = true;
+        if (ok && !signal?.aborted) turn?.save(conv);
         // 客户端断连后收尾：只归还并发额度，不记成功/失败，别污染 failStreak 与冷却
         if (signal?.aborted) { POOL.release(acct, false); }
         else if (ok) POOL.release(acct, true);
+        else if (kind === 'neutral') POOL.release(acct, false);
         else POOL.fail(acct, kind, why || 'stream failed');
         if (!ok) {
           ctx.status = 502;
@@ -1716,12 +1716,13 @@ function attachStreamRecovery(run, body, model, signal, req, ctx) {
           for (const buffered of pending) yield buffered;
           return;
         } catch (error) {
-          if (committed || retried || signal?.aborted || error.code !== 'UPSTREAM_TRANSPORT_INTERRUPTED') throw error;
+          const conflict = error.code === 'UPSTREAM_MESSAGE_CONFLICT';
+          if (committed || retried || signal?.aborted || (!conflict && error.code !== 'UPSTREAM_TRANSPORT_INTERRUPTED')) throw error;
           const failed = current;
-          failed.release(false, error.message, 'transient');
+          failed.release(false, error.message, conflict ? 'neutral' : 'transient');
           retried = true;
           try {
-            current = await runCompletion(body, model, signal, req, ctx, [failed.account.id], false);
+            current = await runCompletion(body, model, signal, req, ctx, conflict ? [] : [failed.account.id], false);
           } catch (retryError) {
             console.warn(`[stream] pre-output recovery unavailable: kind=${retryError?.kind || 'unknown'} status=${retryError?.status || 0}`);
             throw error;
