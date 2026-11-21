@@ -62,6 +62,10 @@ test('release archive is exactly the manifest; pack does not load or overwrite p
   assert(!fs.existsSync(env.DATA_DIR));
   assert.equal(fs.readFileSync(path.join(root, 'config.json'), 'utf8'), 'PRIVATE-TEST-CANARY');
   assert.notEqual(pack().status, 0, 'an existing archive is never replaced');
+  fs.unlinkSync(path.join(root, 'output.tgz'));
+  fs.appendFileSync(path.join(root, 'web/webui.html'), 'PRIVATE-TEST-CANARY');
+  assert.notEqual(pack().status, 0, 'modified content in an approved filename must also be excluded');
+  assert(!fs.existsSync(path.join(root, 'output.tgz')));
 });
 
 test('outbound URL / socket DNS policy rejects non-public and mixed results', async () => {

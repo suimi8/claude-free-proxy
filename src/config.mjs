@@ -380,6 +380,5 @@ export function publicSettings(settings = {}) {
   const price = Number(settings.pricePerMillionTokens);
   return {
     price_per_million_tokens: Number.isFinite(price) && price >= 0 ? price : 0,
-    has_mail_token: !!(settings.maomailToken || settings.maomail_token),
   };
 }

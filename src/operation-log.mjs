@@ -1,6 +1,6 @@
 /**
  * 操作审计日志服务 (Operation Audit Logger)
- * 记录反代控制台所有关键操作（登录、账号增删查改、客户端调起、额度查询、风控处理、系统设置变更等）
+ * 记录反代控制台所有关键操作（账号管理、额度查询、密钥和系统设置等）
  * 支持分类检索、状态过滤、全文搜索与持久化落盘。
  */
 
@@ -56,9 +56,9 @@ loadHistory();
 /**
  * 记录一条操作日志
  * @param {Object} opt
- * @param {string} opt.category - 分类：登录认证 | 账号管理 | 客户端调起 | 额度风控 | 系统配置 | 凭据密钥
+ * @param {string} opt.category - 分类：账号管理 | 额度风控 | 系统配置 | 凭据密钥
  * @param {string} opt.action - 操作名称：如 "批量导入", "打开桌面端", "查额度"
- * @param {string} [opt.target] - 操作对象：账号标识、邮箱、系统等
+ * @param {string} [opt.target] - 操作对象：账号标识、系统等
  * @param {'success'|'failed'} [opt.status='success'] - 状态
  * @param {string} [opt.detail=''] - 详细信息
  * @param {string} [opt.ip=''] - 来源 IP

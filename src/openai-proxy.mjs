@@ -7,8 +7,7 @@
  *   POST https://claude.ai/api/organizations/{org}/chat_conversations          (建会话)
  *   POST https://claude.ai/api/organizations/{org}/chat_conversations/{id}/completion
  *
- * 认证用 Desktop profile 里解密出的 sessionKey + cf_clearance cookie，
- * UA 必须与 cf_clearance 绑定（Electron 45.2.1 -> Chrome 140），否则触发 Cloudflare 挑战。
+ * 认证使用账号池中已配置的会话。
  *
  * 上游实测约束（自由档）：
  *   - 接受 prompt / model / parent_message_uuid / timezone / attachments /
@@ -39,32 +38,25 @@
  *   DELETE /v1/accounts/{id}    删除账号
  *   GET  /v1/accounts/{id}/test 连通性测试（org 发现，不耗额度）
  *   POST /v1/accounts/{id}/quota 主动查额度（取 message_limit + rate_limits，消耗 1 条最小消息）
- *   POST /v1/accounts/refresh   重新从 Desktop 解密
  *   POST /v1/pool               {strategy, perAccountConcurrency, minQuotaRemaining}
  *   GET  /v1/usage              token 用量汇总（range=today|yesterday|7d|all，可按账号/模型过滤）
  *   GET  /v1/usage/logs         请求明细日志
- *   GET  /v1/usage              token 用量汇总（range=today|yesterday|7d|all，可按账号/模型过滤）
- *   GET  /v1/usage/logs         请求明细日志
- *   POST /v1/login              发起「链接登录」：打开浏览器登录 claude.ai，自动捕获凭据入池
- *   GET  /v1/login/{id}         登录进度  |  POST /v1/login/{id}/cancel  取消
- *   GET  /login/{id}            登录状态页（免鉴权，可复制到任意浏览器打开）
  *
  * 用法:
  *   node openai-proxy.mjs
  */
 import http from 'node:http';
+import { createUpdateService, versionAsset, withVersionPanel, codeRoot } from './update-service.mjs';
+import { VERSION } from './github-releases.mjs';
+const updates = createUpdateService();
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { randomUUID, createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { readChildResponse } from './child-http.mjs';
 import { AccountPool, discoverOrg, DEFAULT_UA, sleep } from './accounts.mjs';
-import { createLoginManager, createCfVerifyManager, loginPage, openClaudeWebBrowser } from './login-link.mjs';
 import { createConfigStore, publicSettings } from './config.mjs';
 import { ROOT, DATA, dataFile } from './paths.mjs';
-import { loadLocalPluginViews, parsePluginMultipart } from './local-plugin-views.mjs';
 import { fetchPublicBytes } from './public-http.mjs';
 import { validatedEvents } from './upstream-events.mjs';
 import { probeQuota } from './quota-probe.mjs';
@@ -78,9 +70,6 @@ import { logOperation, queryOperations, getOperationStats, clearOperations } fro
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const UPSTREAM_FILE = dataFile('upstream.json', process.env.UPSTREAM_FILE);
 const ACCOUNTS_FILE = dataFile('accounts.json', process.env.ACCOUNTS_FILE);
-const SESSION_SCRIPT = fs.existsSync(path.join(ROOT, 'tools', 'desktop_session.py'))
-  ? path.join(ROOT, 'tools', 'desktop_session.py')
-  : path.join(HERE, 'desktop_session.py');
 
 /**
  * 配置全部来自 config.json（端口 / 监听地址 / 各 API Key）。
@@ -144,153 +133,9 @@ function accountTokenStats() {
   return ACCT_TOKENS.map;
 }
 
-/**
- * 「链接登录」管理器：捕获后直接写入账号池（以 sessionKey 去重，重复登录不会新增账号）。
- * label 用组织名 + 日期，方便区分多账号；cf_clearance / UA 一并保存，避免 CF 挑战。
- */
-const LOGIN = createLoginManager({
-  baseUrl: `http://127.0.0.1:${PORT}`,
-  webBase: () => UP.web_base || 'https://claude.ai',
-  timeoutMs: +(process.env.LOGIN_TIMEOUT_MS || 5 * 60 * 1000),
-  onCapture: ({ sessionKey, cookie, ua, org, name, plan, email }) => {
-    const displayName = email || name || 'claude.ai';
-    const label = `${displayName.slice(0, 36)} · ${new Date().toLocaleDateString('zh-CN')}`;
-    const { account, created } = POOL.add({
-      label, sessionKey, cookie, ua, org, email,
-      base: UP.web_base || 'https://claude.ai',
-      source: 'link',
-    });
-    console.log(`[login] captured account ${account.id} label=${label} org=${org} plan=${plan || '-'} created=${created}`);
-    return { id: account.id, label: account.label, org: account.org, email: account.email, created };
-  },
-});
-
-/**
- * 「手动过CF」管理器：池中账号 cf_clearance 被 Cloudflare 作废（cloudflare_challenge）
- * 时，弹真浏览器窗口让用户手动过挑战，自动捕获新 cf_clearance + 配套 UA 回填账号池。
- * 不打码、0 积分；成功后清冷却/连败（手动停用的账号保持停用）。
- */
-const CFVERIFY = createCfVerifyManager({
-  webUrl: () => (UP.web_base || 'https://claude.ai') + '/',
-  timeoutMs: +(process.env.CFVERIFY_TIMEOUT_MS || 5 * 60 * 1000),
-  onCapture: ({ accountId, cookie, ua, org }) => {
-    const prev = POOL.get(accountId);
-    if (!prev) return null;
-    const account = POOL.set(accountId, {
-      cookie,
-      ua,
-      ...(org ? { org } : {}),
-      // 过CF成功 = 账号恢复可用：清冷却/连败；手动停用的账号保持停用
-      ...(prev.enabled !== false ? { enabled: true } : {}),
-      // cloudflare_challenge 已修复：清掉旧错误，否则 UI 错误条和「过CF」按钮一直挂着
-      clearError: true,
-    });
-    console.log(`[cfverify] 账号 ${accountId} 已更新 cf_clearance + 配套 UA (label=${account?.label || '-'})`);
-    return account ? { id: account.id, label: account.label, org: account.org } : null;
-  },
-});
-
-/* —— CF challenge 风暴检测：近 5 分钟 challenge 失败次数，供 WebUI 弹横幅提醒批量过CF —— */
-const CF_CHALLENGE_EVENTS = []; // 时间戳滚动窗口
-const CF_STORM_WINDOW_MS = 5 * 60 * 1000;
-const CF_STORM_MIN = +(process.env.CF_STORM_MIN || 10); // 窗口内达到该次数 = 风暴
-function noteChallenge() {
-  const now = Date.now();
-  CF_CHALLENGE_EVENTS.push(now);
-  while (CF_CHALLENGE_EVENTS.length && now - CF_CHALLENGE_EVENTS[0] > CF_STORM_WINDOW_MS) CF_CHALLENGE_EVENTS.shift();
-}
-function cfStormActive() {
-  const now = Date.now();
-  while (CF_CHALLENGE_EVENTS.length && now - CF_CHALLENGE_EVENTS[0] > CF_STORM_WINDOW_MS) CF_CHALLENGE_EVENTS.shift();
-  return {
-    active: CF_CHALLENGE_EVENTS.length >= CF_STORM_MIN,
-    count: CF_CHALLENGE_EVENTS.length,
-    window_min: CF_STORM_WINDOW_MS / 60000,
-    threshold: CF_STORM_MIN,
-  };
-}
-
-/**
- * 把 upstream.json（Desktop 解密产物）同步进账号池。
- * 以 sessionKey 为幂等键，每次刷新都会覆盖 cookie/org。
- */
-function syncDesktopAccount(up) {
-  if (!up?.web_session_key) return null;
-  return POOL.upsert({
-    label: up.web_account_label || 'desktop',
-    sessionKey: up.web_session_key,
-    cookie: up.web_cookie || '',
-    org: up.web_org || '',
-    ua: up.web_ua || DEFAULT_UA,
-    base: up.web_base || undefined,
-    source: 'desktop',
-  });
-}
-
-/**
- * 异步刷新一次凭据（绝不阻塞事件循环）。
- *
- * 桌面端（claude.exe）运行时 Cookies 库被独占，python 侧会退避重试几秒；
- * 用 spawnSync 会把整个代理卡住同样久，所以必须走 spawn。
- * 失败时保留现有 upstream.json 凭据继续服务（sessionKey 很少变）。
- * 返回 Promise<boolean>，同时提供 non-void 结果给 /v1/accounts/refresh。
- */
-let refreshing = null;   // 去重：同一时刻只跑一个刷新
-function refreshSession(force = false) {
-  // 非 Windows 平台（如 Linux/Docker）或显式关闭时跳过桌面端本地解密
-  if (process.platform !== 'win32' || process.env.DESKTOP_SYNC === '0') return Promise.resolve(false);
-  const age = Date.now() - (UP.web_cookie_at || 0);
-  if (!force && age < 10 * 60 * 1000) return Promise.resolve(false);
-  if (refreshing) return refreshing;                                      // 已有一次在跑，复用
-  refreshing = new Promise((resolve) => {
-    let out = '', err = '';
-    let done = false;
-    const p = spawn('python', [SESSION_SCRIPT]);
-    p.stdout?.on('data', d => { out += d; });
-    p.stderr?.on('data', d => { err += d; });
-    const timer = setTimeout(() => { try { p.kill(); } catch {} }, 60000);
-    const finish = (ok, why) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      refreshing = null;
-      if (ok) {
-        UP = loadUpstream();
-        const acct = syncDesktopAccount(UP);
-        console.log('[creds] session refreshed:', out.trim());
-        if (acct) console.log(`[pool] desktop account -> ${acct.label} org=${acct.org}`);
-      } else if (why !== undefined) {
-        console.warn('[creds] refresh failed:', (err || out || why || '').trim().slice(0, 300));
-      }
-      resolve(ok);
-    };
-    p.on('error', e => finish(false, e.message));
-    p.on('close', code => finish(code === 0, `exit ${code}`));
-  }).finally(() => { refreshing = null; });
-  return refreshing;
-}
-
 // ---------------------------------------------------------------- 上游请求
 function webHeaders(acct) {
-  // sec-ch-ua 的版本号要和 UA 里的 Chrome 大版本一致 —— 不配套本身就是 CF 的一个风控信号
-  const ua = acct.ua || DEFAULT_UA;
-  const major = (String(ua).match(/Chrome\/(\d+)/) || [])[1] || '131';
-  const cappedMajor = Math.min(+major || 131, 136);
-  return {
-    'cookie': acct.cookie || `sessionKey=${acct.sessionKey}`,
-    'user-agent': ua,
-    'accept': 'application/json, text/event-stream',
-    'accept-language': 'zh-CN,zh;q=0.9',
-    'content-type': 'application/json',
-    'origin': acct.base || 'https://claude.ai',
-    'referer': (acct.base || 'https://claude.ai') + '/',
-    'sec-ch-ua': `"Chromium";v="${cappedMajor}", "Not?A_Brand";v="24"`,
-    'sec-ch-ua-mobile': '?0',
-    'sec-ch-ua-platform': '"Windows"',
-    'sec-fetch-site': 'same-origin',
-    'sec-fetch-mode': 'cors',
-    'sec-fetch-dest': 'empty',
-  };
+  return { 'content-type':'application/json', accept:'application/json', cookie:acct.cookie || ('sessionKey=' + acct.sessionKey) };
 }
 
 function isChallenge(text) {
@@ -352,70 +197,7 @@ function clientGoneError() {
   });
 }
 
-/* —— TLS 指纹伪装（可选）：curl-impersonate 以真实 Chrome 的 ClientHello + H2 SETTINGS
- * 指纹发请求。node fetch(undici) 的 TLS 指纹是知名机器人特征，CF 对 completion 端点
- * 逐请求打分时即使 clearance 有效也会概率性下发 challenge（2026-11-17 实测：批量刚
- * 刷完的新 clearance 几分钟内又被打标）。二进制缺失或 UPSTREAM_IMPERSONATE=0 时自动
- * 回退 node fetch；伪装层自身网络失败也回退，绝不放大故障。 */
-const CURL_EXE = path.join(ROOT, 'tools', 'curl-impersonate', 'curl-impersonate.exe');
-const CURL_ENABLED = process.env.UPSTREAM_IMPERSONATE !== '0' && fs.existsSync(CURL_EXE);
-const CURL_PROFILES = ['chrome136', 'chrome133a', 'chrome131', 'chrome124', 'chrome123', 'chrome120', 'chrome119', 'chrome116', 'chrome110'];
-/** 按账号 UA 的 Chrome 大版本选最接近（不超过）的指纹档位，缩小 TLS 版本与 UA 的错位 */
-function curlProfileFor(ua) {
-  const major = +(String(ua).match(/Chrome\/(\d+)/) || [])[1] || 0;
-  // 超过 136 的超前版本在 CF 上会被判定为异常特征触发 challenge，封顶到已验证安全稳定的 136/131
-  const capped = Math.min(major || 131, 136);
-  let best = null, bestN = -1;
-  for (const p of CURL_PROFILES) {
-    const n = +(/chrome(\d+)/.exec(p)?.[1] || 0);
-    if (capped >= n && n > bestN) { best = p; bestN = n; }
-  }
-  return best || 'chrome131';
-}
-
-/**
- * curl-impersonate 传输：接口形状与 fetch Response 对齐（ok/status/headers.get/text()/body）。
- * -i 让状态行+响应头随 stdout 流式到达，解析完头部后余量直接进管道；
- * --compressed 让 curl 自动解压（转发层无需透传 content-encoding）；
- * backpressure 正确传导到 curl（out 写满就暂停读 stdout）；abort 直接杀进程。
- */
-async function curlFetch(url, { method = 'GET', headers = {}, body = null, signal = null } = {}) {
-  const profile = curlProfileFor(headers['user-agent'] || DEFAULT_UA);
-  const maxTime = String(process.env.CURL_MAX_TIME || '1800');
-  const args = ['-i', '-sS', '-N', '--compressed', '--connect-timeout', '15', '--max-time', maxTime, '--impersonate', profile, '-X', method];
-  for (const [k, v] of Object.entries(headers)) args.push('-H', `${k}: ${v}`);
-  if (body != null && method !== 'GET' && method !== 'HEAD') args.push('--data-binary', '@-');
-  args.push(url);
-  const child = spawn(CURL_EXE, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
-  const requestBody = method === 'GET' || method === 'HEAD' ? undefined : body;
-  return readChildResponse(child, {signal, requestBody});
-}
-
-/**
- * fetch 包装：网络层 reject（fetch failed / ECONNRESET / 超时）没有状态码，
- * 单独归类成 transient，避免被当成 400 类"不可重试"错误直接打挂整个请求。
- * 客户端断连触发的 AbortError 单独上抛（绝不能按 transient 冷却账号）。
- * 走 curl-impersonate 时伪装层失败自动回退 node fetch，两层都炸才算 transient。
- */
 async function upstreamFetch(url, init = {}) {
-  if (CURL_ENABLED) {
-    try {
-      return await curlFetch(url, init);
-    } catch (e) {
-      if (e?.name === 'AbortError' || init?.signal?.aborted) throw clientGoneError();
-      if (e?.kind !== 'transient') throw e;   // 理论上 curl 层只抛 transient
-      // 伪装层失败：回退原生 fetch 兜底
-      try {
-        const dispatcher = getSharedDispatcher();
-        return await undiciFetch(url, { ...init, dispatcher });
-      } catch (e2) {
-        if (e2?.name === 'AbortError' || init?.signal?.aborted) throw clientGoneError();
-        const inner = e2?.cause ? `: ${e2.cause.code || e2.cause.message || e2.cause}` : '';
-        throw Object.assign(new Error(`upstream network error: ${e2?.message || e2}${inner}`),
-          { status: 0, kind: 'transient', retryable: true });
-      }
-    }
-  }
   try {
     const dispatcher = getSharedDispatcher();
     return await undiciFetch(url, { ...init, dispatcher });
@@ -1620,8 +1402,7 @@ function authenticate(req, management = false) {
 }
 
 const UI_FILE = [
-  ...(process.env.ENABLE_LOCAL_UI === '1' ? [path.join(ROOT, 'web', 'webui.local.html')] : []),
-  path.join(ROOT, 'web', 'webui.html'),
+  path.join(codeRoot, 'web', 'webui.html'),
   path.join(ROOT, 'webui.html'),
   path.join(HERE, 'webui.html'),
 ].find(p => fs.existsSync(p)) || path.join(ROOT, 'web', 'webui.html');
@@ -1838,7 +1619,6 @@ async function runCompletion(body, model, signal, req, ctx, excludedAccounts = [
       }
       lastErr = e;
       const kind = e.kind || 'error';
-      if (kind === 'challenge') noteChallenge(); // 风暴检测：5 分钟滚动窗口计数
       // rate_limit 且上游给了 resetsAt -> 精确收紧到 429 耗尽池（到点自动回有效池）
       const cool = POOL.fail(acct, kind, e.message, { resetsAt: e.resetsAt, reason: e.reason });
       console.warn(`[pool] ${acct.label} ${kind} -> cooldown ${Math.round(cool / 1000)}s: ${String(e.message).slice(0, 160)}`);
@@ -1974,44 +1754,6 @@ async function acquireAccount(exclude, signal, preferredId) {
   }
 }
 
-// ---------------------------------------------------------- 本地私有插件挂载机制
-// 动态挂载本地 plugins/ 目录下的扩展（plugins/ 目录被 .gitignore 忽略，不进入公开仓库）
-const PLUGIN_ROUTES = new Map();
-const LOCAL_VIEWS_PATH = '/v1/local-plugins';
-const LOCAL_PLUGIN_FORM_LIMIT = 32 * 1024 * 1024;
-const LOCAL_PLUGIN_UPLOAD_LIMIT = 32 * 1024 * 1024;
-const localViews = await loadLocalPluginViews(path.join(ROOT, 'plugins'), () => KEYS.settings(),
-  process.env.ENABLE_LOCAL_PLUGINS === '0', patch => KEYS.updateSettings(patch),
-  (route, handler) => PLUGIN_ROUTES.set(route, handler),
-  { KEYS, POOL, LOGIN, json, readBody });
-async function loadLocalPlugins() {
-  const pDir = path.join(ROOT, 'plugins');
-  if (!fs.existsSync(pDir)) return;
-  try {
-    for (const d of fs.readdirSync(pDir, { withFileTypes: true })) {
-      if (d.isDirectory() && !localViews.has(d.name)) {
-        const entry = path.join(pDir, d.name, 'plugin.mjs');
-        if (fs.existsSync(entry)) {
-          const mod = await import(pathToFileURL(entry).href);
-          if (typeof mod.registerPlugin === 'function') {
-            await mod.registerPlugin({
-              onRoute: (p, fn) => PLUGIN_ROUTES.set(p, fn),
-              KEYS,
-              POOL,
-              LOGIN,
-              json,
-              readBody,
-            });
-            console.log(`[plugin] 已挂载本地私有扩展: ${d.name}`);
-          }
-        }
-      }
-    }
-  } catch (err) {
-    console.warn('[plugin] 加载本地扩展异常:', err.message);
-  }
-}
-if (process.env.ENABLE_LOCAL_PLUGINS === '1') await loadLocalPlugins();
 
 /**
  * HTML 实体解码工具
@@ -2120,12 +1862,14 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === 'GET' && url.pathname === '/readyz') {
-    return json(res, 200, {status:'ready'}, {'x-gateway-service':'claude-desktop-proxy'});
+    return json(res, 200, {status:'ready'}, {'x-gateway-service':'claude-desktop-proxy', ...(process.env.GATEWAY_INSTANCE ? {'x-gateway-instance':process.env.GATEWAY_INSTANCE} : {})});
   }
+  if (req.method === 'GET' && url.pathname === '/v1/version') return json(res,200,updates.status());
+  if (req.method === 'GET' && versionAsset(url.pathname,res)) return;
   // ---------------------------------------------------------- WebUI（页面本身免鉴权，本机回环访问；
   // 页面里的 API 调用仍要带 Bearer key）
   if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/ui' || url.pathname === '/ui/')) {
-    let html = uiHtml();
+    let html = withVersionPanel(uiHtml());
     if (!html) {
       return json(res, 500, { error: { message: 'webui.html 不在反代同目录，无法提供管理界面', type: 'proxy_error' } });
     }
@@ -2138,66 +1882,24 @@ async function handleRequest(req, res) {
     return res.end(b);
   }
 
-  // An inert local HTML shell can be opened by navigation; its state/actions still require an admin header.
-  const loginShell = req.method === 'GET' && /^\/login\/[a-zA-Z0-9_-]+$/.test(url.pathname) && isLoopbackReq(req);
-  if (loginShell) {
-    res.writeHead(200, {'content-type':'text/html; charset=utf-8'});
-    return res.end(loginPage(url.pathname.slice(7)));
-  }
   // DSH appends /v1/messages even when the configured base already includes /v1.
   // Resolve only these two POST routes before auth, usage accounting and dispatch.
   const messagesPath = req.method === 'POST' && MESSAGES_POST_ALIASES.get(url.pathname);
-  if (messagesPath && !PLUGIN_ROUTES.has(url.pathname)) url.pathname = messagesPath;
-  const pluginHandler = PLUGIN_ROUTES.get(url.pathname);
-  const inference = !pluginHandler && (INFERENCE_ROUTES.has(url.pathname) || /^\/v1\/responses\/[^/]+$/.test(url.pathname));
+  if (messagesPath) url.pathname = messagesPath;
+  const inference = INFERENCE_ROUTES.has(url.pathname) || /^\/v1\/responses\/[^/]+$/.test(url.pathname);
   const auth = authenticate(req, !inference);
   if (auth.error) return json(res, auth.error.status, {error:auth.error});
   if (!inference && !isLoopbackReq(req) && process.env.ALLOW_REMOTE_ADMIN !== '1') {
     return json(res, 403, {error:{message:'远程管理未启用', type:'permission_error'}});
   }
   req.apiKey = auth.key;
+  if (url.pathname === '/v1/version/check' || url.pathname === '/v1/version/install') {
+    if (req.method !== 'POST') return json(res,405,{error:{message:'Method not allowed'}});
+    const checking = url.pathname.endsWith('/check');
+    return json(res,checking ? 200 : 202,checking ? await updates.check() : await updates.install());
+  }
   // Scope private history to the credential, not a mutable/imported display ID.
   req.keyScope = createHash('sha256').update(auth.key === LEGACY_KEY_OBJ ? LEGACY_KEY : auth.key.key).digest('hex');
-  if (url.pathname === LOCAL_VIEWS_PATH || url.pathname.startsWith(LOCAL_VIEWS_PATH + '/')) {
-    if (!isLoopbackReq(req)) return json(res, 403, { error: { message: '本地插件仅支持本机管理' } });
-    const parts = url.pathname.slice(LOCAL_VIEWS_PATH.length + 1).split('/');
-    const [id, section, action] = parts;
-    const form = parts.length === 3 && section === 'actions' && !!action;
-    const info = parts.length === 2 && section === 'settings';
-    if (parts.length > 1 && !form && !info) return json(res, 404, { error: { message: '没有此插件操作' } });
-    const method = form ? 'POST' : 'GET';
-    if (req.method !== method) return json(res, 405, { error: { message: '请求方法不匹配' } }, { allow: method });
-    if (!id) return json(res, 200, localViews.catalog());
-    const contentType = String(req.headers['content-type'] || '');
-    const jsonForm = /^application\/json(?:\s*;|$)/i.test(contentType);
-    const fileForm = /^multipart\/form-data(?:\s*;|$)/i.test(contentType);
-    if (form && !jsonForm && !fileForm) {
-      return json(res, 415, { error: { message: '插件表单需要 JSON 或 multipart/form-data' } });
-    }
-    let payload;
-    if (form) {
-      try {
-        payload = jsonForm
-          ? await readBody(req, LOCAL_PLUGIN_FORM_LIMIT)
-          : await parsePluginMultipart(contentType, await readRawBody(req, LOCAL_PLUGIN_UPLOAD_LIMIT));
-      } catch (error) {
-        const status = error.status === 413 ? 413 : 400;
-        return json(res, status, { error: { message: status === 413 ? '插件上传内容超过大小限制' : '插件表单数据无效' } });
-      }
-    }
-    const [status, result] = form ? await localViews.submit(id, action, payload)
-      : info ? await localViews.status(id) : await localViews.read(id);
-    return json(res, status, result);
-  }
-  // 优先执行本地扩展插件注册的自定义路由
-  if (pluginHandler) {
-    try {
-      const handled = await pluginHandler(req, res, { url, json, readBody });
-      if (handled !== false) return;
-    } catch (e) {
-      return json(res, 500, { error: { message: e.message, type: 'plugin_error' } });
-    }
-  }
 
   if (url.pathname === '/v1/keys' || url.pathname.startsWith('/v1/keys/')) {
       const rest = url.pathname.slice('/v1/keys'.length).replace(/^\//, '');
@@ -2228,96 +1930,6 @@ async function handleRequest(req, res) {
       return json(res, 405, { error: { message: 'method not allowed', type: 'invalid_request_error' } });
     }
 
-  // ---------------------------------------------------------- 链接登录状态与操作（管理鉴权 + 本机回环；
-  // 不含任何凭据，方便把链接复制到任意浏览器查看进度 / 重新打开登录窗口）
-  // 开放局域网后必须显式限制：远程设备既看不到本机弹出的浏览器窗口，
-  // 也不该能触发「重新打开登录窗口」——这属于本机操作。
-  if (url.pathname.startsWith('/login/') && !isLoopbackReq(req)) {
-    return json(res, 403, {
-      error: { message: '登录流程只能在运行反代的机器上操作（需本机回环访问）', type: 'permission_error' },
-    });
-  }
-  if (url.pathname.startsWith('/login/') && url.pathname.endsWith('/state') && req.method === 'GET') {
-    const id = url.pathname.slice('/login/'.length, -'/state'.length);
-    const s = LOGIN.state(id);
-    return json(res, s ? 200 : 404, s || { error: { message: '登录流程不存在或已过期', type: 'invalid_request_error' } });
-  }
-  if (url.pathname.startsWith('/login/') && url.pathname.endsWith('/open') && req.method === 'POST') {
-    const id = url.pathname.slice('/login/'.length, -'/open'.length);
-    const ok = await LOGIN.reopen(id);
-    return json(res, ok ? 200 : 409, { ok, message: ok ? '已重新打开登录页' : '登录窗口不可用，请回控制台重新发起登录' });
-  }
-  if (url.pathname.startsWith('/login/') && url.pathname.endsWith('/goto') && req.method === 'POST') {
-    const id = url.pathname.slice('/login/'.length, -'/goto'.length);
-    let body;
-    try { body = await readBody(req); } catch { body = {}; }
-    const r = await LOGIN.goto(id, body?.url);
-    return json(res, r.ok ? 200 : 400, r);
-  }
-
-  // —— 手动过 Cloudflare：弹真浏览器窗口（只种 sessionKey），用户手动过挑战后
-  //    自动捕获新 cf_clearance + 配套 UA 写回账号池。不打码、0 积分。
-  //    会弹出本机浏览器窗口，和 /login/ 一样仅限本机回环操作。
-  if (/^\/v1\/accounts\/[^/]+\/cfverify$/.test(url.pathname) && req.method === 'POST') {
-    if (!isLoopbackReq(req)) {
-      return json(res, 403, {
-        error: { message: '过CF流程会弹出本机浏览器窗口，只能在运行反代的机器上操作（需本机回环访问）', type: 'permission_error' },
-      });
-    }
-    const id = url.pathname.split('/')[3];
-    const acct = POOL.get(id);
-    if (!acct) return json(res, 404, { error: { message: 'account not found', type: 'invalid_request_error' } });
-    const r = CFVERIFY.start(id, acct.sessionKey);
-    if (!r.ok) return json(res, 409, { error: { message: r.error, type: 'invalid_request_error' } });
-    console.log(`[cfverify] 账号 ${id} 发起手动过CF (flow=${r.flowId}${r.reused ? ' 复用进行中的流程' : ''})`);
-    return json(res, 200, { ok: true, flowId: r.flowId, reused: !!r.reused });
-  }
-  if (/^\/v1\/cfverify\/[^/]+\/state$/.test(url.pathname) && req.method === 'GET') {
-    if (!isLoopbackReq(req)) {
-      return json(res, 403, {
-        error: { message: '过CF流程只能在运行反代的机器上查看（需本机回环访问）', type: 'permission_error' },
-      });
-    }
-    const fid = url.pathname.split('/')[3];
-    const s = CFVERIFY.state(fid);
-    return json(res, s ? 200 : 404, s || { error: { message: '过CF流程不存在或已过期', type: 'invalid_request_error' } });
-  }
-
-  // —— 一键批量过CF：客户端传被拦截账号 id 列表，服务端顺序弹窗逐个处理 ——
-  if (url.pathname === '/v1/cfverify/batch' && req.method === 'POST') {
-    if (!isLoopbackReq(req)) {
-      return json(res, 403, {
-        error: { message: '批量过CF会弹出本机浏览器窗口，只能在运行反代的机器上操作（需本机回环访问）', type: 'permission_error' },
-      });
-    }
-    let body;
-    try { body = await readBody(req); } catch { body = {}; }
-    const ids = Array.isArray(body?.ids) ? body.ids.filter(x => typeof x === 'string' && x) : [];
-    if (!ids.length) {
-      return json(res, 400, { error: { message: 'ids 数组为空', type: 'invalid_request_error' } });
-    }
-    const items = [];
-    const skipped = [];
-    for (const id of ids) {
-      const acct = POOL.get(id);
-      if (acct && acct.sessionKey) items.push({ id, sessionKey: acct.sessionKey });
-      else skipped.push(id);
-    }
-    const r = CFVERIFY.startBatch(items);
-    if (!r.ok) return json(res, 409, { error: { message: r.error, type: 'invalid_request_error' } });
-    console.log(`[cfverify] 批量过CF发起：${items.length} 个账号${skipped.length ? `（跳过 ${skipped.length} 个无效 id）` : ''}`);
-    return json(res, 200, { ok: true, flowId: r.flowId, total: items.length, skipped, reused: !!r.reused });
-  }
-  if (/^\/v1\/cfverify\/[^/]+\/cancel$/.test(url.pathname) && req.method === 'POST') {
-    if (!isLoopbackReq(req)) {
-      return json(res, 403, {
-        error: { message: '过CF流程只能在运行反代的机器上操作（需本机回环访问）', type: 'permission_error' },
-      });
-    }
-    const fid = url.pathname.split('/')[3];
-    const ok = CFVERIFY.cancel(fid);
-    return json(res, ok ? 200 : 404, { ok, message: ok ? '已请求取消，当前账号完成后停止' : '流程不存在或已结束' });
-  }
   if (inference && req.apiKey !== LEGACY_KEY_OBJ) KEYS.noteRequest(req.apiKey, getReqIp(req));
   // 每个请求都挂断连检测；补全类端点把它传给上游 fetch（见 runCompletion）
   const gone = onClientGone(res);
@@ -2438,7 +2050,6 @@ async function handleRequest(req, res) {
       const setts = KEYS.settings() || {};
       Object.assign(st, publicSettings(setts));
       st.server = KEYS.serverConfig();
-      st.cf_storm = cfStormActive(); // CF 风暴状态，WebUI 顶部横幅用
       // 用请求级用量日志校准「已用 token」：
       // 账号池的 tokensInEst 只在请求成功时累加——失败的 429 请求同样消耗了输入，
       // 重启也会丢，所以它只能算运行时参考值。日志是权威源，且 input_tokens 用的是
@@ -2535,32 +2146,6 @@ async function handleRequest(req, res) {
       return json(res, created ? 201 : 200, { created, account: maskAccount(account) });
     }
 
-    function openDesktopLogin(sessionKey, org = '', cookie = '') {
-      return new Promise((resolve, reject) => {
-        const script = path.join(ROOT, 'tools', 'desktop_login.py');
-        const args = [script, sessionKey];
-        if (org) args.push(org);
-        const proc = spawn('python', args, {
-          stdio: ['ignore', 'pipe', 'pipe'],
-          windowsHide: true,
-        });
-        let out = '';
-        let err = '';
-        proc.stdout.on('data', d => { out += d; });
-        proc.stderr.on('data', d => { err += d; });
-        proc.on('close', code => {
-          try {
-            const res = JSON.parse(out.trim());
-            if (res.ok) return resolve(res);
-            return reject(new Error(res.error || res.message || `exit code ${code}`));
-          } catch {
-            if (code === 0) resolve({ ok: true, message: out.trim() || '启动成功' });
-            else reject(new Error(err.trim() || out.trim() || `exit code ${code}`));
-          }
-        });
-        proc.on('error', reject);
-      });
-    }
 
     function parseImportLines(text) {
       const raw = String(text || '').trim();
@@ -2739,108 +2324,6 @@ async function handleRequest(req, res) {
           ip: getReqIp(req),
         });
         return json(res, 200, results);
-      }
-
-      if (rest.endsWith('/desktop-login') && req.method === 'POST') {
-        if (!isLoopbackReq(req)) {
-          return json(res, 403, { error: { message: '登录桌面端只能在运行反代的机器上操作（需本机访问）', type: 'permission_error' } });
-        }
-        const acctId = rest.slice(0, -'/desktop-login'.length);
-        let sk = '';
-        let org = '';
-        let cookie = '';
-        if (acctId && acctId !== 'open') {
-          const a = POOL.get(acctId);
-          if (!a) return json(res, 404, { error: { message: 'account not found', type: 'invalid_request_error' } });
-          sk = a.sessionKey;
-          org = a.org || '';
-          cookie = a.cookie || '';
-        } else {
-          const b = await readBody(req);
-          sk = b.sessionKey;
-          org = b.org || '';
-        }
-        if (!sk) return json(res, 400, { error: { message: 'sessionKey is required', type: 'invalid_request_error' } });
-        try {
-          const r = await openDesktopLogin(sk, org, cookie);
-          logOperation({
-            category: '客户端调起',
-            action: '打开桌面端',
-            target: acctId || '当前账号',
-            status: r.ok ? 'success' : 'failed',
-            detail: r.message || '已成功写入凭据并拉起官方桌面端',
-            ip: getReqIp(req),
-          });
-          return json(res, 200, r);
-        } catch (e) {
-          logOperation({
-            category: '客户端调起',
-            action: '打开桌面端',
-            target: acctId || '当前账号',
-            status: 'failed',
-            detail: e.message,
-            ip: getReqIp(req),
-          });
-          return json(res, 500, { error: { message: `调起 Claude 桌面端失败: ${e.message}`, type: 'proxy_error' } });
-        }
-      }
-
-      if (rest.endsWith('/web-login') && req.method === 'POST') {
-        if (!isLoopbackReq(req)) {
-          return json(res, 403, { error: { message: '登录网页端只能在运行反代的机器上操作（需本机访问）', type: 'permission_error' } });
-        }
-        const acctId = rest.slice(0, -'/web-login'.length);
-        let sk = '';
-        let org = '';
-        let cookie = '';
-        let ua = '';
-        if (acctId && acctId !== 'open') {
-          const a = POOL.get(acctId);
-          if (!a) return json(res, 404, { error: { message: 'account not found', type: 'invalid_request_error' } });
-          sk = a.sessionKey;
-          org = a.org || '';
-          cookie = a.cookie || '';
-          ua = a.ua || '';
-        } else {
-          const b = await readBody(req);
-          sk = b.sessionKey;
-          org = b.org || '';
-        }
-        if (!sk) return json(res, 400, { error: { message: 'sessionKey is required', type: 'invalid_request_error' } });
-        try {
-          const r = await openClaudeWebBrowser({ sessionKey: sk, org, cookie, ua });
-          logOperation({
-            category: '客户端调起',
-            action: '打开网页端',
-            target: acctId || '当前账号',
-            status: 'success',
-            detail: `在 ${r.browser} 浏览器打开官方网页端并登录 (PID: ${r.pid || '-'})`,
-            ip: getReqIp(req),
-          });
-          return json(res, 200, { ok: true, message: `已成功在 ${r.browser} 浏览器中打开官方网页端并登录！`, ...r });
-        } catch (e) {
-          logOperation({
-            category: '客户端调起',
-            action: '打开网页端',
-            target: acctId || '当前账号',
-            status: 'failed',
-            detail: e.message,
-            ip: getReqIp(req),
-          });
-          return json(res, 500, { error: { message: `调起浏览器失败: ${e.message}`, type: 'proxy_error' } });
-        }
-      }
-
-      if (rest === 'refresh' && req.method === 'POST') {
-        const ok = await refreshSession(true);
-        return json(res, ok ? 200 : 503, {
-          refreshed: ok,
-          error: ok ? undefined : {
-            message: '凭据刷新失败：桌面端可能正在运行并占用 Cookies 库（已保留旧凭据继续服务，稍后会自动重试）',
-            type: 'proxy_error',
-          },
-          accounts: POOL.status().accounts.map(a => ({ id: a.id, label: a.label, org: a.org })),
-        });
       }
 
       if (rest === 'lookup' && req.method === 'POST') {
@@ -3031,9 +2514,6 @@ async function handleRequest(req, res) {
           const cfg = POOL.configure(b);
           const patch = {};
           if (typeof b.pricePerMillionTokens === 'number' && Number.isFinite(b.pricePerMillionTokens) && b.pricePerMillionTokens >= 0) patch.pricePerMillionTokens = b.pricePerMillionTokens;
-          for (const k of ['maomailToken','maomail_token','maomailBaseUrl','maomail_base_url']) {
-            if (typeof b[k] === 'string' && b[k].trim()) patch[k] = b[k].trim();
-          }
           if (Object.keys(patch).length) KEYS.updateSettings(patch);
           logOperation({
             category: '系统配置',
@@ -3111,153 +2591,6 @@ async function handleRequest(req, res) {
           limit: +(url.searchParams.get('limit') || 100),
         }),
       });
-    }
-
-    // ---------------------------------------------------------- 链接登录（无需手动粘贴 sessionKey）
-    if (url.pathname === '/v1/login/batch' && req.method === 'POST') {
-      const host = req.headers.host || `127.0.0.1:${PORT}`;
-      let body = {};
-      try { body = await readBody(req); } catch {}
-      const emails = Array.isArray(body.emails) ? body.emails : [];
-      const concurrency = +body.concurrency || 2;
-      const resData = LOGIN.startBatch(emails, concurrency, `http://${host}`);
-      logOperation({
-        category: '登录认证',
-        action: '批量自动登录',
-        target: `${emails.length}个邮箱`,
-        status: resData.ok ? 'success' : 'failed',
-        detail: `并发: ${concurrency}, ${resData.message || (resData.ok ? '任务已启动' : '启动失败')}`,
-        ip: getReqIp(req),
-      });
-      return json(res, resData.ok ? 200 : 400, resData);
-    }
-    if (url.pathname === '/v1/login/batch' && req.method === 'GET') {
-      return json(res, 200, { ok: true, batch: LOGIN.batchStatus() });
-    }
-    if (url.pathname === '/v1/login/batch/cancel' && req.method === 'POST') {
-      logOperation({
-        category: '登录认证',
-        action: '取消批量登录',
-        target: 'batch-task',
-        status: 'success',
-        detail: '用户手动中止批量登录队列',
-        ip: getReqIp(req),
-      });
-      return json(res, 200, { ok: true, batch: LOGIN.cancelBatch() });
-    }
-
-    // YesCaptcha 插件与打码配置
-    if (url.pathname === '/v1/yescaptcha/config') {
-      const extDir = path.resolve(ROOT, 'tools', 'extensions', 'yescaptcha');
-      const installed = fs.existsSync(path.join(extDir, 'manifest.json'));
-
-      if (req.method === 'GET') {
-        const curSettings = KEYS.settings() || {};
-        const key = curSettings.yescaptchaClientKey || curSettings.yescaptchaKey || process.env.YESCAPTCHA_CLIENT_KEY || '';
-        const enabled = curSettings.yescaptchaEnabled !== false && (curSettings.yescaptchaEnabled === true || !!key);
-        return json(res, 200, {
-          ok: true,
-          installed,
-          extDir,
-          hasKey: !!key,
-          enabled: curSettings.yescaptchaEnabled !== false,
-        });
-      }
-
-      if (req.method === 'POST') {
-        let body = {};
-        try { body = await readBody(req); } catch {}
-        const curSettings = KEYS.settings() || {};
-        const clientKey = (body.clientKey !== undefined ? String(body.clientKey) : (curSettings.yescaptchaClientKey || '')).trim();
-        const enabled = body.enabled !== undefined ? !!body.enabled : (curSettings.yescaptchaEnabled !== false);
-        KEYS.updateSettings({
-          yescaptchaClientKey: clientKey,
-          yescaptchaKey: clientKey,
-          yescaptchaEnabled: enabled,
-        });
-
-        // 同步更新扩展包的 config.js
-        if (installed) {
-          try {
-            const cfgJsPath = path.join(extDir, 'config.js');
-            if (fs.existsSync(cfgJsPath)) {
-              let js = fs.readFileSync(cfgJsPath, 'utf8');
-              if (clientKey) {
-                js = js.replace(/clientKey:\s*['"][^'"]*['"]/, `clientKey: '${clientKey}'`);
-              }
-              js = js.replace(/isOpenCloudflare:\s*false/, 'isOpenCloudflare: true');
-              js = js.replace(/isAutoClickCheckBox:\s*false/, 'isAutoClickCheckBox: true');
-              js = js.replace(/isAutoSubmit:\s*false/, 'isAutoSubmit: true');
-              fs.writeFileSync(cfgJsPath, js, 'utf8');
-            }
-          } catch (e) {
-            console.warn('[yescaptcha] 同步更新扩展 config.js 失败:', e.message);
-          }
-        }
-
-        // 测试 Key 连通性并获取余额
-        let balanceInfo = null;
-        if (clientKey) {
-          try {
-            const bRes = await fetch('https://api.yescaptcha.com/getBalance', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ clientKey }),
-              signal: AbortSignal.timeout(6000),
-            });
-            const bData = await bRes.json();
-            if (bData.errorId === 0) {
-              balanceInfo = { balance: bData.balance };
-            } else {
-              balanceInfo = { error: bData.errorDescription || 'Key 无效' };
-            }
-          } catch (be) {
-            balanceInfo = { error: '连接打码服务器超时: ' + be.message };
-          }
-        }
-
-        return json(res, 200, {
-          ok: true,
-          message: enabled ? 'YesCaptcha 智能打码已开启！' : 'YesCaptcha 智能打码已关闭（后续登录将使用纯净浏览器）',
-          hasKey: !!clientKey,
-          enabled,
-          installed,
-          balanceInfo,
-        });
-      }
-    }
-    if (url.pathname === '/v1/login' && req.method === 'POST') {
-      const host = req.headers.host || `127.0.0.1:${PORT}`;
-      let body = {};
-      try { body = await readBody(req); } catch {}
-      const resData = LOGIN.start(`http://${host}`, body);
-      logOperation({
-        category: '登录认证',
-        action: '发起单邮箱登录',
-        target: body.email || '网页会话',
-        status: 'success',
-        detail: `流程ID: ${resData.id || '-'}`,
-        ip: getReqIp(req),
-      });
-      return json(res, 200, resData);
-    }
-    if (url.pathname.startsWith('/v1/login/')) {
-      const rest = url.pathname.slice('/v1/login/'.length);
-      if (rest.endsWith('/focus') && req.method === 'POST') {
-        const id = rest.slice(0, -'/focus'.length);
-        const r = await LOGIN.focus(id);
-        return json(res, r.ok ? 200 : 400, r);
-      }
-      if (rest.endsWith('/cancel') && req.method === 'POST') {
-        const s = LOGIN.cancel(rest.slice(0, -'/cancel'.length));
-        return s ? json(res, 200, s)
-          : json(res, 404, { error: { message: '登录流程不存在', type: 'invalid_request_error' } });
-      }
-      if (req.method === 'GET') {
-        const s = LOGIN.state(rest);
-        return s ? json(res, 200, s)
-          : json(res, 404, { error: { message: '登录流程不存在或已过期', type: 'invalid_request_error' } });
-      }
     }
 
     // ---------------------------------------------------------- 补全
@@ -3505,7 +2838,7 @@ async function handleRequest(req, res) {
         retryAfter = 2;
       }
     } else if (code === 401) {
-      hint = '所有账号登录态失效，请重新登录 Claude Desktop 或 POST /v1/accounts/refresh'
+      hint = '所有账号登录态失效，请在账号池中更新已授权的会话'
         + '（401/403 连续 3 次的账号会被自动禁用 60 分钟，PATCH /v1/accounts/{id} {"enabled":true} 可立即恢复）';
     }
 
@@ -3526,12 +2859,19 @@ async function handleRequest(req, res) {
 }
 const server = http.createServer((req, res) => {
   // Also contain errors from the control plane, before the inference handler's try block.
+  const control = req.method === 'GET' && ['/readyz','/v1/version','/ui/version-panel.js','/ui/version-panel.css'].includes(req.url);
+  const release = control ? () => {} : updates.enter();
+  if (!release) { res.setHeader('Retry-After','2'); return json(res,503,{error:{message:'网关正在切换版本，请稍后重试'}}); }
+  // Both application work and socket delivery must finish before the old worker exits.
+  let handled = false, delivered = false;
+  const complete = () => { delivered = true; if (handled) release(); };
+  res.once('finish',complete); res.once('close',complete);
   handleRequest(req, res).catch(e => {
     if (res.destroyed || res.writableEnded) return;
     if (res.headersSent) return res.end();
     const status = e.status >= 400 && e.status < 500 ? e.status : 500;
     json(res, status, {error:{type:'request_error', message: status < 500 ? e.message : 'Request failed'}});
-  });
+  }).finally(() => { handled = true; if (delivered) release(); });
 });
 
 function maskAccount(a) {
@@ -3545,9 +2885,8 @@ function maskAccount(a) {
   };
 }
 
-// 定期重解密 cookie（Desktop 换号/重新登录后自动跟上）
+// 重新载入手动更新的上游配置
 setInterval(() => { UP = loadUpstream(); }, 5000);
-setInterval(() => refreshSession(false), 10 * 60 * 1000);
 // accounts.json 被手工编辑时热加载，不用重启
 setInterval(() => {
   POOL.autoRestoreDisabled();   // 401/403 自动禁用 60 分钟到期 -> 恢复启用
@@ -3566,8 +2905,20 @@ setInterval(() => {
   }
 }, 3000);
 
+if (process.send) {
+  process.on('message', msg => {
+    if (msg?.type === 'drain') updates.drain(() => {
+      updates.close();
+      server.close(() => process.exit(0));
+      server.closeIdleConnections();
+    });
+    if (msg?.type === 'refused') updates.refuse();
+  });
+  process.on('disconnect', () => process.exit(0));
+}
 server.listen(PORT, HOST, () => {
-  refreshSession(false);
+  updates.start();
+  process.send?.({type:'listening',address:server.address().address,port:server.address().port,version:VERSION});
   const st = POOL.status();
   console.log(`[openai-proxy] http://127.0.0.1:${server.address().port}/v1`);
   // 只提示配置位置，不把原始 Key 打进日志。
@@ -3587,5 +2938,4 @@ server.listen(PORT, HOST, () => {
   console.log(`[openai-proxy] pool strategy=${st.strategy} accounts=${st.total} enabled=${st.enabled} eligible=${st.eligible_now} concurrency=${st.per_account_concurrency}/acct`);
   console.log(`[openai-proxy] plan=${UP.plan} apiKeys=${KEYS.keyCount()} config=${path.basename(CONFIG_FILE)} models=${(UP.models || []).join(',')}`);
   for (const a of st.accounts) console.log(`[pool]   ${a.id} ${a.label} org=${a.org || '(none)'} ${a.session_key} ${a.enabled ? 'on' : 'OFF'}`);
-  if (!st.total) console.warn('[openai-proxy] 账号池为空 —— 先跑 python desktop_session.py，或 POST /v1/accounts 添加');
 });

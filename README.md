@@ -4,7 +4,7 @@
 
 将你有权使用的 Claude Desktop 会话接入本地 HTTP 服务。网关提供 Chat Completions、Responses 和 Messages 接口，支持流式输出、工具调用和多轮对话。WebUI 与 API 共用一个端口，默认地址为 `http://127.0.0.1:8787`。
 
-[快速上手](#快速上手) · [Docker 部署](#docker-部署) · [客户端接入](#客户端接入) · [WebUI 请求日志](#webui-请求日志) · [故障排查](#故障排查) · [数据备份与升级](#数据备份与升级)
+[快速上手](#快速上手) · [Docker 部署](#docker-部署) · [客户端接入](#客户端接入) · [版本与更新](#版本与更新) · [WebUI 请求日志](#webui-请求日志) · [故障排查](#故障排查) · [数据备份与升级](#数据备份与升级)
 
 ## 快速上手
 
@@ -52,6 +52,18 @@ docker run -d --name claude-free-proxy --restart unless-stopped \
 ```
 
 管理接口按进程看到的来源地址判断是否来自回环。桥接网络可能把宿主请求显示为非回环来源。如果需要从宿主管理，请保持端口只发布到 `127.0.0.1`，确认容器网络受信后设置 `ALLOW_REMOTE_ADMIN=1`，再运行 `docker compose up -d` 重新创建容器。管理请求仍需提供管理 Key。
+
+## 版本与更新
+
+当前正式版为 **v0.4**。WebUI 顶栏显示当前版本和 GitHub 仓库入口。点击版本号可查看发布说明、作者主页和检查时间。网关在启动后检查正式 Release，此后每六小时检查一次。管理员可以手动检查或点击「立即更新」。
+
+用 `npm start`、`start.cmd` 或 Compose 启动时可安装热更新。网关先核对发布附件的 SHA-256，再等待在途请求结束，随后短暂切换进程。新版通过就绪检查后才记为当前版本，启动失败会回到上一版。数据目录保存生效版本。运行依赖、启动器变化或本地代码与新版发生冲突时，界面会提示使用完整发布包。
+
+管理员可设置 `GATEWAY_UPDATE_CHECK=0` 关闭后台检查，仍可在版本弹窗手动检查。
+
+**发布后续版本。** 在公开源码工作区递增 `package.json` 和锁文件的版本，暂存要发布的文件，再运行 `npm run release:build -- <输出目录>` 和 `npm test`。把生成的 `release-integrity.json` 一并提交，用对应的标签创建 GitHub 正式 Release，并上传生成的 `.tgz` 安装包和 `.update.json.gz` 热更新包。客户端通过标记为 Latest 的正式 Release 发现更新。
+
+[GitHub Releases](https://github.com/suimi8/claude-free-proxy/releases) · [作者主页](https://github.com/suimi8)
 
 ## 客户端接入
 

@@ -33,6 +33,7 @@ export function sandbox(t) {
     DESKTOP_SYNC: '0',
     UPSTREAM_IMPERSONATE: '0',
     CACHE_MODE: 'off',
+    GATEWAY_UPDATE_CHECK: '0',
   });
   return { root, data, env };
 }

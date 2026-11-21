@@ -1,6 +1,7 @@
 // test_e2e.mjs —— 对真实上游做端到端回归
 const base = 'http://127.0.0.1:8787/v1';
-const H = { authorization: 'Bearer sk-local', 'content-type': 'application/json' };
+if (!process.env.PROXY_API_KEY) throw Error('Set PROXY_API_KEY for this live test');
+const H = { authorization: `Bearer ${process.env.PROXY_API_KEY}`, 'content-type':'application/json' };
 const t0 = Date.now();
 const el = () => ((Date.now() - t0) / 1000).toFixed(1) + 's';
 

@@ -13,11 +13,12 @@
  *   start.cmd pack       打包迁移到另一台电脑
  */
 import net from 'node:net';
+import { supervise } from './src/serve.mjs';
 import { createInterface } from 'node:readline/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dataFile } from './src/paths.mjs';
 import { packRelease } from './src/release-files.mjs';
@@ -66,26 +67,6 @@ function localGatewayPid(port) {
   if (!/^\d+$/.test(pid || '')) return null;
   const args = spawnSync('ps',['-ww','-p',pid,'-o','args='],{encoding:'utf8',timeout:2000});
   return args.stdout?.trimEnd().endsWith(entry) || args.stdout?.trimEnd().endsWith(entry+'"') ? Number(pid) : null;
-}
-
-/** 前台接管反代进程：Ctrl+C / 关窗口都会连带停掉它 */
-function runProxy(env) {
-  const proxyScript = path.join(HERE, 'src', 'openai-proxy.mjs');
-  const child = spawn(process.execPath, [proxyScript], {
-    cwd: HERE,
-    stdio: 'inherit',
-    env: { ...process.env, ...env },
-  });
-  child.on('exit', code => {
-    out('');
-    out('  服务已退出。');
-    process.exit(code ?? 0);
-  });
-  child.on('error', err => {
-    out('');
-    out('  启动失败：' + err.message);
-    process.exit(1);
-  });
 }
 
 async function main() {
@@ -152,7 +133,7 @@ async function main() {
 
   if (!fs.existsSync(dataFile('accounts.json', process.env.ACCOUNTS_FILE))) {
     out('');
-    out('   提示：还没有账号，启动后打开 WebUI 点「链接登录」添加。');
+    out('   提示：还没有账号，启动后打开 WebUI 点「手动输入」添加。');
   }
   if (isLan) {
     out('');
@@ -161,7 +142,7 @@ async function main() {
   }
   out('');
 
-  runProxy(env);
+  await supervise({root: HERE, env: {...process.env, ...env}});
 }
 
 main().catch(err => {

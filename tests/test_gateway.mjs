@@ -348,43 +348,6 @@ function stageApp(root) {
     fs.mkdirSync(path.dirname(dst), { recursive: true });
     fs.copyFileSync(path.join(project, file), dst);
   }
-  const pluginRoot = path.join(app, 'plugins');
-  fs.mkdirSync(path.join(pluginRoot, 'chain-shop'), { recursive: true });
-  fs.mkdirSync(path.join(pluginRoot, 'mailboxes'), { recursive: true });
-  fs.writeFileSync(path.join(pluginRoot, 'local-views.json'), JSON.stringify([
-    { id: 'chain-shop', title: 'Chain shop fixture', namespace: 'chain_shop', collection: 'goods' },
-    { id: 'mailboxes', title: 'Mailbox fixture', namespace: 'mailboxes', collection: 'mailboxes' },
-  ]));
-  fs.writeFileSync(path.join(pluginRoot, 'chain-shop', 'management.mjs'), `
-    export async function createManagement() {
-      return {
-        forms: [{
-          id: 'upload', label: 'Upload sessionKey',
-          fields: [{ name: 'sessionKey', label: 'sessionKey', type: 'textarea', sensitive: true }],
-          submit: async payload => [200, { message: 'upload accepted', characters: payload.sessionKey.length }],
-        }],
-        status: async () => ({ message: 'ready', values: {} }),
-      };
-    }
-  `);
-  fs.writeFileSync(path.join(pluginRoot, 'mailboxes', 'management.mjs'), `
-    export async function createManagement({ getSettings, saveSettings }) {
-      return {
-        forms: [{
-          id: 'save', label: 'Save mailbox settings',
-          fields: [
-            { name: 'token', label: 'Token', type: 'password', sensitive: true },
-            { name: 'baseUrl', label: 'Base URL', type: 'url' },
-          ],
-          submit: async payload => {
-            saveSettings({ maomailToken: payload.token, maomailBaseUrl: payload.baseUrl });
-            return [200, { message: 'settings saved' }];
-          },
-        }],
-        status: async () => ({ message: getSettings().maomailToken ? 'configured' : 'not configured', values: {} }),
-      };
-    }
-  `);
   const require = createRequire(import.meta.url),
     dep = path.dirname(require.resolve('undici/package.json'));
   fs.mkdirSync(path.join(app, 'node_modules'));
@@ -403,6 +366,7 @@ test('isolated gateway with loopback mock upstream', { timeout: 100000 }, async 
   const env = {
     ...box.env,
     DATA_DIR: data,
+    GATEWAY_UPDATE_CHECK: '0',
     LOCAL_API_KEY: 'legacy-fixture-only',
     TOOL_PING_GRACE_MS: '150',
     ACCOUNT_QUEUE_BUDGET_MS: '1000',
@@ -411,7 +375,6 @@ test('isolated gateway with loopback mock upstream', { timeout: 100000 }, async 
   mock.server.listen(0, '127.0.0.1');
   await once(mock.server, 'listening');
   const base = 'http://127.0.0.1:' + mock.server.address().port;
-  fs.writeFileSync(path.join(app, 'web/webui.local.html'), 'PRIVATE-LAYOUT-FIXTURE');
   let gw = startGateway(app, env),
     port;
   try {
@@ -422,30 +385,6 @@ test('isolated gateway with loopback mock upstream', { timeout: 100000 }, async 
       user = cfg.keys.find((k) => k.role === 'inference').key;
     const acctSecret = 'SYNTHETIC-account-credential';
     const call = (route, opts) => request(port, route, opts);
-    await t.test('local plugin forms submit large sessionKey batches and save mailbox settings', async () => {
-      const catalog = await call('/v1/local-plugins', { key: admin });
-      assert.equal(catalog.status, 200, catalog.text);
-      assert.equal(catalog.json().plugins.find(p => p.id === 'chain-shop').available, false);
-      assert(catalog.json().plugins.find(p => p.id === 'chain-shop').forms.some(f => f.id === 'upload'));
-
-      const sessionBatch = 'synthetic-session-key\\n'.repeat(4000);
-      const uploaded = await call('/v1/local-plugins/chain-shop/actions/upload', {
-        key: admin, body: { sessionKey: sessionBatch },
-      });
-      assert.equal(uploaded.status, 200, uploaded.text);
-      assert.equal(uploaded.json().characters, sessionBatch.length);
-      assert(!uploaded.text.includes(sessionBatch));
-
-      const saved = await call('/v1/local-plugins/mailboxes/actions/save', {
-        key: admin, body: { token: 'synthetic-fixture-value', baseUrl: 'https://example.invalid' },
-      });
-      assert.equal(saved.status, 200, saved.text);
-      assert.equal(saved.json().message, 'settings saved');
-      const settings = await call('/v1/local-plugins/mailboxes/settings', { key: admin });
-      assert.equal(settings.status, 200, settings.text);
-      assert.equal(settings.json().message, 'configured');
-      assert(!settings.text.includes('synthetic-fixture-value'));
-    });
     const logs = async () => (await call('/v1/usage/logs?range=all&limit=1000', { key: admin })).json().logs;
     const countRoute = '/v1/messages/count_tokens';
     async function logFor(uuid) {
@@ -488,7 +427,7 @@ test('isolated gateway with loopback mock upstream', { timeout: 100000 }, async 
       assert.deepEqual([row.api, row.status, row.attempts, row.ok, row.account_id, row.input_tokens, row.output_tokens],
         ['messages', 429, 0, false, '', 0, 0]);
     });
-    await t.test('fresh volume, public readiness, private UI shell and restart persistence', async () => {
+    await t.test('fresh volume, public readiness, UI shell and restart persistence', async () => {
       assert.notEqual(admin, user);
       assert(!gw.output.includes(admin));
       assert(!gw.output.includes(user));
@@ -512,11 +451,6 @@ test('isolated gateway with loopback mock upstream', { timeout: 100000 }, async 
         'fetchExportData',
       ])
         assert(!ui.text.includes(s), s);
-      assert(!ui.text.includes('PRIVATE-LAYOUT-FIXTURE'));
-      const status = await call('/login/fixture');
-      assert.equal(status.status, 200);
-      assert(!status.text.includes(admin));
-      assert.match(status.text, /authorization:/i);
       const a = await call('/v1/accounts', {
         key: admin,
         body: { id: 'fixture', label: 'only test', sessionKey: acctSecret, org: 'org-fixture', base },
@@ -551,7 +485,6 @@ test('isolated gateway with loopback mock upstream', { timeout: 100000 }, async 
         '/v1/accounts',
         '/v1/pool',
         '/v1/keys',
-        '/login/fixture/state',
         '/v1/operations',
       ]) {
         assert.equal((await call(route)).status, 401, route);

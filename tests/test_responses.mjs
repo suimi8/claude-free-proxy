@@ -5,7 +5,8 @@
  *       GET /v1/responses/{id} / 空 input 400 / 无鉴权 401
  */
 const BASE = process.env.BASE || 'http://127.0.0.1:8787';
-const KEY = process.env.KEY || 'sk-local';
+const KEY = process.env.KEY || process.env.PROXY_API_KEY;
+if (!KEY) throw Error('Set PROXY_API_KEY for this live test');
 const H = { authorization: `Bearer ${KEY}`, 'content-type': 'application/json' };
 
 let pass = 0, fail = 0;
