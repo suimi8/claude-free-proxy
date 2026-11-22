@@ -7,7 +7,7 @@ import { parseVersion, REPO_URL } from './github-releases.mjs';
 // The bundle is data until its origin, digest, schema and filenames have been checked.
 export const RUNTIME = Object.freeze([
   'package.json', 'package-lock.json', 'web/webui.html', 'web/version-panel.css', 'web/version-panel.js',
-  ...['accounts','config','context-optimizer','network-optimizer','openai-proxy','child-http','init-admin',
+  ...['accounts','cf-verify','config','context-optimizer','network-optimizer','openai-proxy','child-http','init-admin',
     'operation-log','quota-probe','usage-log','kyc','paths','public-http','upstream-events','doctor',
     'github-releases','update-package','update-service','serve'].map(n => `src/${n}.mjs`),
 ]);

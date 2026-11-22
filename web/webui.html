@@ -161,6 +161,11 @@
     width: 28px;
     padding: 0;
   }
+  .actions-row .btn.sm.cf-btn {
+    border-color: #f59e0b;
+    color: #b45309;
+    background: #fffbeb;
+  }
   .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; align-items: center; }
   .actions .btn.sm { flex: 0 0 auto; white-space: nowrap; padding: 4px 7px; font-size: 11.5px; line-height: 1.4; height: 26px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; }
   .actions .btn.danger { margin-left: auto; }
@@ -206,7 +211,25 @@
     margin-top: 14px; box-shadow: var(--shadow); }
   .panel h3 { margin: 0 0 12px; font-size: 14px; }
   .panel .hint { color: var(--sub); font-size: 11.5px; margin: -6px 0 12px; }
-  .chart { width: 100%; height: 170px; display: block; }
+  .chart-container { position: relative; width: 100%; margin: 4px 0; }
+  .chart { width: 100%; height: 170px; display: block; overflow: visible; }
+  .chart-tooltip {
+    position: absolute; pointer-events: none; opacity: 0;
+    transition: opacity .12s ease;
+    background: rgba(15, 23, 42, 0.95); color: #fff;
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 9px; padding: 9px 13px; font-size: 11.5px;
+    line-height: 1.5; z-index: 50; box-shadow: 0 10px 25px rgba(0,0,0,0.32);
+    white-space: nowrap; min-width: 180px;
+  }
+  .chart-tooltip.on { opacity: 1; }
+  .chart-tooltip .tip-title { font-weight: 600; margin-bottom: 5px; color: #cbd5e1; border-bottom: 1px solid rgba(255,255,255,0.12); padding-bottom: 4px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .chart-tooltip .tip-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 3px 0; }
+  .chart-tooltip .tip-row span { display: flex; align-items: center; gap: 6px; color: #94a3b8; }
+  .chart-tooltip .tip-row span i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+  .chart-tooltip .tip-row b { color: #f8fafc; font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+  .chart-tooltip .live-tag { background: #16a34a; color: #fff; font-size: 10px; padding: 1px 6px; border-radius: 4px; font-weight: 600; }
   table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   table.tbl th { text-align: left; color: var(--sub); font-weight: 600; padding: 9px 10px;
     border-bottom: 1px solid var(--line); white-space: nowrap; }
@@ -224,6 +247,20 @@
   .legend { display: flex; gap: 14px; font-size: 11.5px; color: var(--sub); margin-top: 6px; }
   .legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
   @media (max-width: 900px) { .metrics { grid-template-columns: repeat(2, 1fr); } }
+
+  /* ---------- 分页控制器 ---------- */
+  .pagination-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; gap: 10px; margin-top: 14px; padding: 10px 14px;
+    background: #fff; border: 1px solid var(--line); border-radius: var(--r);
+    box-shadow: var(--shadow); font-size: 13px; color: var(--sub);
+  }
+  .pagination-bar .pg-info { font-size: 12.5px; }
+  .pagination-bar .pg-info b { color: var(--ink); font-weight: 600; }
+  .pagination-bar .pg-controls { display: flex; align-items: center; gap: 6px; }
+  .pagination-bar .pg-cur { font-size: 12.5px; color: var(--ink); padding: 0 4px; font-weight: 500; }
+  .pagination-bar .pg-cur b { color: var(--blue); }
+  .pagination-bar .btn.pg-btn { padding: 4px 10px; font-size: 12px; height: 28px; border-radius: 8px; }
 
   #toasts { position: fixed; right: 18px; bottom: 18px; z-index: 90; display: flex;
     flex-direction: column; gap: 8px; }
@@ -276,7 +313,8 @@
 <div class="wrap">
   <div class="tabs">
     <button id="tabPool" class="on">👥 账号池</button>
-    <button id="tabUsage">📊 用量统计 / Tokens</button>
+    <button id="tabUsage">📊 账号用量</button>
+    <button id="tabLogs">📜 请求日志</button>
     <button id="tabKeys">🔑 API Keys</button>
     <button id="tabSettings">⚙️ 系统设置</button>
     <button id="tabOps">📋 操作日志</button>
@@ -305,6 +343,7 @@
     <button class="btn" id="btnRefresh">⟳ 刷新</button>
     <button class="btn" id="btnQuotaAll" title="对所有账号主动查一次额度（每个账号消耗 1 条最小消息）">📊 刷新全部额度</button>
     <button class="btn" id="btnKycAll" title="查询所有账号各组织的 KYC 状态（只读接口，不消耗额度，结果缓存 5 分钟）">🪪 查全部 KYC</button>
+    <button class="btn" id="btnCfAll" title="对被 Cloudflare 拦截（cloudflare_challenge）的账号一键批量过验证：逐个弹出 Chrome 窗口（一次一个），手动过挑战后自动收新 cf_clearance + 配套 UA 入池并清冷却">🛡 批量过CF</button>
     <button class="btn" id="btnLookup" title="粘贴一条 sessionKey，查询它对应的账号与 org；未入池的 key 会现场向 claude.ai 查询（只读，不消耗额度）">🔎 查询密钥</button>
     <button class="btn" id="btnBatchImport" title="批量粘贴导入多个 sessionKey（支持多种格式，自动发现组织与备注）">📥 批量导入</button>
     <div class="grow"></div>
@@ -322,13 +361,14 @@
   </div>
 
   <div class="selectbar">
-    <label><input type="checkbox" id="selAll"> 全选</label>
+    <label><input type="checkbox" id="selAll"> 全选本页</label>
     <span id="selInfo" class="hsub"></span>
     <div class="grow"></div>
     <button class="btn sm danger" id="btnDelSel" style="display:none">🗑 删除所选</button>
   </div>
 
   <div class="grid" id="grid"></div>
+  <div id="pagePool"></div>
   </div><!-- /viewPool -->
 
   <div id="viewUsage" style="display:none">
@@ -340,7 +380,7 @@
         <option value="all">全部</option>
       </select>
       <select id="uAccount"><option value="">全部账号</option></select>
-      <button class="btn sm" id="uRefresh">⟳ 刷新</button>
+      <button class="btn sm" id="uRefresh">⟳ 刷新用量</button>
       <span class="grow"></span>
       <span class="hsub" id="uNote"></span>
     </div>
@@ -359,34 +399,71 @@
     </div>
 
     <div class="panel">
-      <h3>Tokens · 按小时</h3>
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:6px">
+        <h3 style="margin:0">Tokens · 按小时走势</h3>
+        <span class="hsub" id="chartLiveIndicator" style="font-size:12px;color:var(--sub)">🟢 实时统计中 · 鼠标悬停任意时段查看精确明细</span>
+      </div>
       <div class="hint">本地按中英文分开估算 token（中文 1 字 1 token，其余 4 字符 1 token）；缓存命中部分不计入「新增输入」</div>
-      <svg class="chart" id="uChart" viewBox="0 0 900 170" preserveAspectRatio="none"></svg>
-      <div class="legend"><span><i style="background:#2563eb"></i>输入</span>
+      <div class="chart-container">
+        <svg class="chart" id="uChart" viewBox="0 0 900 170" preserveAspectRatio="none"></svg>
+        <div id="uChartTip" class="chart-tooltip"></div>
+      </div>
+      <div class="legend">
+        <span><i style="background:#2563eb"></i>输入</span>
         <span><i style="background:#f97316"></i>输出</span>
-        <span><i style="background:#16a34a"></i>缓存命中</span></div>
+        <span><i style="background:#16a34a"></i>缓存命中</span>
+        <span style="margin-left:auto;font-size:11.5px;color:var(--sub)">最右侧点为当前小时实时累加数据（悬停可看明细）</span>
+      </div>
     </div>
 
     <div class="panel">
-      <h3>按账号 · 已使用 Tokens</h3>
-      <div class="hint">账号池中所有账号都会记录；已停用 / 无请求也显示（计 0）</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:6px">
+        <h3 style="margin:0">按账号 · 已使用 Tokens</h3>
+        <button class="btn sm" onclick="switchTab('logs')" style="font-size:12px">📜 查看请求流水明细 →</button>
+      </div>
+      <div class="hint">账号池中所有账号都会记录；已停用 / 无请求也显示（计 0）。默认每页显示 20 条。</div>
       <div class="tblwrap"><table class="tbl"><thead><tr>
         <th>账号</th><th>状态</th><th>请求数</th><th>新增输入</th><th>输出</th>
         <th>合计已用</th><th>缓存命中率</th><th>额度剩余</th>
       </tr></thead><tbody id="uAccounts"></tbody></table></div>
+      <div id="pageUsageAcc"></div>
+    </div>
+  </div><!-- /viewUsage -->
+
+  <div id="viewLogs" style="display:none">
+    <div class="ufilters">
+      <select id="logRange">
+        <option value="today">当天</option>
+        <option value="yesterday">昨天</option>
+        <option value="7d">近 7 天</option>
+        <option value="all">全部</option>
+      </select>
+      <select id="logAccount"><option value="">全部账号</option></select>
+      <select id="logStatus">
+        <option value="">全部状态</option>
+        <option value="ok">仅成功 (✓)</option>
+        <option value="err">仅失败 (✖)</option>
+      </select>
+      <div class="search" style="max-width:260px">
+        <input id="logSearch" placeholder="搜索模型/账号/错误信息">
+      </div>
+      <button class="btn sm" id="btnLogRefresh">⟳ 刷新日志</button>
+      <span class="grow"></span>
+      <span class="hsub" id="logCountSummary"></span>
     </div>
 
-    <div class="panel">
-      <h3>请求日志</h3>
+    <div class="panel" style="margin-top:0">
+      <h3 style="margin:0 0 6px">📜 请求明细日志</h3>
       <div class="hint">「缓存命中」按稳定前缀（system + tools + 历史消息）最长公共前缀判定，TTL 5 分钟。
         「速度」= <b>真实出字速度</b>：可见正文 token ÷ 真正在写正文的那段时间（不含思考期、不含上游吊连接的空闲）；
-        悬停可看时间轴拆分。「思考」是模型思考耗时，「首字」是首个增量延迟。</div>
+        悬停可看时间轴拆分。「思考」是模型思考耗时，「首字」是首个增量延迟。默认每页显示 20 条。</div>
       <div class="tblwrap"><table class="tbl"><thead><tr>
         <th>时间</th><th>账号</th><th>模型</th><th>新增输入</th><th>输出</th>
         <th>缓存命中</th><th>速度</th><th>思考</th><th>首字</th><th>耗时</th><th>状态</th>
       </tr></thead><tbody id="uLogs"></tbody></table></div>
+      <div id="pageLogs"></div>
     </div>
-  </div><!-- /viewUsage -->
+  </div><!-- /viewLogs -->
 
   <div id="viewKeys" style="display:none">
     <div class="panel">
@@ -403,6 +480,7 @@
           <th>模型范围</th><th>RPM / TPM</th><th>IP 白名单</th><th>操作</th>
         </tr></thead><tbody id="kRows"></tbody></table>
       </div>
+      <div id="pageKeys"></div>
       <p class="hint" style="margin-top:10px">
         额度口径与账号用量一致：输入（含缓存命中）+ 输出。0 表示不限制。所有配置存在
         <code>config.json</code>，改完自动热加载，不用重启。
@@ -605,6 +683,7 @@
         </tbody>
       </table>
     </div>
+    <div id="pageOps"></div>
   </div><!-- /viewOps -->
 </div>
 
@@ -709,6 +788,56 @@ sessionKey=sk-ant-sid02-uuuuuuuu; ..."></textarea>
   </div>
 </div>
 
+<!-- 刷新全部额度 进度弹窗 -->
+<div class="mask" id="maskQuotaProgress" style="z-index:75">
+  <div class="modal" style="max-width:520px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <h3 style="margin:0;font-size:16px;display:flex;align-items:center;gap:8px">
+        <span>📊 正在批量刷新账号额度</span>
+      </h3>
+      <span class="chip" id="quotaProgPct" style="font-weight:700;color:var(--blue);background:#eff6ff;border-color:#bfdbfe">0%</span>
+    </div>
+
+    <!-- 动态进度条 -->
+    <div style="height:10px;background:#f1f5f9;border-radius:6px;overflow:hidden;margin-bottom:14px;border:1px solid var(--line)">
+      <div id="quotaProgBar" style="width:0%;height:100%;background:linear-gradient(90deg, #2563eb, #3b82f6);border-radius:6px;transition:width 0.25s ease"></div>
+    </div>
+
+    <!-- 状态与统计明细 -->
+    <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:8px;margin-bottom:12px;text-align:center">
+      <div style="background:#f8fafc;padding:8px;border-radius:8px;border:1px solid var(--line)">
+        <div style="font-size:11px;color:var(--sub)">总账号数</div>
+        <div id="quotaProgTotal" style="font-size:16px;font-weight:700;color:var(--ink)">0</div>
+      </div>
+      <div style="background:#f0fdf4;padding:8px;border-radius:8px;border:1px solid #bbf7d0">
+        <div style="font-size:11px;color:#166534">已成功</div>
+        <div id="quotaProgOk" style="font-size:16px;font-weight:700;color:#16a34a">0</div>
+      </div>
+      <div style="background:#fef2f2;padding:8px;border-radius:8px;border:1px solid #fecaca">
+        <div style="font-size:11px;color:#991b1b">失败 / 异常</div>
+        <div id="quotaProgFail" style="font-size:16px;font-weight:700;color:#dc2626">0</div>
+      </div>
+    </div>
+
+    <!-- 实时详情框 -->
+    <div style="background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:12px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px;gap:8px">
+        <span style="color:var(--sub);flex-shrink:0">正在处理:</span>
+        <b id="quotaProgCurrent" style="color:var(--ink);max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">准备中…</b>
+      </div>
+      <div style="display:flex;justify-content:space-between;gap:8px">
+        <span style="color:var(--sub);flex-shrink:0">最新反馈:</span>
+        <span id="quotaProgLastResult" style="color:var(--sub);max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">等待开始…</span>
+      </div>
+    </div>
+
+    <div class="mrow" style="margin-top:0">
+      <button class="btn danger sm" id="btnQuotaStop">🛑 停止刷新</button>
+      <button class="btn primary sm" id="btnQuotaClose" style="display:none">完成并关闭</button>
+    </div>
+  </div>
+</div>
+
 <!-- API Key -->
 <div class="mask" id="maskKey" style="z-index:70">
   <div class="modal">
@@ -730,9 +859,17 @@ const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 
 /* ---------------- 状态 ---------------- */
-let S = { status: null, health: null, search: "", sel: new Set(), editId: null, cd: new Map(),
-  usage: null, tab: "pool", usageRange: "today", usageAccount: "", kyc: {} };
-let pollTimer = null, tickTimer = null;
+let S = {
+  status: null, health: null, search: "", sel: new Set(), editId: null, cd: new Map(),
+  usage: null, tab: "pool", usageRange: "today", usageAccount: "", kyc: {},
+  pagePool: 1, pageUsageAcc: 1, pageLogs: 1, pageOps: 1,
+  logRange: "today", logAccount: "", logStatus: "", logSearch: "",
+  logs: [], ops: [],
+};
+let K = { list: [], editId: null, page: 1 };
+let pollTimer = null, tickTimer = null, pollGeneration = 0, loadInFlight = null;
+let rejectedDashboardKey = null;
+let renderedCardSignature = "";
 
 const key = () => sessionStorage.getItem('gateway_admin') || '';
 function toast(msg, err) {
@@ -741,6 +878,45 @@ function toast(msg, err) {
   d.textContent = msg;
   $("#toasts").appendChild(d);
   setTimeout(() => d.remove(), err ? 5200 : 2600);
+}
+
+function showKey(on, hint) {
+  if (on) {
+    const h = document.getElementById("keyHint");
+    if (h && hint) h.textContent = hint;
+  }
+  $("#maskKey").classList.toggle("on", on);
+  if (on) $("#fApi").focus(); else $("#fApi").value = "";
+}
+
+function paginate(items, page, pageSize = 20) {
+  const total = (items || []).length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const currentPage = Math.min(Math.max(1, page || 1), totalPages);
+  const start = (currentPage - 1) * pageSize;
+  const end = Math.min(start + pageSize, total);
+  const pageItems = (items || []).slice(start, end);
+  return { total, totalPages, currentPage, pageSize, start, end, pageItems };
+}
+
+function renderPaginationBar(pg, onPageFnName) {
+  if (!pg || pg.total === 0) return '';
+  return `<div class="pagination-bar">
+    <div class="pg-info">共 <b>${pg.total}</b> 条 · 显示第 <b>${pg.start + 1} - ${pg.end}</b> 条（每页 20 条）</div>
+    <div class="pg-controls">
+      <button class="btn sm pg-btn" ${pg.currentPage <= 1 ? "disabled" : ""} onclick="${onPageFnName}(1)" title="第一页">« 首页</button>
+      <button class="btn sm pg-btn" ${pg.currentPage <= 1 ? "disabled" : ""} onclick="${onPageFnName}(${pg.currentPage - 1})" title="上一页">‹ 上一页</button>
+      <span class="pg-cur">第 <b>${pg.currentPage}</b> / ${pg.totalPages} 页</span>
+      <button class="btn sm pg-btn" ${pg.currentPage >= pg.totalPages ? "disabled" : ""} onclick="${onPageFnName}(${pg.currentPage + 1})" title="下一页">下一页 ›</button>
+      <button class="btn sm pg-btn" ${pg.currentPage >= pg.totalPages ? "disabled" : ""} onclick="${onPageFnName}(${pg.totalPages})" title="最后一页">末页 »</button>
+    </div>
+  </div>`;
+}
+
+function cardStatusSignature(st) {
+  if (!st) return "";
+  return JSON.stringify([S.health?.plan || "", st.min_quota_remaining, S.pagePool, S.search,
+    st.accounts.map(a => [a.id, a.enabled, a.exhausted, a.cooldown_remaining_s > 0, a.inflight, a.fail_streak, S.sel.has(a.id)])]);
 }
 
 async function api(path, opts = {}) {
@@ -758,7 +934,9 @@ async function api(path, opts = {}) {
   const r = await fetch(path, { ...opts, headers });
   let j = null;
   try { j = await r.json(); } catch { /* noop */ }
-  if (r.status === 401 || (r.status === 403 && path === '/v1/accounts')) {
+  const dashboardAuth = path === '/v1/accounts' || path === '/healthz';
+  if (dashboardAuth && k === key() && j?.error?.status === r.status && (r.status === 401 || r.status === 403)) {
+    rejectedDashboardKey = k;
     stopPoll();
     showKey(true, j?.error?.message || '管理认证失败，请重新输入管理 Key');
     throw new Error(j?.error?.message || '请输入有效的管理 Key');
@@ -767,18 +945,75 @@ async function api(path, opts = {}) {
   return j;
 }
 
-/**
- * 显示「输入 API Key」弹窗。
- * 只把它提到最上层（z-index 70），刻意不动下面已打开的弹窗——
- * 这样用户填完 key 关闭后，之前「新建 Key」填的表单还完整保留，可以直接再点保存。
- */
-function showKey(on, hint) {
-  if (on) {
-    const h = document.getElementById("keyHint");
-    if (h && hint) h.textContent = hint;
-  }
-  $("#maskKey").classList.toggle("on", on);
-  if (on) $("#fApi").focus(); else $("#fApi").value = "";
+/* 手动过CF：启动后轮询流程状态；状态/进度变化用 toast 提示，终态自动停止并刷新列表 */
+let _cfPoll = null, _cfLast = "", _cfLastMsg = "";
+function pollCfVerify(fid) {
+  if (_cfPoll) clearInterval(_cfPoll);
+  _cfLast = ""; _cfLastMsg = "";
+  const t0 = Date.now();
+  _cfPoll = setInterval(async () => {
+    try {
+      const s = await api("/v1/cfverify/" + encodeURIComponent(fid) + "/state");
+      if (s.state !== _cfLast) {
+        _cfLast = s.state;
+        if (s.state === "waiting") toast("🛡 请在弹出的浏览器窗口里完成 Cloudflare 验证，通过后自动写回账号池");
+        else if (s.state === "capturing") toast("🛡 检测到新 cf_clearance，正在校验并写回…");
+      }
+      // 批量模式：进度消息变化就提示（如「3/22 · 已弹出浏览器…」）
+      if (s.batch && s.message !== _cfLastMsg) { _cfLastMsg = s.message; toast("🛡 " + s.message); }
+      if (s.state === "done") {
+        clearInterval(_cfPoll); _cfPoll = null;
+        toast("✅ " + s.message);
+        load(true);
+        return;
+      }
+      if (s.state !== "starting" && s.state !== "waiting" && s.state !== "capturing" && s.state !== "running") {
+        clearInterval(_cfPoll); _cfPoll = null;
+        toast((s.state === "error" ? "❌ " : "⚠️ ") + s.message, true);
+        load(true);
+      }
+    } catch (ex) {
+      clearInterval(_cfPoll); _cfPoll = null;
+      toast("🛡 " + ex.message, true);
+    }
+    // 兜底：轮询最长 30 分钟（批量多个账号），防止状态端异常时永久空转
+    if (_cfPoll && Date.now() - t0 > 30 * 60 * 1000) { clearInterval(_cfPoll); _cfPoll = null; }
+  }, 2000);
+}
+
+function startSerialPoll(intervalMs, poll, immediate = false) {
+  let timer = null, stopped = false, running = false, controller = null;
+  const canRun = () => !stopped && !document.hidden;
+  const schedule = delay => {
+    if (timer === null && canRun()) timer = setTimeout(tick, delay);
+  };
+  const tick = async () => {
+    timer = null;
+    if (!canRun() || running) return;
+    running = true;
+    controller = new AbortController();
+    try { await poll(controller.signal); } catch {}
+    finally {
+      controller = null;
+      running = false;
+      schedule(intervalMs);
+    }
+  };
+  const onVisibilityChange = () => {
+    if (document.hidden) {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    } else schedule(0);
+  };
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  schedule(immediate ? 0 : intervalMs);
+  return () => {
+    stopped = true;
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    controller?.abort();
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+  };
 }
 
 /* ---------------- 渲染 ---------------- */
@@ -945,6 +1180,7 @@ function card(a) {
       </div>
       <div class="actions-row">
         <button class="btn sm" data-act="uncd" ${cdSec > 0 ? "" : "disabled"} title="清除冷却状态与连续失败计数">⏱ 清冷却</button>
+        ${/cloudflare|challenge/i.test(a.last_error || "") ? `<button class="btn sm cf-btn" data-act="cfpass" title="弹出一个无痕 Chrome 窗口，完成 Cloudflare 验证后自动把新 cf_clearance + 配套 UA 写回该账号并清冷却">🛡 过CF</button>` : ""}
         <button class="btn sm danger icon-del" data-act="del" title="删除账号">🗑</button>
       </div>
     </div>
@@ -955,15 +1191,30 @@ function card(a) {
 function renderCards() {
   const st = S.status; if (!st) return;
   const list = st.accounts.filter(matches);
-  $("#grid").innerHTML = (list.length
-    ? list.map(card).join("")
+  const pg = paginate(list, S.pagePool, 20);
+  S.pagePool = pg.currentPage;
+  const storm = st.cf_storm;
+  const stormBanner = storm?.active
+    ? `<div style="grid-column:1/-1;background:#fef2f2;border:1px solid #fca5a5;color:#991b1b;border-radius:12px;padding:12px 16px;font-weight:600" title="Cloudflare 把池子里大部分 clearance 作废了，完成类请求会 502 + 冷却；点上方「🛡 批量过CF」重新过墙（几分钟，挑战基本自动过）">🛡 <b>CF 风暴</b>：近 ${storm.window_min} 分钟 ${storm.count} 次 challenge（阈值 ${storm.threshold}）—— 池子大面积被拦，建议点「🛡 批量过CF」</div>`
+    : "";
+  $("#grid").innerHTML = stormBanner + (pg.pageItems.length
+    ? pg.pageItems.map(card).join("")
     : `<div class="empty">${st.total ? "没有匹配的账号" : "还没有账号 —— 请点「手动输入」添加你的账号"} </div>`);
   const selN = S.sel.size;
-  $("#selInfo").textContent = selN ? "已选 " + selN + " 个" : "";
+  $("#selInfo").textContent = selN ? "已选 " + selN + " 个账号" : "";
   $("#btnDelSel").style.display = selN ? "" : "none";
-  const visIds = list.map(a => a.id);
-  $("#selAll").checked = visIds.length > 0 && visIds.every(id => S.sel.has(id));
+  const curPageIds = pg.pageItems.map(a => a.id);
+  $("#selAll").checked = curPageIds.length > 0 && curPageIds.every(id => S.sel.has(id));
+  $("#pagePool").innerHTML = renderPaginationBar(pg, "window.goPoolPage");
+  renderedCardSignature = cardStatusSignature(st);
 }
+
+window.goPoolPage = page => {
+  S.pagePool = page;
+  renderCards();
+  const top = $("#viewPool").offsetTop;
+  if (window.scrollY > top) window.scrollTo({ top: top - 20, behavior: "smooth" });
+};
 
 function renderSettings() {
   const st = S.status; if (!st) return;
@@ -982,7 +1233,16 @@ function renderSettings() {
   if ($("#srvAccCount")) $("#srvAccCount").textContent = `${st.total} 个账号 (${st.eligible_now} 可用 / ${st.enabled} 启用)`;
 }
 
-function render() { renderHeader(); renderStats(); renderCards(); renderSettings(); }
+function render() {
+  renderHeader();
+  renderStats();
+  if (S.tab === "pool") renderCards();
+  else if (S.tab === "settings") renderSettings();
+  else if (S.tab === "usage") renderUsage();
+  else if (S.tab === "logs") renderLogs();
+  else if (S.tab === "keys") renderKeys();
+  else if (S.tab === "ops") renderOperationsTable();
+}
 
 /* ---------------- 用量统计看板 ---------------- */
 const nfmt = n => (n || 0).toLocaleString("zh-CN");
@@ -991,56 +1251,206 @@ function switchTab(t) {
   S.tab = t;
   $("#tabPool").classList.toggle("on", t === "pool");
   $("#tabUsage").classList.toggle("on", t === "usage");
+  $("#tabLogs").classList.toggle("on", t === "logs");
   $("#tabKeys").classList.toggle("on", t === "keys");
   $("#tabSettings").classList.toggle("on", t === "settings");
   $("#tabOps").classList.toggle("on", t === "ops");
+
   $("#viewPool").style.display = t === "pool" ? "" : "none";
   $("#viewUsage").style.display = t === "usage" ? "" : "none";
+  $("#viewLogs").style.display = t === "logs" ? "" : "none";
   $("#viewKeys").style.display = t === "keys" ? "" : "none";
   $("#viewSettings").style.display = t === "settings" ? "" : "none";
   $("#viewOps").style.display = t === "ops" ? "" : "none";
+
+  if (t === "pool") renderCards();
   if (t === "usage") loadUsage();
+  if (t === "logs") loadLogs();
   if (t === "keys") loadKeys();
   if (t === "settings") renderSettings();
   if (t === "ops") loadOperations();
 }
-async function loadUsage() {
+
+async function loadUsage(silent) {
   try {
     const q = new URLSearchParams({ range: S.usageRange });
     if (S.usageAccount) q.set("accountId", S.usageAccount);
     S.usage = await api("/v1/usage?" + q.toString());
     renderUsage();
-  } catch (e) { if (S.tab === "usage") toast(e.message, true); }
+  } catch (e) { if (!silent && S.tab === "usage") toast(e.message, true); }
 }
+
+const fmtAxis = v => {
+  if (v >= 1e8) return (v / 1e8).toFixed(1).replace(/\.0$/, "") + "亿";
+  if (v >= 1e6) return (v / 1e6).toFixed(v % 1e6 === 0 ? 0 : (v >= 1e7 ? 1 : 2)) + "M";
+  if (v >= 1e3) return (v / 1e3).toFixed(v % 1e3 === 0 ? 0 : 1) + "k";
+  return String(v);
+};
+
 function drawChart(rows) {
   const svg = $("#uChart");
-  if (!rows.length) {
+  const tip = $("#uChartTip");
+  if (!rows || !rows.length) {
     svg.innerHTML = `<text x="450" y="88" text-anchor="middle" fill="#94a3b8" font-size="13">暂无数据</text>`;
+    if (tip) tip.classList.remove("on");
     return;
   }
-  const W = 900, H = 170, padL = 46, padR = 12, padT = 12, padB = 26;
+  const W = 900, H = 170, padL = 72, padR = 20, padT = 16, padB = 26;
   const max = Math.max(1, ...rows.map(r => Math.max(r.input_tokens, r.output_tokens, r.cached_tokens)));
   const step = rows.length > 1 ? (W - padL - padR) / (rows.length - 1) : 0;
   const X = i => padL + i * step;
   const Y = v => H - padB - (v / max) * (H - padT - padB);
-  const line = (key, color) => `<polyline fill="none" stroke="${color}" stroke-width="2"
-    stroke-linejoin="round" stroke-linecap="round" points="${rows.map((r, i) => X(i) + "," + Y(r[key] || 0)).join(" ")}"/>`;
+
+  // 网格线与 Y 轴刻度（padL 留足空间，自适应 M/k 格式化，彻底杜绝左侧裁切）
   let grid = "";
   for (let i = 0; i <= 3; i++) {
     const v = Math.round(max * i / 3), y = Y(v);
-    grid += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="#eef2f7"/>
-      <text x="${padL - 8}" y="${y + 4}" text-anchor="end" fill="#94a3b8" font-size="10">${nfmt(v)}</text>`;
+    grid += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="#eef2f7" stroke-dasharray="3,3"/>
+      <text x="${padL - 10}" y="${y + 4}" text-anchor="end" fill="#94a3b8" font-size="10.5" font-family="ui-monospace,SFMono-Regular,monospace">${fmtAxis(v)}</text>`;
   }
-  const labels = rows.filter((_, i) => rows.length <= 12 || i % Math.ceil(rows.length / 12) === 0)
-    .map((r, _, arr) => {
-      const i = rows.indexOf(r);
-      return `<text x="${X(i)}" y="${H - 6}" text-anchor="middle" fill="#94a3b8" font-size="10">${esc(r.hour.slice(-5))}</text>`;
-    }).join("");
+
+  // 折线
+  const line = (key, color) => `<polyline fill="none" stroke="${color}" stroke-width="2.2"
+    stroke-linejoin="round" stroke-linecap="round" points="${rows.map((r, i) => X(i) + "," + Y(r[key] || 0)).join(" ")}"/>`;
+
+  // X 轴时间标签（确保首尾与关键节点均可见）
+  const labelStep = Math.max(1, Math.ceil(rows.length / 12));
+  const labels = rows.map((r, i) => {
+    if (i !== 0 && i !== rows.length - 1 && i % labelStep !== 0) return "";
+    return `<text x="${X(i)}" y="${H - 6}" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="ui-monospace,SFMono-Regular,monospace">${esc(r.hour.slice(-5))}</text>`;
+  }).join("");
+
+  // 最新实时点呼吸光晕（标识当前小时实时正在累加的数据点）
+  let liveDot = "";
+  if (rows.length > 0) {
+    const lastIdx = rows.length - 1;
+    const lastR = rows[lastIdx];
+    const lx = X(lastIdx), lyIn = Y(lastR.input_tokens || 0);
+    liveDot = `
+      <g transform="translate(${lx}, ${lyIn})">
+        <circle r="7" fill="#2563eb" opacity="0.35">
+          <animate attributeName="r" values="4;11;4" dur="2.2s" repeatCount="indefinite"/>
+          <animate attributeName="opacity" values="0.6;0;0.6" dur="2.2s" repeatCount="indefinite"/>
+        </circle>
+        <circle r="4" fill="#2563eb" stroke="#fff" stroke-width="2"/>
+      </g>`;
+  }
+
+  // 十字辅助线与悬停高亮数据点
+  const crosshair = `
+    <g id="chartCrosshair" style="display:none">
+      <line id="chLine" x1="0" y1="${padT}" x2="0" y2="${H - padB}" stroke="#94a3b8" stroke-dasharray="2,2" stroke-width="1.2"/>
+      <circle id="chDotIn" r="4.5" fill="#2563eb" stroke="#fff" stroke-width="2"/>
+      <circle id="chDotOut" r="4.5" fill="#f97316" stroke="#fff" stroke-width="2"/>
+      <circle id="chDotCache" r="4.5" fill="#16a34a" stroke="#fff" stroke-width="2"/>
+    </g>`;
+
   svg.innerHTML = grid + line("input_tokens", "#2563eb") + line("output_tokens", "#f97316") +
-    line("cached_tokens", "#16a34a") + labels;
+    line("cached_tokens", "#16a34a") + liveDot + crosshair + labels;
+
+  setupChartInteraction(svg, rows, { W, H, padL, padR, padT, padB, X, Y });
 }
+
+function setupChartInteraction(svg, rows, cfg) {
+  const tip = $("#uChartTip");
+  const crosshair = svg.querySelector("#chartCrosshair");
+  const chLine = svg.querySelector("#chLine");
+  const chDotIn = svg.querySelector("#chDotIn");
+  const chDotOut = svg.querySelector("#chDotOut");
+  const chDotCache = svg.querySelector("#chDotCache");
+  if (!tip || !crosshair) return;
+
+  const onMove = e => {
+    const rect = svg.getBoundingClientRect();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    const relX = clientX - rect.left;
+    const relY = clientY - rect.top;
+    if (relX < 0 || relX > rect.width || relY < 0 || relY > rect.height) {
+      onLeave();
+      return;
+    }
+    const svgX = (relX / rect.width) * cfg.W;
+    let closestIdx = 0, minDist = Infinity;
+    for (let i = 0; i < rows.length; i++) {
+      const dist = Math.abs(cfg.X(i) - svgX);
+      if (dist < minDist) { minDist = dist; closestIdx = i; }
+    }
+    const r = rows[closestIdx];
+    if (!r) return;
+
+    const x = cfg.X(closestIdx);
+    const yIn = cfg.Y(r.input_tokens || 0);
+    const yOut = cfg.Y(r.output_tokens || 0);
+    const yCache = cfg.Y(r.cached_tokens || 0);
+
+    crosshair.style.display = "";
+    chLine.setAttribute("x1", x);
+    chLine.setAttribute("x2", x);
+    chDotIn.setAttribute("cx", x);
+    chDotIn.setAttribute("cy", yIn);
+    chDotOut.setAttribute("cx", x);
+    chDotOut.setAttribute("cy", yOut);
+    chDotCache.setAttribute("cx", x);
+    chDotCache.setAttribute("cy", yCache);
+
+    const isLatest = closestIdx === rows.length - 1;
+    const hitRate = r.input_tokens ? Math.round((r.cached_tokens || 0) / r.input_tokens * 100) : 0;
+    tip.innerHTML = `
+      <div class="tip-title">
+        <span>🕒 ${esc(r.hour)}</span>
+        ${isLatest ? '<span class="live-tag">实时当前</span>' : ''}
+      </div>
+      <div class="tip-row">
+        <span><i style="background:#2563eb"></i>输入 Tokens</span>
+        <b>${nfmt(r.input_tokens)}</b>
+      </div>
+      <div class="tip-row">
+        <span><i style="background:#f97316"></i>输出 Tokens</span>
+        <b>${nfmt(r.output_tokens)}</b>
+      </div>
+      <div class="tip-row">
+        <span><i style="background:#16a34a"></i>缓存命中</span>
+        <b>${nfmt(r.cached_tokens)} (${hitRate}%)</b>
+      </div>
+      <div class="tip-row">
+        <span><i style="background:#64748b"></i>请求次数</span>
+        <b>${nfmt(r.requests)} 次</b>
+      </div>
+    `;
+
+    const tipX = (x / cfg.W) * 100;
+    const tipY = Math.min(yIn, yOut, yCache);
+    const pixelY = (tipY / cfg.H) * rect.height;
+    let transX = "-50%", transY = "-100%";
+    if (tipX < 20) transX = "0%";
+    else if (tipX > 80) transX = "-100%";
+    if (pixelY < 80) transY = "12px";
+    else transY = "calc(-100% - 10px)";
+    tip.style.transform = `translate(${transX}, ${transY})`;
+    tip.style.top = pixelY + "px";
+    tip.style.left = tipX + "%";
+    tip.classList.add("on");
+  };
+
+  const onLeave = () => {
+    crosshair.style.display = "none";
+    tip.classList.remove("on");
+  };
+
+  svg.onmousemove = onMove;
+  svg.ontouchmove = onMove;
+  svg.onmouseleave = onLeave;
+  svg.ontouchend = onLeave;
+}
+
 function renderUsage() {
   const u = S.usage; if (!u) return;
+  const chartLive = $("#chartLiveIndicator");
+  if (chartLive) {
+    const nowStr = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    chartLive.innerHTML = `🟢 实时已同步 (${nowStr}) · 鼠标悬停查看任意时段明细`;
+  }
   $("#mCost").textContent = u.cost == null ? "—" : u.cost;
   $("#mReq").textContent = nfmt(u.total_requests);
   $("#mReqSub").textContent = "成功 " + nfmt(u.ok_requests);
@@ -1056,7 +1466,7 @@ function renderUsage() {
     " · 平均空闲 " + (u.avg_idle_ms ? (u.avg_idle_ms / 1000).toFixed(1) + "s" : "—");
   $("#uNote").textContent = "Token 为本地估算（中文 1 字 1 token，其余 4 字符 1 token）· 「真实出字速度」= 正文 token ÷ 真正在写正文的时间（不含思考期、不含上游吊连接的空闲）· 缓存命中的 token 同样占用上下文与额度，已计入「已用」总量 · 缓存 TTL " + Math.round(u.cache_ttl_ms / 60000) + " 分钟";
 
-  // 账号下拉（仅在账号列表变化时重建，避免 3s 轮询打断选择）
+  // 账号下拉（仅在账号列表变化时重建，避免轮询打断选择）
   const sel = $("#uAccount"), cur = S.usageAccount;
   const sig = (u.accounts_all || []).map(a => a.id + "|" + a.label).join(";");
   if (sel.dataset.sig !== sig) {
@@ -1065,21 +1475,80 @@ function renderUsage() {
     sel.dataset.sig = sig;
   } else if (cur) sel.value = cur;
 
-  // 分账号表：把账号池所有账号都列出来（含无请求的）
+  // 分账号表：把账号池所有账号都列出来（含无请求的），支持分页（每页 20 条）
   const byId = new Map((u.by_account || []).map(a => [a.account_id, a]));
   const all = (u.accounts_all || []);
-  const accRows = all.length ? all.map(a => {
+  const pg = paginate(all, S.pageUsageAcc, 20);
+  S.pageUsageAcc = pg.currentPage;
+  const accRows = pg.pageItems.length ? pg.pageItems.map(a => {
     const r = byId.get(a.id) || {};
     return `<tr><td class="namecell" title="${esc(a.label)}">${esc(a.label.slice(0, 22))}</td><td>${a.enabled ? "启用" : "停用"}</td>
       <td>${nfmt(r.requests)}</td><td>${nfmt(r.new_input_tokens)}</td><td>${nfmt(r.output_tokens)}</td>
       <td><b>${nfmt(r.total_tokens ?? a.total_tokens_est)}</b></td><td>${pct(r.cache_hit_rate)}</td>
       <td>${a.quota_remaining == null ? "—" : pct(a.quota_remaining)}</td></tr>`;
-  }).join("") : `<tr><td colspan="8" class="empty">暂无账号</td></tr>`;
+  }).join("") : `<tr><td colspan="8" class="empty">暂无账号数据</td></tr>`;
   $("#uAccounts").innerHTML = accRows;
+  $("#pageUsageAcc").innerHTML = renderPaginationBar(pg, "window.goUsageAccPage");
 
-  const logs = u.logs || [];
-  $("#uLogs").innerHTML = logs.length ? logs.map(e => {
-    // 真实出字速度：正文 token ÷ 书写时间（不含思考期、不含收尾空闲）
+  drawChart(u.hourly || []);
+}
+
+window.goUsageAccPage = page => {
+  S.pageUsageAcc = page;
+  renderUsage();
+};
+
+/* ---------------- 请求明细日志看板 ---------------- */
+async function loadLogs(silent) {
+  try {
+    const q = new URLSearchParams({
+      range: S.logRange || "today",
+      limit: "500",
+    });
+    if (S.logAccount) q.set("accountId", S.logAccount);
+    const r = await api("/v1/usage/logs?" + q.toString());
+    S.logs = r.logs || [];
+    renderLogs();
+  } catch (e) {
+    if (!silent && S.tab === "logs") toast(e.message, true);
+  }
+}
+
+function renderLogs() {
+  const allLogs = S.logs || [];
+
+  // 填充账号下拉
+  const logAccSel = $("#logAccount");
+  if (logAccSel && S.status?.accounts) {
+    const sig = S.status.accounts.map(a => a.id + "|" + a.label).join(";");
+    if (logAccSel.dataset.sig !== sig) {
+      logAccSel.innerHTML = `<option value="">全部账号</option>` +
+        S.status.accounts.map(a => `<option value="${esc(a.id)}" ${a.id === S.logAccount ? "selected" : ""}>${esc(a.label)}</option>`).join("");
+      logAccSel.dataset.sig = sig;
+    }
+  }
+
+  // 状态与关键词过滤
+  const q = (S.logSearch || "").trim().toLowerCase();
+  const statusFilter = S.logStatus;
+  const filtered = allLogs.filter(e => {
+    if (statusFilter === "ok" && !e.ok) return false;
+    if (statusFilter === "err" && e.ok) return false;
+    if (q) {
+      const txt = [e.account_label, e.account_id, e.model, e.error, e.status].join(" ").toLowerCase();
+      if (!txt.includes(q)) return false;
+    }
+    return true;
+  });
+
+  const pg = paginate(filtered, S.pageLogs, 20);
+  S.pageLogs = pg.currentPage;
+
+  const okCount = filtered.filter(e => e.ok).length;
+  const errCount = filtered.length - okCount;
+  $("#logCountSummary").textContent = `共 ${allLogs.length} 条流水 · 筛选命中 ${filtered.length} 条（成功 ${okCount} · 失败 ${errCount}）`;
+
+  $("#uLogs").innerHTML = pg.pageItems.length ? pg.pageItems.map(e => {
     const speed = e.tps ? e.tps.toFixed(1) + " tok/s" : "—";
     const secs = ms => ms ? (ms / 1000).toFixed(1) + "s" : "—";
     const speedTip = [
@@ -1113,26 +1582,75 @@ function renderUsage() {
       <td title="${esc(speedTip)}">${speed}</td><td>${secs(e.think_ms)}</td>
       <td>${e.ttfb_ms == null ? "—" : e.ttfb_ms + "ms"}</td>
       <td>${e.latency_ms || 0}ms</td><td class="errcell ${e.ok ? "ok" : ""}" title="${esc(full)}">${esc(short)}</td></tr>`;
-  }).join("") : `<tr><td colspan="11" class="empty">暂无数据</td></tr>`;
-  drawChart(u.hourly || []);
+  }).join("") : `<tr><td colspan="11" class="empty">暂无符合条件的日志数据</td></tr>`;
+
+  $("#pageLogs").innerHTML = renderPaginationBar(pg, "window.goLogsPage");
 }
 
+window.goLogsPage = page => {
+  S.pageLogs = page;
+  renderLogs();
+};
+
 /* ---------------- 数据轮询 ---------------- */
-async function load(silent) {
-  try {
-    const [st, h] = await Promise.all([api("/v1/accounts"), api("/healthz").catch(() => null)]);
-    S.status = st; S.health = h;
-    st.accounts.forEach(a => S.cd.set(a.id, a.cooldown_remaining_s > 0
-      ? Date.now() + a.cooldown_remaining_s * 1000 : 0));
-    render();
-    if (S.tab === "usage") await loadUsage();
-  } catch (e) {
-    if (!silent) toast(e.message, true);
-  }
+function load(silent) {
+  const credential = key();
+  if (loadInFlight?.credential === credential) return loadInFlight.pending;
+  const pending = (async () => {
+    try {
+      const opts = { signal: AbortSignal.timeout(12000) };
+      const [st, h] = await Promise.all([api("/v1/accounts", opts), api("/healthz", opts).catch(() => S.health)]);
+      if (credential !== key()) return false;
+      rejectedDashboardKey = null;
+      S.status = st;
+      if (h) S.health = h;
+      st.accounts.forEach(a => S.cd.set(a.id, a.cooldown_remaining_s > 0
+        ? Date.now() + a.cooldown_remaining_s * 1000 : 0));
+      renderHeader();
+      renderStats();
+      if (S.tab === "pool" && cardStatusSignature(st) !== renderedCardSignature) renderCards();
+      if (S.tab === "settings") renderSettings();
+      if (S.tab === "usage") await loadUsage(silent);
+      if (S.tab === "logs") await loadLogs(silent);
+      if (S.tab === "keys") await loadKeys();
+      if (S.tab === "ops") await loadOperations();
+      return true;
+    } catch (e) {
+      if (!silent && credential === key()) toast(e.message, true);
+      return false;
+    }
+  })();
+  const current = loadInFlight = { credential, pending };
+  pending.then(() => { if (loadInFlight === current) loadInFlight = null; });
+  return pending;
 }
-function startPoll() { stopPoll(); if (!key() || !S.status) return; pollTimer = setInterval(() => load(true), 3000); }
-function stopPoll() { clearInterval(pollTimer); }
-document.addEventListener("visibilitychange", () => (document.hidden ? stopPoll() : (load(true), startPoll())));
+
+function dashboardPollInterval(status) {
+  return status?.accounts?.some(a => a.inflight > 0) ? 5000 : 15000;
+}
+function startPoll() {
+  stopPoll();
+  const credential = key();
+  if (!credential || credential === rejectedDashboardKey || document.hidden) return;
+  const generation = pollGeneration;
+  const tick = async () => {
+    if (generation !== pollGeneration || document.hidden) return;
+    pollTimer = null;
+    await load(true);
+    if (generation === pollGeneration && !document.hidden)
+      pollTimer = setTimeout(tick, dashboardPollInterval(S.status));
+  };
+  pollTimer = setTimeout(tick, dashboardPollInterval(S.status));
+}
+function stopPoll() {
+  pollGeneration++;
+  if (pollTimer !== null) clearTimeout(pollTimer);
+  pollTimer = null;
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopPoll();
+  else { load(true); startPoll(); }
+});
 
 /* 每秒只刷冷却倒计时（避免打断输入焦点） */
 setInterval(() => {
@@ -1156,32 +1674,141 @@ setInterval(() => {
 }, 1000);
 
 /* ---------------- 操作 ---------------- */
-$("#search").addEventListener("input", e => { S.search = e.target.value; renderCards(); });
+$("#search").addEventListener("input", e => { S.search = e.target.value; S.pagePool = 1; renderCards(); });
 
 $("#btnRefresh").onclick = () => load(false).then(() => toast("已刷新"));
-$("#tabOps").onclick = () => switchTab("ops");
 $("#tabPool").onclick = () => switchTab("pool");
 $("#tabUsage").onclick = () => switchTab("usage");
+$("#tabLogs").onclick = () => switchTab("logs");
 $("#tabKeys").onclick = () => switchTab("keys");
 $("#tabSettings").onclick = () => switchTab("settings");
+$("#tabOps").onclick = () => switchTab("ops");
 $("#btnMoreCfg").onclick = () => switchTab("settings");
-$("#uRange").onchange = e => { S.usageRange = e.target.value; loadUsage(); };
-$("#uAccount").onchange = e => { S.usageAccount = e.target.value; loadUsage(); };
-$("#uRefresh").onclick = () => loadUsage().then(() => toast("已刷新"));
+
+$("#uRange").onchange = e => { S.usageRange = e.target.value; S.pageUsageAcc = 1; loadUsage(); };
+$("#uAccount").onchange = e => { S.usageAccount = e.target.value; S.pageUsageAcc = 1; loadUsage(); };
+$("#uRefresh").onclick = () => loadUsage().then(() => toast("已刷新用量"));
+
+$("#logRange").onchange = e => { S.logRange = e.target.value; S.pageLogs = 1; loadLogs(); };
+$("#logAccount").onchange = e => { S.logAccount = e.target.value; S.pageLogs = 1; loadLogs(); };
+$("#logStatus").onchange = e => { S.logStatus = e.target.value; S.pageLogs = 1; renderLogs(); };
+$("#logSearch").oninput = e => { S.logSearch = e.target.value; S.pageLogs = 1; renderLogs(); };
+$("#btnLogRefresh").onclick = () => loadLogs().then(() => toast("已刷新请求日志"));
+let quotaAborted = false;
 $("#btnQuotaAll").onclick = async e => {
-  const b = e.currentTarget, ids = (S.status?.accounts || []).filter(x => x.enabled).map(x => x.id);
-  if (!ids.length) return toast("没有启用的账号", true);
-  if (!confirm("将对 " + ids.length + " 个账号各发 1 条最小消息以取回额度（消耗极小）。继续？")) return;
-  b.disabled = true; b.textContent = "查询中…";
-  let okN = 0, errs = [];
-  for (const id of ids) {
-    try { const r = await api("/v1/accounts/" + encodeURIComponent(id) + "/quota", { method: "POST", body: "{}" }); if (r.ok) okN++; }
-    catch (ex) { errs.push(ex.message); }
+  const b = e.currentTarget;
+  const accounts = (S.status?.accounts || []).filter(x => x.enabled);
+  if (!accounts.length) return toast("没有启用的账号", true);
+  if (!confirm(`将对 ${accounts.length} 个账号各发 1 条最小消息以取回额度（消耗极小）。继续？`)) return;
+
+  quotaAborted = false;
+  b.disabled = true;
+
+  const mask = $("#maskQuotaProgress");
+  const bar = $("#quotaProgBar");
+  const pctBadge = $("#quotaProgPct");
+  const elTotal = $("#quotaProgTotal");
+  const elOk = $("#quotaProgOk");
+  const elFail = $("#quotaProgFail");
+  const elCur = $("#quotaProgCurrent");
+  const elLast = $("#quotaProgLastResult");
+  const btnStop = $("#btnQuotaStop");
+  const btnClose = $("#btnQuotaClose");
+
+  mask.classList.add("on");
+  bar.style.width = "0%";
+  bar.style.background = "linear-gradient(90deg, #2563eb, #3b82f6)";
+  pctBadge.textContent = "0%";
+  elTotal.textContent = accounts.length;
+  elOk.textContent = "0";
+  elFail.textContent = "0";
+  elCur.textContent = "正在并发查询 (并发度 3)…";
+  elLast.textContent = "等待响应…";
+  btnStop.style.display = "";
+  btnStop.disabled = false;
+  btnStop.textContent = "🛑 停止刷新";
+  btnClose.style.display = "none";
+
+  btnStop.onclick = () => {
+    quotaAborted = true;
+    btnStop.disabled = true;
+    btnStop.textContent = "正在停止…";
+  };
+  btnClose.onclick = () => {
+    mask.classList.remove("on");
+  };
+
+  let okN = 0, failN = 0, doneN = 0;
+  const total = accounts.length;
+  const concurrency = 3;
+  let curIndex = 0;
+
+  async function worker() {
+    while (curIndex < total && !quotaAborted) {
+      const idx = curIndex++;
+      const a = accounts[idx];
+      const name = a.label || a.session_key || a.id;
+      elCur.textContent = `${name} (${idx + 1}/${total})`;
+      b.textContent = `⏳ 刷新中 (${doneN}/${total} · ${Math.round((doneN / total) * 100)}%)`;
+
+      try {
+        const r = await api("/v1/accounts/" + encodeURIComponent(a.id) + "/quota", {
+          method: "POST",
+          body: "{}"
+        });
+        if (r.ok) {
+          okN++;
+          const q = r.quota || {};
+          const u5 = q["5h"]?.utilization, u7 = q["7d"]?.utilization;
+          const u5Text = u5 == null ? "—" : Math.round(u5 * 100) + "%";
+          const u7Text = u7 == null ? "—" : Math.round(u7 * 100) + "%";
+          elLast.innerHTML = `<span style="color:#16a34a">✓ ${esc(name)}: 5h ${u5Text} / 7d ${u7Text}</span>`;
+        } else {
+          failN++;
+          elLast.innerHTML = `<span style="color:#dc2626">✖ ${esc(name)}: ${esc(r.error || "失败")}</span>`;
+        }
+      } catch (ex) {
+        failN++;
+        elLast.innerHTML = `<span style="color:#dc2626">✖ ${esc(name)}: ${esc(ex.message)}</span>`;
+      }
+
+      doneN++;
+      const pct = Math.round((doneN / total) * 100);
+      bar.style.width = pct + "%";
+      pctBadge.textContent = pct + "%";
+      elOk.textContent = okN;
+      elFail.textContent = failN;
+      b.textContent = `⏳ 刷新中 (${doneN}/${total} · ${pct}%)`;
+    }
   }
-  toast("额度刷新完成：" + okN + "/" + ids.length + " 成功" + (errs.length ? "（" + errs[0].slice(0, 60) + "）" : ""), !!errs.length);
+
+  const workers = Array.from({ length: Math.min(concurrency, total) }, () => worker());
+  await Promise.all(workers);
+
+  if (quotaAborted) {
+    elCur.textContent = "已由用户手动停止";
+    bar.style.background = "#eab308";
+    toast(`已停止刷新，已完成 ${doneN}/${total} 个账号（成功 ${okN}，失败 ${failN}）`);
+  } else {
+    elCur.textContent = "✅ 全部账号额度刷新完成！";
+    bar.style.width = "100%";
+    pctBadge.textContent = "100%";
+    toast(`额度刷新完成：${okN}/${total} 成功` + (failN ? `，失败 ${failN}` : ""), failN > 0);
+  }
+
+  btnStop.style.display = "none";
+  btnClose.style.display = "";
+  b.disabled = false;
+  b.textContent = "📊 刷新全部额度";
+
   await load(true);
-  b.disabled = false; b.textContent = "📊 刷新全部额度";
 };
+
+$("#maskQuotaProgress").addEventListener("click", e => {
+  if (e.target.id === "maskQuotaProgress" && ($("#btnQuotaClose").style.display !== "none" || quotaAborted)) {
+    $("#maskQuotaProgress").classList.remove("on");
+  }
+});
 $("#btnKycAll").onclick = async e => {
   const b = e.currentTarget;
   b.disabled = true; b.textContent = "查询中…";
@@ -1204,6 +1831,20 @@ $("#btnKycAll").onclick = async e => {
     renderCards();
   } catch (ex) { toast("🪪 " + ex.message, true); }
   finally { b.disabled = false; b.textContent = "🪪 查全部 KYC"; }
+};
+$("#btnCfAll").onclick = async e => {
+  const b = e.currentTarget;
+  const challenged = (S.status?.accounts || []).filter(x => x.enabled !== false && /cloudflare|challenge/i.test(x.last_error || ""));
+  const ids = challenged.map(x => x.id);
+  if (!ids.length) { toast("没有发现被 CF 拦截（cloudflare_challenge）的账号", true); return; }
+  if (!confirm("对 " + ids.length + " 个被 CF 拦截的账号批量过验证？\n会逐个弹出 Chrome 窗口（一次一个），请在窗口里完成验证；每个账号约 20-60 秒，全程自动衔接。")) return;
+  b.disabled = true; b.textContent = "过CF中…";
+  try {
+    const r = await api("/v1/cfverify/batch", { method: "POST", body: JSON.stringify({ ids }) });
+    toast(r.reused ? "🛡 批量过CF已在进行中，继续跟踪" : "🛡 批量过CF开始：共 " + r.total + " 个账号" + (r.skipped && r.skipped.length ? "（跳过 " + r.skipped.length + " 个）" : ""));
+    pollCfVerify(r.flowId);
+  } catch (ex) { toast("🛡 " + ex.message, true); }
+  finally { b.disabled = false; b.textContent = "🛡 批量过CF"; }
 };
 $("#btnKey").onclick = () => showKey(true);
 $("#btnKeySave").onclick = async () => {
@@ -1399,6 +2040,15 @@ $("#grid").addEventListener("click", async e => {
       S.cd.set(id, 0); a.cooldown_remaining_s = 0; toast("冷却已清零"); renderCards();
     } catch (ex) { toast(ex.message, true); }
   }
+  if (act === "cfpass") {
+    try {
+      const r = await api("/v1/accounts/" + encodeURIComponent(id) + "/cfverify", { method: "POST", body: "{}" });
+      toast(r.reused
+        ? "🛡 该账号已有一个过CF流程在进行中，继续跟踪其状态"
+        : "🖥 已弹出浏览器窗口，请在窗口里完成 Cloudflare 验证");
+      pollCfVerify(r.flowId);
+    } catch (ex) { toast("🛡 " + ex.message, true); }
+  }
   if (act === "del") {
     if (!confirm("删除账号「" + (a.label || a.id) + "」？")) return;
     try { await api("/v1/accounts/" + encodeURIComponent(id), { method: "DELETE" });
@@ -1508,13 +2158,16 @@ document.addEventListener("click", e => {
 
 /* Esc 关闭弹层 */
 document.addEventListener("keydown", e => {
-  if (e.key === "Escape") { closeAcc(); if (document.activeElement !== $("#fApi")) showKey(false); }
+  if (e.key === "Escape") {
+    closeAcc();
+    closeBatchImport();
+    if ($("#btnQuotaClose").style.display !== "none" || quotaAborted) $("#maskQuotaProgress").classList.remove("on");
+    if (document.activeElement !== $("#fApi")) showKey(false);
+  }
 });
 $("#maskAcc").addEventListener("click", e => { if (e.target.id === "maskAcc") closeAcc(); });
 
 /* ---------------- API Keys ---------------- */
-let K = { list: [], editId: null };
-
 const fmtDate = ts => {
   if (!ts) return "永不过期";
   const d = new Date(ts);
@@ -1533,9 +2186,12 @@ async function loadKeys() {
 function renderKeys() {
   if (!K.list.length) {
     $("#kRows").innerHTML = '<tr><td colspan="9" class="empty">还没有 Key，点右上「＋ 新建 Key」</td></tr>';
+    $("#pageKeys").innerHTML = '';
     return;
   }
-  $("#kRows").innerHTML = K.list.map(k => {
+  const pg = paginate(K.list, K.page || 1, 20);
+  K.page = pg.currentPage;
+  $("#kRows").innerHTML = pg.pageItems.map(k => {
     const q = k.quota || {};
     let state = "可用", color = "#16a34a";
     if (k.enabled === false) { state = "已停用"; color = "#94a3b8"; }
@@ -1562,7 +2218,13 @@ function renderKeys() {
         '<button class="btn sm danger" data-kact="del" data-id="' + k.id + '">🗑</button>' +
       "</td></tr>";
   }).join("");
+  $("#pageKeys").innerHTML = renderPaginationBar(pg, "window.goKeysPage");
 }
+
+window.goKeysPage = page => {
+  K.page = page;
+  renderKeys();
+};
 
 function openKey(id) {
   K.editId = id || null;
@@ -1637,18 +2299,66 @@ $("#kRows").addEventListener("click", async e => {
   }
 });
 
+/* ---------------- 操作日志 ---------------- */
 async function loadOperations() {
-  const qs=new URLSearchParams({category:$('#opCategory').value,status:$('#opStatus').value,q:$('#opSearch').value});
+  const qs = new URLSearchParams({
+    category: $('#opCategory').value,
+    status: $('#opStatus').value,
+    q: $('#opSearch').value,
+  });
   try {
-    const r=await api('/v1/operations?'+qs);
-    for(const field of ['Total','Today','Success','Failed']) $('#opStat'+field).textContent=r.stats[field.toLowerCase()] || 0;
-    const body=$('#opTableBody');body.replaceChildren();
-    for(const item of r.items || []){const row=body.insertRow();for(const k of ['time','category','action','target','status','detail','ip'])row.insertCell().textContent=item[k] || '—';}
-  } catch(e){toast(e.message,true);}
+    const r = await api('/v1/operations?' + qs);
+    for (const field of ['Total', 'Today', 'Success', 'Failed']) {
+      $('#opStat' + field).textContent = r.stats?.[field.toLowerCase()] || 0;
+    }
+    S.ops = r.items || [];
+    renderOperationsTable();
+  } catch (e) { toast(e.message, true); }
 }
-for(const selector of ['#opCategory','#opStatus','#opSearch']) $(selector).onchange=loadOperations;
-$('#btnOpRefresh').onclick=loadOperations;
-$('#btnOpClear').onclick=async()=>{if(confirm('清空操作日志？')){try{await api('/v1/operations/clear',{method:'POST'});await loadOperations();}catch(e){toast(e.message,true);}}};
+
+function renderOperationsTable() {
+  const body = $('#opTableBody');
+  body.replaceChildren();
+  if (!S.ops || !S.ops.length) {
+    const row = body.insertRow();
+    const cell = row.insertCell();
+    cell.colSpan = 7;
+    cell.className = "empty";
+    cell.style.textAlign = "center";
+    cell.style.padding = "24px";
+    cell.textContent = "暂无操作日志记录";
+    $('#pageOps').innerHTML = '';
+    return;
+  }
+  const pg = paginate(S.ops, S.pageOps, 20);
+  S.pageOps = pg.currentPage;
+  for (const item of pg.pageItems) {
+    const row = body.insertRow();
+    for (const k of ['time', 'category', 'action', 'target', 'status', 'detail', 'ip']) {
+      row.insertCell().textContent = item[k] || '—';
+    }
+  }
+  $('#pageOps').innerHTML = renderPaginationBar(pg, 'window.goOpsPage');
+}
+
+window.goOpsPage = page => {
+  S.pageOps = page;
+  renderOperationsTable();
+};
+
+$('#opCategory').onchange = () => { S.pageOps = 1; loadOperations(); };
+$('#opStatus').onchange = () => { S.pageOps = 1; loadOperations(); };
+$('#opSearch').oninput = () => { S.pageOps = 1; loadOperations(); };
+$('#btnOpRefresh').onclick = () => { S.pageOps = 1; loadOperations(); };
+$('#btnOpClear').onclick = async () => {
+  if (confirm('清空操作日志？')) {
+    try {
+      await api('/v1/operations/clear', { method: 'POST' });
+      S.pageOps = 1;
+      await loadOperations();
+    } catch (e) { toast(e.message, true); }
+  }
+};
 /* ---------------- 启动 ---------------- */
 (async function boot() {
   $("#cfgConc").value = 3; $("#cfgThr").value = 20;

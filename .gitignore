@@ -2,6 +2,7 @@
 *
 !/config/
 !/src/
+!/tests/
 !/tools/
 !/web/
 !/.dockerignore
@@ -18,6 +19,7 @@
 !/package.json
 !/release-integrity.json
 !/src/accounts.mjs
+!/src/cf-verify.mjs
 !/src/child-http.mjs
 !/src/config.mjs
 !/src/context-optimizer.mjs
@@ -42,6 +44,7 @@
 !/start.sh
 !/tools/accounts.ps1
 !/tools/build-release.mjs
+!/tests/test_cf_verify.mjs
 !/web/version-panel.css
 !/web/version-panel.js
 !/web/webui.html

@@ -66,6 +66,7 @@ import { fetch as undiciFetch, FormData as UndiciFormData } from 'undici';
 import { pruneMessageImages, pruneToolOutputs, optimizeContext } from './context-optimizer.mjs';
 import { getSharedDispatcher } from './network-optimizer.mjs';
 import { logOperation, queryOperations, getOperationStats, clearOperations } from './operation-log.mjs';
+import { createCfVerifyManager, openClaudeWebBrowser } from './cf-verify.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const UPSTREAM_FILE = dataFile('upstream.json', process.env.UPSTREAM_FILE);
@@ -112,6 +113,56 @@ let UP = loadUpstream();
 const POOL = new AccountPool(ACCOUNTS_FILE, {
   strategy: process.env.ACCOUNT_STRATEGY || '',
 });
+
+/**
+ * 过CF验证管理器：针对 cloudflare_challenge 拦截的账号，
+ * 弹出本机无痕浏览器窗口供用户完成人机验证，自动提取新 cf_clearance 和配套 UA 写回账号池并清冷却。
+ */
+const CFVERIFY = createCfVerifyManager({
+  webUrl: () => (UP.web_base || 'https://claude.ai') + '/',
+  timeoutMs: +(process.env.CFVERIFY_TIMEOUT_MS || 5 * 60 * 1000),
+  onCapture: ({ accountId, cookie, ua, org }) => {
+    const prev = POOL.get(accountId);
+    if (!prev) return null;
+    const account = POOL.set(accountId, {
+      cookie,
+      ua,
+      ...(org ? { org } : {}),
+      ...(prev.enabled !== false ? { enabled: true } : {}),
+      clearError: true,
+    });
+    console.log(`[cfverify] 账号 ${accountId} 已更新 cf_clearance + 配套 UA (label=${account?.label || '-'})`);
+    logOperation({
+      category: '额度风控',
+      action: '过CF成功',
+      target: account?.label || accountId,
+      status: 'success',
+      detail: `新 cf_clearance 与 UA 已更新入池，冷却已解除`,
+      ip: '127.0.0.1',
+    });
+    return account ? { id: account.id, label: account.label, org: account.org } : null;
+  },
+});
+
+/* —— CF challenge 风暴检测：近 5 分钟 challenge 失败次数，供 WebUI 弹横幅提醒批量过CF —— */
+const CF_CHALLENGE_EVENTS = [];
+const CF_STORM_WINDOW_MS = 5 * 60 * 1000;
+const CF_STORM_MIN = +(process.env.CF_STORM_MIN || 10);
+function noteChallenge() {
+  const now = Date.now();
+  CF_CHALLENGE_EVENTS.push(now);
+  while (CF_CHALLENGE_EVENTS.length && now - CF_CHALLENGE_EVENTS[0] > CF_STORM_WINDOW_MS) CF_CHALLENGE_EVENTS.shift();
+}
+function cfStormActive() {
+  const now = Date.now();
+  while (CF_CHALLENGE_EVENTS.length && now - CF_CHALLENGE_EVENTS[0] > CF_STORM_WINDOW_MS) CF_CHALLENGE_EVENTS.shift();
+  return {
+    active: CF_CHALLENGE_EVENTS.length >= CF_STORM_MIN,
+    count: CF_CHALLENGE_EVENTS.length,
+    window_min: CF_STORM_WINDOW_MS / 60000,
+    threshold: CF_STORM_MIN,
+  };
+}
 
 /** 请求级用量日志（按账号 / 按小时 / 全局聚合；CACHE_MODE=off|stats|reuse） */
 const USAGE = createUsageLog({
@@ -1619,6 +1670,7 @@ async function runCompletion(body, model, signal, req, ctx, excludedAccounts = [
       }
       lastErr = e;
       const kind = e.kind || 'error';
+      if (kind === 'challenge') noteChallenge(); // 风暴检测：5 分钟滚动窗口计数
       // rate_limit 且上游给了 resetsAt -> 精确收紧到 429 耗尽池（到点自动回有效池）
       const cool = POOL.fail(acct, kind, e.message, { resetsAt: e.resetsAt, reason: e.reason });
       console.warn(`[pool] ${acct.label} ${kind} -> cooldown ${Math.round(cool / 1000)}s: ${String(e.message).slice(0, 160)}`);
@@ -2058,6 +2110,7 @@ async function handleRequest(req, res) {
       const setts = KEYS.settings() || {};
       Object.assign(st, publicSettings(setts));
       st.server = KEYS.serverConfig();
+      st.cf_storm = cfStormActive(); // CF 风暴状态，WebUI 顶部横幅用
       // 用请求级用量日志校准「已用 token」：
       // 账号池的 tokensInEst 只在请求成功时累加——失败的 429 请求同样消耗了输入，
       // 重启也会丢，所以它只能算运行时参考值。日志是权威源，且 input_tokens 用的是
@@ -2464,6 +2517,67 @@ async function handleRequest(req, res) {
           });
         }
       }
+      if (req.method === 'POST' && id.endsWith('/cfverify')) {
+        if (!isLoopbackReq(req)) {
+          return json(res, 403, {
+            error: { message: '过CF流程会弹出本机浏览器窗口，只能在运行反代的机器上操作（需本机回环访问）', type: 'permission_error' },
+          });
+        }
+        const acctId = id.slice(0, -'/cfverify'.length);
+        const acct = POOL.get(acctId);
+        if (!acct) return json(res, 404, { error: { message: 'account not found', type: 'invalid_request_error' } });
+        const r = CFVERIFY.start(acctId, acct.sessionKey);
+        if (!r.ok) return json(res, 409, { error: { message: r.error, type: 'invalid_request_error' } });
+        console.log(`[cfverify] 账号 ${acctId} 发起手动过CF (flow=${r.flowId}${r.reused ? ' 复用进行中的流程' : ''})`);
+        return json(res, 200, { ok: true, flowId: r.flowId, reused: !!r.reused });
+      }
+
+      if (req.method === 'POST' && (id.endsWith('/open-web') || rest === 'open-web')) {
+        if (!isLoopbackReq(req)) {
+          return json(res, 403, { error: { message: '打开网页端只能在运行反代的机器上操作（需本机访问）', type: 'permission_error' } });
+        }
+        const acctId = id.endsWith('/open-web') ? id.slice(0, -'/open-web'.length) : '';
+        let sk = '';
+        let org = '';
+        let cookie = '';
+        let ua = '';
+        if (acctId) {
+          const a = POOL.get(acctId);
+          if (!a) return json(res, 404, { error: { message: 'account not found', type: 'invalid_request_error' } });
+          sk = a.sessionKey;
+          org = a.org || '';
+          cookie = a.cookie || '';
+          ua = a.ua || '';
+        } else {
+          const b = await readBody(req);
+          sk = b.sessionKey;
+          org = b.org || '';
+        }
+        if (!sk) return json(res, 400, { error: { message: 'sessionKey is required', type: 'invalid_request_error' } });
+        try {
+          const r = await openClaudeWebBrowser({ sessionKey: sk, org, cookie, ua });
+          logOperation({
+            category: '客户端调起',
+            action: '打开网页端',
+            target: acctId || '当前账号',
+            status: 'success',
+            detail: `在 ${r.browser} 浏览器打开官方网页端并登录 (PID: ${r.pid || '-'})`,
+            ip: getReqIp(req),
+          });
+          return json(res, 200, { ok: true, message: `已成功在 ${r.browser} 浏览器中打开官方网页端并登录！`, ...r });
+        } catch (e) {
+          logOperation({
+            category: '客户端调起',
+            action: '打开网页端',
+            target: acctId || '当前账号',
+            status: 'failed',
+            detail: e.message,
+            ip: getReqIp(req),
+          });
+          return json(res, 500, { error: { message: `调起浏览器失败: ${e.message}`, type: 'proxy_error' } });
+        }
+      }
+
       if (req.method === 'PATCH') {
         const b = await readBody(req);
         const a = POOL.set(id, b);
@@ -2495,6 +2609,55 @@ async function handleRequest(req, res) {
         });
         return json(res, 200, { removed: id });
       }
+    }
+
+    // ---------------------------------------------------------- 过CF与状态查询
+    if (/^\/v1\/cfverify\/[^/]+\/state$/.test(url.pathname) && req.method === 'GET') {
+      if (!isLoopbackReq(req)) {
+        return json(res, 403, {
+          error: { message: '过CF流程只能在运行反代的机器上查看（需本机回环访问）', type: 'permission_error' },
+        });
+      }
+      const fid = url.pathname.split('/')[3];
+      const s = CFVERIFY.state(fid);
+      return json(res, s ? 200 : 404, s || { error: { message: '过CF流程不存在或已过期', type: 'invalid_request_error' } });
+    }
+
+    // 一键批量过CF：客户端传被拦截账号 id 列表，服务端顺序弹窗逐个处理
+    if (url.pathname === '/v1/cfverify/batch' && req.method === 'POST') {
+      if (!isLoopbackReq(req)) {
+        return json(res, 403, {
+          error: { message: '批量过CF会弹出本机浏览器窗口，只能在运行反代的机器上操作（需本机回环访问）', type: 'permission_error' },
+        });
+      }
+      let body;
+      try { body = await readBody(req); } catch { body = {}; }
+      const ids = Array.isArray(body?.ids) ? body.ids.filter(x => typeof x === 'string' && x) : [];
+      if (!ids.length) {
+        return json(res, 400, { error: { message: 'ids 数组为空', type: 'invalid_request_error' } });
+      }
+      const items = [];
+      const skipped = [];
+      for (const aid of ids) {
+        const acct = POOL.get(aid);
+        if (acct && acct.sessionKey) items.push({ id: aid, sessionKey: acct.sessionKey });
+        else skipped.push(aid);
+      }
+      const r = CFVERIFY.startBatch(items);
+      if (!r.ok) return json(res, 409, { error: { message: r.error, type: 'invalid_request_error' } });
+      console.log(`[cfverify] 批量过CF发起：${items.length} 个账号${skipped.length ? `（跳过 ${skipped.length} 个无效 id）` : ''}`);
+      return json(res, 200, { ok: true, flowId: r.flowId, total: items.length, skipped, reused: !!r.reused });
+    }
+
+    if (/^\/v1\/cfverify\/[^/]+\/cancel$/.test(url.pathname) && req.method === 'POST') {
+      if (!isLoopbackReq(req)) {
+        return json(res, 403, {
+          error: { message: '过CF流程只能在运行反代的机器上操作（需本机回环访问）', type: 'permission_error' },
+        });
+      }
+      const fid = url.pathname.split('/')[3];
+      const ok = CFVERIFY.cancel(fid);
+      return json(res, ok ? 200 : 404, { ok, message: ok ? '已请求取消，当前账号完成后停止' : '流程不存在或已结束' });
     }
 
     if (url.pathname === '/v1/pool') {
