@@ -364,6 +364,7 @@
     <label><input type="checkbox" id="selAll"> 全选本页</label>
     <span id="selInfo" class="hsub"></span>
     <div class="grow"></div>
+    <button class="btn sm" id="btnClearAllCd" title="一键重置所有账号的冷却与连续失败计数">⏱ 清空所有冷却</button>
     <button class="btn sm danger" id="btnDelSel" style="display:none">🗑 删除所选</button>
   </div>
 
@@ -1961,6 +1962,16 @@ $("#btnDelSel").onclick = async () => {
   toast(bad.length ? "删除 " + (ids.length - bad.length) + " 个，失败 " + bad.length + "：" + bad[0].reason.message
                    : "已删除 " + ids.length + " 个账号", !!bad.length);
   S.sel.clear(); await load(true);
+};
+$("#btnClearAllCd").onclick = async () => {
+  if (!confirm("确定要清空所有账号的冷却与连续失败状态吗？")) return;
+  try {
+    const r = await api("/v1/accounts/clear-cooldowns", { method: "POST" });
+    toast("✅ 已清空 " + (r.cleared || 0) + " 个账号的冷却状态！");
+    await load(true);
+  } catch (e) {
+    toast("❌ " + e.message, true);
+  }
 };
 
 /* 卡片内事件（事件委托） */

@@ -578,6 +578,24 @@ export class AccountPool {
     return a;
   }
 
+  /** 一键清除所有账号的冷却与连续失败状态（例如误报恢复后） */
+  clearAllCooldowns() {
+    let count = 0;
+    for (const a of this.data.accounts) {
+      if ((a.cooldownUntil && a.cooldownUntil > 0) || (a.failStreak && a.failStreak > 0) || (a.stats && /cloudflare|challenge/i.test(a.stats.lastError || ''))) {
+        a.cooldownUntil = 0;
+        a.failStreak = 0;
+        a.streaks = {};
+        if (a.stats && /cloudflare|challenge/i.test(a.stats.lastError || '')) {
+          a.stats.lastError = '';
+        }
+        count++;
+      }
+    }
+    if (count > 0) this.save();
+    return count;
+  }
+
   /**
    * 文件被外部改动时热加载（手工编辑 accounts.json 不用重启）。
    * 保留运行时状态：inflight / cooldown / failStreak。

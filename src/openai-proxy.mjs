@@ -64,7 +64,7 @@ import { checkKyc } from './kyc.mjs';
 import { createUsageLog, prefixOf } from './usage-log.mjs';
 import { fetch as undiciFetch, FormData as UndiciFormData } from 'undici';
 import { pruneMessageImages, pruneToolOutputs, optimizeContext } from './context-optimizer.mjs';
-import { getSharedDispatcher } from './network-optimizer.mjs';
+import { getSharedDispatcher, resolveProxySetting } from './network-optimizer.mjs';
 import { logOperation, queryOperations, getOperationStats, clearOperations } from './operation-log.mjs';
 import { createCfVerifyManager, openClaudeWebBrowser } from './cf-verify.mjs';
 
@@ -186,7 +186,21 @@ function accountTokenStats() {
 
 // ---------------------------------------------------------------- 上游请求
 function webHeaders(acct) {
-  return { 'content-type':'application/json', accept:'application/json', cookie:acct.cookie || ('sessionKey=' + acct.sessionKey) };
+  const ua = acct.ua || DEFAULT_UA;
+  const major = (String(ua).match(/Chrome\/(\d+)/) || [])[1] || '131';
+  const cappedMajor = Math.min(+major || 131, 136);
+  return {
+    'cookie': acct.cookie || `sessionKey=${acct.sessionKey}`,
+    'user-agent': ua,
+    'accept': 'application/json, text/event-stream',
+    'accept-language': 'zh-CN,zh;q=0.9',
+    'content-type': 'application/json',
+    'origin': acct.base || 'https://claude.ai',
+    'referer': (acct.base || 'https://claude.ai') + '/',
+    'sec-ch-ua': `"Chromium";v="${cappedMajor}", "Not?A_Brand";v="24"`,
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+  };
 }
 
 function isChallenge(text) {
@@ -250,8 +264,12 @@ function clientGoneError() {
 
 async function upstreamFetch(url, init = {}) {
   try {
-    const dispatcher = getSharedDispatcher();
-    return await undiciFetch(url, { ...init, dispatcher });
+    const proxy = resolveProxySetting();
+    if (proxy) {
+      const dispatcher = getSharedDispatcher();
+      return await undiciFetch(url, { ...init, dispatcher });
+    }
+    return await fetch(url, init);
   } catch (e) {
     if (e?.name === 'AbortError' || init?.signal?.aborted) throw clientGoneError();
     const inner = e?.cause ? `: ${e.cause.code || e.cause.message || e.cause}` : '';
@@ -2412,6 +2430,19 @@ async function handleRequest(req, res) {
         } catch (e) {
           return json(res, e.status || 502, { error: { message: `查询失败: ${e.message}`, type: 'proxy_error' } });
         }
+      }
+
+      if (rest === 'clear-cooldowns' && req.method === 'POST') {
+        const cleared = POOL.clearAllCooldowns();
+        logOperation({
+          category: '额度风控',
+          action: '清空所有冷却',
+          target: '全量账号',
+          status: 'success',
+          detail: `已清空 ${cleared} 个账号的冷却与连续失败状态`,
+          ip: getReqIp(req),
+        });
+        return json(res, 200, { ok: true, cleared });
       }
 
       if (rest === 'export' || id.endsWith('/credentials')) {
