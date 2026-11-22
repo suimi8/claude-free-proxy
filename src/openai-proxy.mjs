@@ -1669,11 +1669,18 @@ async function runCompletion(body, model, signal, req, ctx, excludedAccounts = [
 function hasGeneratedOutput(ev) {
   if (ev.type === 'content_block_start') {
     const block = ev.content_block || {};
-    return block.type === 'tool_use' || !!(block.text || block.thinking);
+    return block.type === 'tool_use' || (block.type === 'text' && !!block.text);
   }
   if (ev.type !== 'content_block_delta') return false;
   const delta = ev.delta || {};
-  return !!(delta.text || delta.thinking || delta.partial_json || delta.summary?.summary);
+  return (delta.type === 'text_delta' && !!delta.text) || (delta.type === 'input_json_delta' && !!delta.partial_json);
+}
+
+function isThinkingOutput(ev) {
+  if (ev.type !== 'content_block_delta') return false;
+  const delta = ev.delta || {};
+  return (delta.type === 'thinking_delta' && !!delta.thinking) ||
+    (delta.type === 'thinking_summary_delta' && !!delta.summary?.summary);
 }
 
 function attachStreamRecovery(run, body, model, signal, req, ctx) {
@@ -1701,7 +1708,7 @@ function attachStreamRecovery(run, body, model, signal, req, ctx) {
             if (committed) yield event;
             else {
               const eventBytes = Buffer.byteLength(JSON.stringify(event));
-              if (pending.length >= 1024 || pendingBytes + eventBytes > 1024 * 1024) {
+              if (pending.length >= 8192 || pendingBytes + eventBytes > 8 * 1024 * 1024) {
                 for (const buffered of pending) yield buffered;
                 pending = [];
                 pendingBytes = 0;
