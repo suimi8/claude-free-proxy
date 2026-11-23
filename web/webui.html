@@ -915,7 +915,11 @@ function toast(msg, err) {
 function showKey(on, hint) {
   if (on) {
     const h = document.getElementById("keyHint");
-    if (h && hint) h.textContent = hint;
+    if (h) {
+      h.innerHTML = hint
+        ? `<span style="color:${hint.includes('权限不足') || hint.includes('失败') || hint.includes('❌') ? '#dc2626' : 'var(--sub)'};font-weight:600">${hint}</span>`
+        : "请输入角色为「管理 Key (Admin)」的密钥。普通调用 Key 仅限调用 API 推理接口，无 WebUI 管理权限。";
+    }
   }
   $("#maskKey").classList.toggle("on", on);
   if (on) $("#fApi").focus(); else $("#fApi").value = "";
@@ -969,6 +973,7 @@ async function api(path, opts = {}) {
   const dashboardAuth = path === '/v1/accounts' || path === '/healthz' || path.startsWith('/v1/keys');
   if (dashboardAuth && k === key() && (r.status === 401 || r.status === 403)) {
     rejectedDashboardKey = k;
+    sessionStorage.removeItem('gateway_admin');
     stopPoll();
     const errMsg = r.status === 403
       ? (j?.error?.message || '权限不足：此 Key 为普通调用 Key，仅限调用 API，无 WebUI 管理权限！')
@@ -1890,17 +1895,50 @@ $("#btnCfAll").onclick = async e => {
 };
 $("#btnKey").onclick = () => showKey(true);
 $("#btnKeySave").onclick = async () => {
-    const v = $("#fApi").value.trim();
-    if (!v) { toast("请先填入 API Key", true); $("#fApi").focus(); return; }
-    sessionStorage.setItem('gateway_admin', v);
-    showKey(false);
-    try {
-      await load(false);
-      toast("✅ 管理 Key 已保存并生效！");
-    } catch (e) {
-      toast("连接失败: " + e.message, true);
+  const v = $("#fApi").value.trim();
+  if (!v) { toast("请先填入 API Key", true); $("#fApi").focus(); return; }
+  const btn = $("#btnKeySave");
+  btn.disabled = true;
+  btn.textContent = "验证权限中…";
+  try {
+    const res = await fetch("/v1/accounts", {
+      headers: { "Authorization": "Bearer " + v, "content-type": "application/json" }
+    });
+    let data = null;
+    try { data = await res.json(); } catch {}
+    if (res.status === 403) {
+      const errMsg = (data && data.error && data.error.message) || "权限不足：此 Key 为普通调用 Key，仅限调用 API 推理接口，无 WebUI 管理权限！";
+      $("#keyHint").innerHTML = `<span style="color:#dc2626;font-weight:600">❌ ${errMsg}</span>`;
+      toast(errMsg, true);
+      sessionStorage.removeItem('gateway_admin');
+      $("#fApi").select();
+      return;
     }
-  };
+    if (res.status === 401) {
+      const errMsg = (data && data.error && data.error.message) || "API Key 校验失败，该 Key 不存在或已失效！";
+      $("#keyHint").innerHTML = `<span style="color:#dc2626;font-weight:600">❌ ${errMsg}</span>`;
+      toast(errMsg, true);
+      sessionStorage.removeItem('gateway_admin');
+      $("#fApi").select();
+      return;
+    }
+    if (!res.ok) {
+      throw new Error((data && data.error && data.error.message) || ("HTTP " + res.status));
+    }
+    // 验证成功：确认为具有管理权限的 Key
+    sessionStorage.setItem('gateway_admin', v);
+    rejectedDashboardKey = null;
+    showKey(false);
+    await load(false);
+    toast("👑 管理员身份验证成功，控制台已就绪！");
+  } catch (e) {
+    $("#keyHint").innerHTML = `<span style="color:#dc2626;font-weight:600">❌ 验证失败: ${e.message}</span>`;
+    toast("验证失败: " + e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "保存并进入";
+  }
+};
   $("#btnKeySkip").onclick = () => {
     sessionStorage.removeItem('gateway_admin');
     localStorage.removeItem('gateway_admin');
@@ -2214,7 +2252,7 @@ document.addEventListener("keydown", e => {
     closeAcc();
     closeBatchImport();
     if ($("#btnQuotaClose").style.display !== "none" || quotaAborted) $("#maskQuotaProgress").classList.remove("on");
-    if (document.activeElement !== $("#fApi")) showKey(false);
+    if (key() && document.activeElement !== $("#fApi")) showKey(false);
   }
 });
 $("#maskAcc").addEventListener("click", e => { if (e.target.id === "maskAcc") closeAcc(); });

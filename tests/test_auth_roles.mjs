@@ -66,3 +66,15 @@ test('RBAC: admin key vs inference key permissions', async () => {
     if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
   }
 });
+
+test('version panel assets include markdown and code block support', () => {
+  const panelJs = fs.readFileSync(path.join(process.cwd(), 'web', 'version-panel.js'), 'utf8');
+  assert.ok(panelJs.includes('renderReleaseMarkdown'), 'version-panel.js should have markdown parser');
+  assert.ok(panelJs.includes('release-code-box'), 'version-panel.js should render code boxes');
+  assert.ok(panelJs.includes('copyReleaseCode'), 'version-panel.js should provide code block copy');
+
+  const panelCss = fs.readFileSync(path.join(process.cwd(), 'web', 'version-panel.css'), 'utf8');
+  assert.ok(panelCss.includes('.release-notes-container'), 'version-panel.css should style notes container');
+  assert.ok(panelCss.includes('.release-code-box'), 'version-panel.css should style code boxes');
+  assert.ok(panelCss.includes('.release-inline-code'), 'version-panel.css should style inline code');
+});

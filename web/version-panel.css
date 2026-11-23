@@ -4,11 +4,92 @@
 .release-links a:hover,.release-pages a:hover {text-decoration:underline}
 .release-tag,.release-actions button,.release-title button {font:inherit;cursor:pointer;border:1px solid #ccd6e2;background:#fff;color:#26384e;border-radius:7px;padding:.32rem .65rem}
 .release-tag.available,.release-actions [data-install] {color:#fff;background:#2154ab;border-color:#2154ab}
-.release-panel {width:min(28rem,calc(100vw - 2rem));box-sizing:border-box;max-height:85vh;overflow:auto;border:1px solid #d6dfe9;border-radius:14px;padding:1.25rem;color:#202e3e;background:white;box-shadow:0 16px 48px #1d2e4b2c;font:inherit}
+.release-panel {width:min(38rem,calc(100vw - 2rem));box-sizing:border-box;max-height:88vh;overflow:auto;border:1px solid #d6dfe9;border-radius:14px;padding:1.35rem;color:#202e3e;background:white;box-shadow:0 16px 48px #1d2e4b2c;font:inherit}
 .release-panel::backdrop {background:#13253c66}
-.release-title {justify-content:space-between}.release-title h2 {font-size:1.15rem;margin:0}.release-title button {font-size:1.15rem;line-height:1.15}
-.release-panel dl {margin:1rem 0}.release-panel dl div {display:flex;justify-content:space-between;gap:1rem;padding:.35rem 0}.release-panel dt {color:#506276}.release-panel dd {margin:0;text-align:right}
-.release-panel pre {font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;background:#f1f5fa;max-height:12rem;overflow:auto;padding:.75rem;border-radius:7px}
+.release-title {justify-content:space-between}.release-title h2 {font-size:1.18rem;margin:0;font-weight:700}.release-title button {font-size:1.25rem;line-height:1;border:none;background:transparent;color:#64748b;padding:4px 8px;border-radius:4px;cursor:pointer}
+.release-title button:hover {background:#f1f5f9;color:#0f172a}
+.release-panel dl {margin:.85rem 0}.release-panel dl div {display:flex;justify-content:space-between;gap:1rem;padding:.32rem 0;font-size:.88rem}.release-panel dt {color:#64748b}.release-panel dd {margin:0;text-align:right;font-weight:600}
+
+/* Release Markdown & Notes Container */
+.release-notes-container {
+  margin: 1rem 0;
+  max-height: 24rem;
+  overflow-y: auto;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+  font-size: 0.88rem;
+  line-height: 1.65;
+  color: #334155;
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+.release-notes-container::-webkit-scrollbar { width: 6px; }
+.release-notes-container::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 3px; }
+.release-h1, .release-h2, .release-h3 { color: #0f172a; font-weight: 700; margin: 1rem 0 0.45rem; line-height: 1.35; }
+.release-h1 { font-size: 1.15rem; border-bottom: 1px solid #e2e8f0; padding-bottom: 0.35rem; }
+.release-h2 { font-size: 1.05rem; }
+.release-h3 { font-size: 0.95rem; display: flex; align-items: center; gap: 0.35rem; }
+.release-h3::before { content: "❖"; color: #3b82f6; font-size: 0.85rem; }
+.release-p { margin: 0.4rem 0; }
+.release-quote { margin: 0.6rem 0; padding: 0.5rem 0.85rem; background: #eff6ff; border-left: 3px solid #3b82f6; border-radius: 0 6px 6px 0; color: #1e40af; font-size: 0.85rem; }
+.release-list { margin: 0.4rem 0; padding-left: 1.35rem; }
+.release-list li { margin-bottom: 0.35rem; }
+.release-inline-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.82em;
+  background: #e2e8f0;
+  color: #0f172a;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  border: 1px solid #cbd5e1;
+  vertical-align: baseline;
+}
+.release-code-box {
+  margin: 0.75rem 0;
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+}
+.release-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.35rem 0.75rem;
+  background: #1e293b;
+  border-bottom: 1px solid #334155;
+  font-size: 0.75rem;
+  color: #94a3b8;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}
+.release-code-lang { text-transform: uppercase; font-weight: 600; letter-spacing: 0.05em; color: #38bdf8; }
+.release-code-copy-btn {
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.15);
+  color: #e2e8f0;
+  border-radius: 4px;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.release-code-copy-btn:hover { background: rgba(255,255,255,0.18); color: #fff; }
+.release-code-copy-btn.copied { background: #10b981; color: #fff; border-color: #10b981; }
+.release-code-pre {
+  margin: 0;
+  padding: 0.85rem 1rem;
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: #e2e8f0;
+  background: transparent;
+}
+.release-code-pre code { font-family: inherit; color: inherit; background: transparent; padding: 0; border: none; }
+
 .release-panel [data-status]:empty {display:none}.release-actions {justify-content:flex-end;margin-top:1rem}.release-pages {flex-wrap:wrap;font-size:.88rem}.release-actions button:disabled {opacity:.55;cursor:wait}
 .release-progress-card {margin: 1rem 0; padding: .85rem 1rem; background: #f0f6ff; border: 1px solid #bfdbfe; border-radius: 10px}
 .release-progress-header {display: flex; justify-content: space-between; align-items: center; font-size: .88rem; font-weight: 500; color: #1e40af; margin-bottom: .5rem}
