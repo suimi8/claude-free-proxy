@@ -46,6 +46,7 @@
 !/tools/build-release.mjs
 !/tests/test_cf_verify.mjs
 !/tests/test_pseudo_tools.mjs
+!/tests/test_auth_roles.mjs
 !/web/version-panel.css
 !/web/version-panel.js
 !/web/webui.html

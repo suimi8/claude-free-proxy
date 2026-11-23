@@ -211,7 +211,7 @@ export function createConfigStore(file) {
       }
     }
     if (management) {
-      return k.role === 'admin' ? { key: k } : { error: { status: 403, type: 'permission_error', message: '需要独立的管理员 Key' } };
+      return k.role === 'admin' ? { key: k } : { error: { status: 403, type: 'permission_error', message: '权限不足：此 Key 为普通调用 Key，仅限调用 API，无 WebUI 管理权限' } };
     }
     const q = k.quota;
     if (q.limitRequests > 0 && q.usedRequests >= q.limitRequests) {
@@ -290,8 +290,13 @@ export function createConfigStore(file) {
     if (!data) load();
     const k = get(id);
     if (!k) return null;
-    const fields = ['name', 'enabled', 'expiresAt', 'models', 'rpm', 'tpm', 'ipWhitelist', 'key'];
-    for (const f of fields) if (patch[f] !== undefined) k[f] = patch[f];
+    const fields = ['name', 'role', 'enabled', 'expiresAt', 'models', 'rpm', 'tpm', 'ipWhitelist', 'key'];
+    for (const f of fields) {
+      if (patch[f] !== undefined) {
+        if (f === 'role') k.role = patch.role === 'admin' ? 'admin' : 'inference';
+        else k[f] = patch[f];
+      }
+    }
     if (patch.quota && typeof patch.quota === 'object') {
       for (const f of ['limitTokens', 'usedTokens', 'limitRequests', 'usedRequests']) {
         if (patch.quota[f] !== undefined) k.quota[f] = +patch.quota[f] || 0;
