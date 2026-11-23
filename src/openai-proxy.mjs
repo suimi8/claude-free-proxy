@@ -263,16 +263,37 @@ function clientGoneError() {
   });
 }
 
-async function upstreamFetch(url, init = {}) {
-  try {
-    const dispatcher = getSharedDispatcher();
-    return await undiciFetch(url, { ...init, dispatcher });
-  } catch (e) {
-    if (e?.name === 'AbortError' || init?.signal?.aborted) throw clientGoneError();
-    const inner = e?.cause ? `: ${e.cause.code || e.cause.message || e.cause}` : '';
-    throw Object.assign(new Error(`upstream network error: ${e?.message || e}${inner}`),
-      { status: 0, kind: 'transient', retryable: true });
+function isSocketResetError(e) {
+  if (!e) return false;
+  const code = e.code || e.cause?.code;
+  const msg = String(e.message || e.cause?.message || '');
+  return code === 'UND_ERR_SOCKET' ||
+    code === 'ECONNRESET' ||
+    code === 'ECONNABORTED' ||
+    code === 'EPIPE' ||
+    code === 'ETIMEDOUT' ||
+    /other side closed|socket|econnreset|und_err_socket|broken pipe/i.test(msg);
+}
+
+async function upstreamFetch(url, init = {}, attempts = 2) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const dispatcher = getSharedDispatcher();
+      return await undiciFetch(url, { ...init, dispatcher });
+    } catch (e) {
+      if (e?.name === 'AbortError' || init?.signal?.aborted) throw clientGoneError();
+      lastErr = e;
+      if (i < attempts - 1 && isSocketResetError(e) && !init?.signal?.aborted) {
+        console.warn(`[network] upstreamFetch socket reset (${e?.cause?.code || e.message}), retrying immediately with fresh socket...`);
+        continue;
+      }
+      const inner = e?.cause ? `: ${e.cause.code || e.cause.message || e.cause}` : '';
+      throw Object.assign(new Error(`upstream network error: ${e?.message || e}${inner}`),
+        { status: 0, kind: 'transient', retryable: true, socketReset: isSocketResetError(e) });
+    }
   }
+  throw lastErr;
 }
 
 function upstreamError(msg, status, text) {
@@ -1963,9 +1984,15 @@ async function runCompletion(body, model, signal, req, ctx, excludedAccounts = [
       lastErr = e;
       const kind = e.kind || 'error';
       if (kind === 'challenge') noteChallenge(); // 风暴检测：5 分钟滚动窗口计数
-      // rate_limit 且上游给了 resetsAt -> 精确收紧到 429 耗尽池（到点自动回有效池）
-      const cool = POOL.fail(acct, kind, e.message, { resetsAt: e.resetsAt, reason: e.reason });
-      console.warn(`[pool] ${acct.label} ${kind} -> cooldown ${Math.round(cool / 1000)}s: ${String(e.message).slice(0, 160)}`);
+      if (e?.socketReset) {
+        // socket 重置属于连接池或网络抖动，与账号凭据/状态无关，严禁置入 cooldown
+        console.warn(`[pool] ${acct.label} socket reset (${e.message}) -> neutral release (不触发账号冷却), 换号或重试`);
+        POOL.release(acct, false);
+      } else {
+        // rate_limit 且上游给了 resetsAt -> 精确收紧到 429 耗尽池（到点自动回有效池）
+        const cool = POOL.fail(acct, kind, e.message, { resetsAt: e.resetsAt, reason: e.reason });
+        console.warn(`[pool] ${acct.label} ${kind} -> cooldown ${Math.round(cool / 1000)}s: ${String(e.message).slice(0, 160)}`);
+      }
       if (!e.retryable) break;                 // 400 之类，换账号也没用
       // concurrency（上游并发满）与 transient（网络抖动/5xx）都不是账号坏了：
       // 并发槽几秒后自然释放，所以只排队等、不换账号、不拉黑、不消耗 failover 配额，
@@ -2054,7 +2081,8 @@ function attachStreamRecovery(run, body, model, signal, req, ctx) {
     consumed = true;
     return (async function* () {
       let committed = false;
-      let retried = false;
+      let retries = 0;
+      let conflictRetries = 0;
       let pending = [];
       let pendingBytes = 0;
       for (;;) {
@@ -2085,18 +2113,21 @@ function attachStreamRecovery(run, body, model, signal, req, ctx) {
           return;
         } catch (error) {
           const conflict = error.code === 'UPSTREAM_MESSAGE_CONFLICT';
+          if (conflict) conflictRetries++;
           const isTransportOrStall = error.code === 'UPSTREAM_TRANSPORT_INTERRUPTED' ||
             error.code === 'UPSTREAM_STALLED' ||
             error.code === 'UPSTREAM_ERROR_EVENT' ||
             error.kind === 'transient' ||
             /stopped making progress|stalled|transport interrupted|fetch failed|timeout|upstream reported an error/i.test(error.message || '');
-          if (committed || retried || signal?.aborted || (!conflict && !isTransportOrStall)) throw error;
+          if (committed || retries >= 3 || conflictRetries > 1 || signal?.aborted || (!conflict && !isTransportOrStall)) throw error;
           const failed = current;
-          failed.release(false, error.message, conflict ? 'neutral' : 'transient');
-          retried = true;
+          failed.release(false, error.message, 'neutral');
+          retries++;
           try {
-            console.log(`[stream] pre-output failure (${error.message || error.code}) on ${failed.account.label} -> 自动故障转移至备选账号`);
-            current = await runCompletion(body, model, signal, req, ctx, conflict ? [] : [failed.account.id], false);
+            console.log(`[stream] pre-output failure (${error.message || error.code}) on ${failed.account.label} -> 自动故障转移至备选账号 (第${retries}次)`);
+            const others = POOL.eligible(Date.now(), new Set([failed.account.id]));
+            const exclude = (others.length > 0 && !conflict) ? [failed.account.id] : [];
+            current = await runCompletion(body, model, signal, req, ctx, exclude, false);
           } catch (retryError) {
             console.warn(`[stream] pre-output recovery unavailable: kind=${retryError?.kind || 'unknown'} status=${retryError?.status || 0}`);
             throw error;

@@ -134,14 +134,95 @@ function startIdentity(message) {
   return identity;
 }
 
-function mergeStartIdentity(first, next, inPrelude) {
-  const clash = Object.keys(next).some(key => first[key] && next[key] !== first[key]);
-  const shared = ['id', 'uuid'].some(key => first[key] && first[key] === next[key]);
-  const placeholder = !(first.id || first.uuid) || !(next.id || next.uuid);
-  if (clash || (!shared && !(inPrelude && placeholder))) {
-    throw Object.assign(bad('conflicting message start'), { code: 'UPSTREAM_MESSAGE_CONFLICT' });
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function extractUuid(obj) {
+  if (!obj) return null;
+  if (obj.uuid && typeof obj.uuid === 'string') return obj.uuid.toLowerCase();
+  if (obj.id && typeof obj.id === 'string' && UUID_REGEX.test(obj.id)) return obj.id.toLowerCase();
+  return null;
+}
+
+function mergeStartIdentity(first, next, inPrelude, onMessageUuid) {
+  if (first.role && next.role && first.role !== next.role) {
+    throw Object.assign(bad('conflicting message start: role clash'), { code: 'UPSTREAM_MESSAGE_CONFLICT' });
   }
-  return { ...first, ...next };
+  if (first.type && next.type && first.type !== next.type) {
+    throw Object.assign(bad('conflicting message start: type clash'), { code: 'UPSTREAM_MESSAGE_CONFLICT' });
+  }
+
+  if (first.uuid && next.uuid && first.uuid.toLowerCase() !== next.uuid.toLowerCase()) {
+    throw Object.assign(bad('conflicting message start: conflicting explicit uuid'), { code: 'UPSTREAM_MESSAGE_CONFLICT' });
+  }
+
+  const firstUuid = extractUuid(first);
+  const nextUuid = extractUuid(next);
+  const resolvedUuid = next.uuid || first.uuid || (firstUuid && firstUuid === nextUuid ? nextUuid : null);
+
+  const seenUuids = (first._seenUuids ??= new Set());
+  if (first.uuid) seenUuids.add(first.uuid.toLowerCase());
+  if (resolvedUuid && !seenUuids.has(resolvedUuid.toLowerCase())) {
+    seenUuids.add(resolvedUuid.toLowerCase());
+    if (typeof onMessageUuid === 'function') {
+      try { onMessageUuid(resolvedUuid); } catch {}
+    }
+  }
+
+  const knownIds = (first._knownIds ??= new Set());
+  if (first.id) knownIds.add(first.id);
+  if (first.uuid) knownIds.add(first.uuid);
+  if (firstUuid) knownIds.add(firstUuid);
+
+  const firstPlaceholder = !(first.id || first.uuid);
+  const nextPlaceholder = !(next.id || next.uuid);
+
+  if (!inPrelude && nextPlaceholder) {
+    throw Object.assign(bad('conflicting message start: missing id'), { code: 'UPSTREAM_MESSAGE_CONFLICT' });
+  }
+
+  let linked = false;
+  if (first.id && next.id && first.id === next.id) linked = true;
+  else if (firstUuid && nextUuid && firstUuid === nextUuid) linked = true;
+  else if (first.id && next.uuid && first.id.toLowerCase() === next.uuid.toLowerCase()) linked = true;
+  else if (first.uuid && next.id && first.uuid.toLowerCase() === next.id.toLowerCase()) linked = true;
+  else if (next.id && knownIds.has(next.id)) linked = true;
+  else if (next.uuid && knownIds.has(next.uuid)) linked = true;
+
+  if (!linked) {
+    if (!(inPrelude && (firstPlaceholder || nextPlaceholder))) {
+      throw Object.assign(bad('conflicting message start: unrelated id'), { code: 'UPSTREAM_MESSAGE_CONFLICT' });
+    }
+  }
+
+  if (next.id) knownIds.add(next.id);
+  if (next.uuid) knownIds.add(next.uuid);
+  if (nextUuid) knownIds.add(nextUuid);
+
+  if (first.id && next.id && first.id !== next.id) {
+    const neitherIsUuid = !UUID_REGEX.test(first.id) && !UUID_REGEX.test(next.id);
+    if (!inPrelude && neitherIsUuid) {
+      throw Object.assign(bad('conflicting message start: concrete id mismatch'), { code: 'UPSTREAM_MESSAGE_CONFLICT' });
+    }
+  }
+
+  const result = { ...first, ...next };
+  Object.defineProperty(result, '_knownIds', { value: knownIds, enumerable: false, writable: true, configurable: true });
+  Object.defineProperty(result, '_seenUuids', { value: seenUuids, enumerable: false, writable: true, configurable: true });
+  if (!inPrelude) {
+    if (first.id) result.id = first.id;
+    if (first.model) result.model = first.model;
+  } else {
+    if (next.id && !UUID_REGEX.test(next.id)) {
+      result.id = next.id;
+    } else if (first.id && !UUID_REGEX.test(first.id)) {
+      result.id = first.id;
+    } else if (next.id) {
+      result.id = next.id;
+    }
+    if (next.model) result.model = next.model;
+  }
+  if (resolvedUuid) result.uuid = resolvedUuid;
+  return result;
 }
 
 function progressPhase(ev, current, toolPending) {
@@ -366,7 +447,21 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
       if (clock.ended) {
         // Optional timing diagnostics: drain metadata only, never accept content after the stop.
         if (Date.now() >= clock.stallAt) return;
-        if (ev.type === 'message_limit') yield ev;
+        if (ev.type === 'message_limit') {
+          if (pendingStart) {
+            yield pendingStart;
+            pendingStart = null;
+          }
+          yield ev;
+        }
+        continue;
+      }
+      if (ev.type === 'message_limit') {
+        if (pendingStart) {
+          yield pendingStart;
+          pendingStart = null;
+        }
+        yield ev;
         continue;
       }
       if (ev.type === 'ping') {
@@ -384,12 +479,21 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
         if (identity) {
           // Repeated headers are metadata. They must not renew the progress or tool deadlines.
           if (Date.now() >= clock.stallAt) throw stalled(clock);
-          identity = mergeStartIdentity(identity, next, !seen.size && !reason);
+          const inPrelude = pendingStart !== null && !seen.size && !reason;
+          identity = mergeStartIdentity(identity, next, inPrelude, options.onMessageUuid);
           if (pendingStart && ev.message) pendingStart = { ...pendingStart,
             message: { ...pendingStart.message, ...ev.message, ...identity } };
           continue;
         }
         identity = next;
+        identity._seenUuids = new Set();
+        if (options.onMessageUuid) {
+          const u = extractUuid(identity);
+          if (u) {
+            identity._seenUuids.add(u.toLowerCase());
+            try { options.onMessageUuid(identity.uuid || u); } catch {}
+          }
+        }
         pendingStart = ev;
       } else if (pendingStart) {
         yield pendingStart;

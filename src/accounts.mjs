@@ -276,12 +276,13 @@ export class AccountPool {
   /** 可参与本轮选择的账号 */
   eligible(now = Date.now(), exclude) {
     const cap = this.data.perAccountConcurrency;
+    const hasExclude = exclude ? (id) => (typeof exclude.has === 'function' ? exclude.has(id) : Array.isArray(exclude) ? exclude.includes(id) : false) : null;
     return this.data.accounts.filter(a =>
       a.enabled && a.sessionKey && a.org &&
       now >= (a.cooldownUntil || 0) &&
       !(a.exhaustedUntil > now) &&          // 429 耗尽池：配额窗口没过之前一律不选
       a.inflight < cap &&
-      (!exclude || !exclude.has(a.id)));
+      (!hasExclude || !hasExclude(a.id)));
   }
 
   /**

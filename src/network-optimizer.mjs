@@ -23,9 +23,9 @@ import { Agent, ProxyAgent } from 'undici';
 
 /** 默认连接池参数 */
 export const DEFAULT_DISPATCHER_CONFIG = {
-  keepAliveTimeout: 60000,      // 空闲连接保持 60s
-  keepAliveMaxTimeout: 120000,  // 最大存活 120s
-  maxSockets: 128,              // 最大连接数
+  keepAliveTimeout: 4000,       // 空闲连接保持 4s（Cloudflare 边缘通常 5s 关闭空闲长连接，设 4s 提前在客户端主动废弃，防止向已半关闭的 stale socket 发请求导致 UND_ERR_SOCKET）
+  keepAliveMaxTimeout: 15000,   // 最大存活 15s
+  maxSockets: 256,              // 最大连接数
 };
 
 /** 默认健康评分权重配置 */
