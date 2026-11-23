@@ -2735,6 +2735,7 @@ async function handleRequest(req, res) {
         const b = await readBody(req).catch(() => ({}));
         const clearExhausted = !!b?.clearExhausted;
         const cleared = POOL.clearAllCooldowns(clearExhausted);
+        CF_CHALLENGE_EVENTS.length = 0; // 手动清空冷却时一并重置 CF 风暴计数
         logOperation({
           category: '额度风控',
           action: '清空所有冷却',
@@ -2788,6 +2789,8 @@ async function handleRequest(req, res) {
           const r = await probeQuota(acct, { base: UP.web_base || 'https://claude.ai' });
           if (r.limit) {
             POOL.updateQuota(acct, { ...r.limit, rate_limits: r.rate_limits, probedAt: Date.now() });
+            // 主动查额度成功证明该账号网络连通、凭据有效且未被 CF 拦截，自动清除历史冷却与错误标记
+            POOL.set(acct.id, { cooldownUntil: 0, clearError: true });
           }
           const st = POOL.status().accounts.find(x => x.id === acct.id);
           const u5 = Math.round((r.limit?.windows?.['5h']?.utilization ?? 0) * 100);
