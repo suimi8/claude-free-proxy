@@ -398,7 +398,19 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
         clock.timeoutMs = phase === 'thinking' ? thinkingIdleMs : idleMs;
         clock.stallAt = Date.now() + clock.timeoutMs;
       }
-      if (ev.type === 'error') throw bad('upstream reported an error');
+      if (ev.type === 'error') {
+        const errObj = ev.error || {};
+        const errType = errObj.type || ev.error_type || 'upstream_error';
+        const errMsg = errObj.message || ev.message || 'upstream reported an error';
+        const err = Object.assign(new Error(`upstream reported an error: [${errType}] ${errMsg}`), {
+          kind: 'transient',
+          code: 'UPSTREAM_ERROR_EVENT',
+          status: 502,
+          errorType: errType,
+          rawError: errObj
+        });
+        throw err;
+      }
       if (ev.type === 'message_start') continue;
       if (ev.type === 'content_block_start') {
         if (
@@ -508,7 +520,7 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
     if (!reason) yield { type: 'message_delta', delta: { stop_reason: executableTools ? 'tool_use' : 'end_turn', stop_sequence: null } };
     yield { type: 'message_stop' };
   } catch (e) {
-    if (e.kind === 'upstream_stream' || e.name === 'AbortError') throw e;
+    if (e.kind || e.code || e.name === 'AbortError') throw e;
     const interrupted = bad('transport interrupted');
     interrupted.code = 'UPSTREAM_TRANSPORT_INTERRUPTED';
     throw interrupted;

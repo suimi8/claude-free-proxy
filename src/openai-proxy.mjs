@@ -54,7 +54,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, createHash } from 'node:crypto';
-import { AccountPool, discoverOrg, DEFAULT_UA, sleep } from './accounts.mjs';
+import { AccountPool, discoverOrg, DEFAULT_UA, DEFAULT_BASE, sleep } from './accounts.mjs';
 import { createConfigStore, publicSettings } from './config.mjs';
 import { ROOT, DATA, dataFile } from './paths.mjs';
 import { fetchPublicBytes } from './public-http.mjs';
@@ -2078,8 +2078,9 @@ function attachStreamRecovery(run, body, model, signal, req, ctx) {
           const conflict = error.code === 'UPSTREAM_MESSAGE_CONFLICT';
           const isTransportOrStall = error.code === 'UPSTREAM_TRANSPORT_INTERRUPTED' ||
             error.code === 'UPSTREAM_STALLED' ||
+            error.code === 'UPSTREAM_ERROR_EVENT' ||
             error.kind === 'transient' ||
-            /stopped making progress|stalled|transport interrupted|fetch failed|timeout/i.test(error.message || '');
+            /stopped making progress|stalled|transport interrupted|fetch failed|timeout|upstream reported an error/i.test(error.message || '');
           if (committed || retried || signal?.aborted || (!conflict && !isTransportOrStall)) throw error;
           const failed = current;
           failed.release(false, error.message, conflict ? 'neutral' : 'transient');
@@ -2306,9 +2307,10 @@ async function handleRequest(req, res) {
     if (req.method === 'GET' && url.pathname === '/healthz') {
       const age = Math.round((Date.now() - (UP.web_cookie_at || 0)) / 1000);
       const st = POOL.status();
+      const upBase = UP.web_base || DEFAULT_BASE || 'https://claude.ai';
       return json(res, 200, {
         ok: st.eligible_now > 0,
-        upstream: `${UP.web_base}/api/organizations/{org}/chat_conversations/{id}/completion`,
+        upstream: `${upBase}/api/organizations/{org}/chat_conversations/{id}/completion`,
         plan: UP.plan || 'unknown',
         cookie_age_seconds: age,
         models: modelList().map(m => m.id),

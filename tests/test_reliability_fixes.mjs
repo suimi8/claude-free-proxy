@@ -57,3 +57,27 @@ test('transient error cooldown is configured with short protective buffer', asyn
   assert.equal(elig.length, 1);
   assert.equal(elig[0].id, 'acc_2');
 });
+
+test('validatedEvents correctly parses upstream error event into retryable UPSTREAM_ERROR_EVENT', async () => {
+  const chunks = [
+    'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-3-5-sonnet-20241022"}}\n\n',
+    'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Claude is overloaded"}}\n\n'
+  ];
+
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const c of chunks) controller.enqueue(new TextEncoder().encode(c));
+      controller.close();
+    }
+  });
+
+  await assert.rejects(async () => {
+    for await (const _ of validatedEvents(stream)) {}
+  }, (err) => {
+    assert.equal(err.code, 'UPSTREAM_ERROR_EVENT');
+    assert.equal(err.kind, 'transient');
+    assert.equal(err.errorType, 'overloaded_error');
+    assert.ok(err.message.includes('Claude is overloaded'));
+    return true;
+  });
+});

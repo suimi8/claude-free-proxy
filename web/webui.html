@@ -1085,7 +1085,8 @@ function renderHeader() {
   $("#pillHealth").className = "pill " + (ok ? "ok" : "bad");
   $("#pillHealth").innerHTML = '<span class="dot"></span>' + (ok ? "反代运行中" : "无可用账号");
   $("#pillPlan").textContent = h ? String(h.plan || "unknown").toUpperCase() : "—";
-  $("#upstream").textContent = h ? h.upstream : "—";
+  const rawUp = h ? h.upstream : "—";
+  $("#upstream").textContent = String(rawUp || "—").replace(/^undefined\//, "https://claude.ai/");
   $("#cookieAge").textContent = h && h.cookie_age_seconds != null
     ? "cookie " + Math.round(h.cookie_age_seconds / 60) + " 分钟前刷新" : "";
   $("#baseURL").textContent = location.origin + "/v1";
