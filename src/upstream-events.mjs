@@ -370,8 +370,11 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
         continue;
       }
       if (ev.type === 'ping') {
-        if (clock.graceAt === null && Date.now() >= clock.stallAt)
+        if (clock.phase === 'thinking') {
+          clock.stallAt = Math.max(clock.stallAt, Date.now() + Math.min(60_000, clock.timeoutMs));
+        } else if (clock.graceAt === null && Date.now() >= clock.stallAt) {
           throw stalled(clock);
+        }
         if (graceMs && lastWasTool && !open.size) clock.graceAt ??= Date.now() + graceMs;
         yield ev;
         continue;

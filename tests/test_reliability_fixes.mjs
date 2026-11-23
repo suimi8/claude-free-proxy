@@ -81,3 +81,30 @@ test('validatedEvents correctly parses upstream error event into retryable UPSTR
     return true;
   });
 });
+
+test('validatedEvents keeps thinking stream alive when receiving upstream pings', async () => {
+  const chunks = [
+    'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-3-7-sonnet-20250219"}}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}\n\n',
+    'event: ping\ndata: {"type":"ping"}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me think..."}}\n\n',
+    'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":10}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+  ];
+
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const c of chunks) controller.enqueue(new TextEncoder().encode(c));
+      controller.close();
+    }
+  });
+
+  const events = [];
+  for await (const ev of validatedEvents(stream)) {
+    events.push(ev);
+  }
+  assert.ok(events.length >= 5, 'Should have received all stream events including thinking and ping');
+  assert.ok(events.some(e => e.type === 'ping'), 'Ping event was yielded');
+  assert.ok(events.some(e => e.delta?.thinking === 'Let me think...'), 'Thinking delta was yielded');
+});

@@ -1148,14 +1148,16 @@ async function collect(events, ctx) {
 
 /** 流式：把上游事件逐个转成 OpenAI chunk 写出去 */
 function heartbeat(res, isAnthropic = false) {
-  const timer = setInterval(() => {
+  const ping = () => {
     if (!res.destroyed && !res.writableEnded) {
       res.write(': keep-alive\n\n');
       if (isAnthropic) {
         res.write('event: ping\ndata: {"type": "ping"}\n\n');
       }
     }
-  }, 10000);
+  };
+  ping();
+  const timer = setInterval(ping, 10000);
   timer.unref();
   return () => clearInterval(timer);
 }
@@ -2021,11 +2023,14 @@ async function runCompletion(body, model, signal, req, ctx, excludedAccounts = [
 function hasGeneratedOutput(ev) {
   if (ev.type === 'content_block_start') {
     const block = ev.content_block || {};
-    return block.type === 'tool_use' || (block.type === 'text' && !!block.text);
+    return block.type === 'tool_use' || (block.type === 'text' && !!block.text) || block.type === 'thinking';
   }
   if (ev.type !== 'content_block_delta') return false;
   const delta = ev.delta || {};
-  return (delta.type === 'text_delta' && !!delta.text) || (delta.type === 'input_json_delta' && !!delta.partial_json);
+  return (delta.type === 'text_delta' && !!delta.text) ||
+    (delta.type === 'input_json_delta' && !!delta.partial_json) ||
+    (delta.type === 'thinking_delta' && !!delta.thinking) ||
+    (delta.type === 'thinking_summary_delta' && !!delta.summary?.summary);
 }
 
 function isThinkingOutput(ev) {
@@ -3104,8 +3109,9 @@ async function handleRequest(req, res) {
           'content-type': 'text/event-stream; charset=utf-8',
           'cache-control': 'no-cache, no-transform',
           connection: 'keep-alive',
-
+          'x-accel-buffering': 'no',
         });
+        res.flushHeaders?.();
         try {
           return await streamToClient(res, run, model, chatId, body.stream_options?.include_usage === true);
         } catch (streamErr) {
@@ -3160,7 +3166,9 @@ async function handleRequest(req, res) {
             'content-type': 'text/event-stream; charset=utf-8',
             'cache-control': 'no-cache, no-transform',
             connection: 'keep-alive',
+            'x-accel-buffering': 'no',
           });
+          res.flushHeaders?.();
           stopHeartbeat = heartbeat(res);
         }
         return await sendResponsesResult(res, run, model, id, rb, chat.messages, req.keyScope);
@@ -3220,8 +3228,9 @@ async function handleRequest(req, res) {
             'content-type': 'text/event-stream; charset=utf-8',
             'cache-control': 'no-cache, no-transform',
             connection: 'keep-alive',
-
+            'x-accel-buffering': 'no',
           });
+          res.flushHeaders?.();
           // 转成 Anthropic 事件
           const send = o => res.write(`event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`);
           const stopHeartbeat = heartbeat(res, true);
