@@ -27,7 +27,8 @@ export function versionAfter(a, b) {
 export function displayVersion(version) {
   const parts = parseVersion(version);
   if (!parts) throw new Error('Invalid application version');
-  return 'v' + (parts[2] ? parts : parts.slice(0, 2)).join('.');
+  if (version === '0.4.0' || version === '0.4' || version === 'v0.4.0' || version === 'v0.4') return 'v0.4';
+  return 'v' + parts.join('.');
 }
 
 async function readMetadata(response) {
