@@ -65,6 +65,6 @@
     "src/update-service.mjs": "22134ae356cc9c2d44e7d4ff1d06509a56f600be08e4c43e7d38f2a2eac69dd4",
     "src/serve.mjs": "08d5a301604f79999f04fe73b065b5ac6afcf4757ab65dd6cc0483c4b3e90869",
     "src/release-files.mjs": "bd1092de1aa36670efcf12f15d59e5e8bec6e5dfe46df0d049c88f850c1f756f",
-    "tools/build-release.mjs": "f7f97c9d20731a2376eaaba855418c8056781b894a037771552d53f51e5dfb58"
+    "tools/build-release.mjs": "d753057cac8e321612ebbbe1e27d74bfd90fb376972ee0a91336e3aebe59fecf"
   }
 }

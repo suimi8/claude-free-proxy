@@ -11,7 +11,7 @@ const out = process.argv[2];
 if (!out) throw Error('用法：npm run release:build -- <输出目录>');
 const tracked = execFileSync('git',['ls-files','-z'],{cwd:root,encoding:'utf8'}).split('\0').filter(Boolean);
 // Every path in the public Git tree is reviewed, including files outside the installers.
-const sourceOnly = ['.gitignore', '.gitattributes', 'tools/accounts.ps1'];
+const sourceOnly = ['.gitignore', '.gitattributes', 'tools/accounts.ps1', ...tracked.filter(f => f.startsWith('tests/'))];
 const allowed = new Set([...RELEASE_FILES, ...sourceOnly]);
 for (const name of tracked) if (!allowed.has(name)) throw Error('请从公开发布工作区构建');
 const inputs = [...RELEASE_FILES.filter(name => name !== 'release-integrity.json'), ...sourceOnly];
