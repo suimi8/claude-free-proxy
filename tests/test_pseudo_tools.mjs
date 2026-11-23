@@ -1,6 +1,87 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { extractPseudoToolCalls, findToolCallTrigger } from '../src/openai-proxy.mjs';
+import { validatedEvents } from '../src/upstream-events.mjs';
+
+test('validatedEvents does not crash on stop_reason tool_use without held block', async () => {
+  const sseLines = [
+    'data: {"type": "message_start", "message": {"id": "msg_1", "role": "assistant"}}',
+    '',
+    'data: {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}',
+    '',
+    'data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "test"}}',
+    '',
+    'data: {"type": "content_block_stop", "index": 0}',
+    '',
+    'data: {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}',
+    '',
+    'data: {"type": "message_stop"}',
+    '',
+    ''
+  ].join('\n');
+
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(sseLines));
+      controller.close();
+    }
+  });
+
+  const events = [];
+  for await (const ev of validatedEvents(stream, [])) {
+    events.push(ev);
+  }
+
+  const msgDelta = events.find(e => e.type === 'message_delta');
+  assert.ok(msgDelta, 'should have message_delta');
+  assert.equal(msgDelta.delta.stop_reason, 'end_turn');
+});
+
+test('end-to-end integration: upstream emits XML in text + stop_reason tool_use', async () => {
+  const xmlPayload = '<function_calls><invoke name="pwsh"><parameter name="command">Get-Process</parameter></invoke></function_calls>';
+  const sseLines = [
+    'data: {"type": "message_start", "message": {"id": "msg_2", "role": "assistant"}}',
+    '',
+    'data: {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}',
+    '',
+    `data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": ${JSON.stringify(xmlPayload)}}}`,
+    '',
+    'data: {"type": "content_block_stop", "index": 0}',
+    '',
+    'data: {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}',
+    '',
+    'data: {"type": "message_stop"}',
+    '',
+    ''
+  ].join('\n');
+
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(sseLines));
+      controller.close();
+    }
+  });
+
+  let fullText = '';
+  let stopReason = null;
+  for await (const ev of validatedEvents(stream, [])) {
+    if (ev.type === 'content_block_delta' && ev.delta?.text) {
+      fullText += ev.delta.text;
+    }
+    if (ev.type === 'message_delta' && ev.delta?.stop_reason) {
+      stopReason = ev.delta.stop_reason;
+    }
+  }
+
+  // 校验事件流正常结束，没有抛出 502
+  assert.equal(stopReason, 'end_turn');
+
+  // 校验下游兜底解析器成功提取工具调用
+  const extracted = extractPseudoToolCalls(fullText);
+  assert.equal(extracted.toolCalls.length, 1);
+  assert.equal(extracted.toolCalls[0].function.name, 'pwsh');
+  assert.deepEqual(JSON.parse(extracted.toolCalls[0].function.arguments), { command: 'Get-Process' });
+});
 
 test('extract XML function calls', () => {
   const input = `<function_calls> <invoke name="pwsh"> <parameter name="description">在拷贝里对 menu 和 meta 各跑一遍合并检查，并列出页面名和 NOTES 末行</parameter> <parameter name="command">[Console]::OutputEncoding=[System.Text.Encoding]::UTF8 \ng\n=\n′\nD\n:...</parameter> <parameter name="timeoutMs">200000</parameter> <parameter name="workdir">D:\\Downloads\\game</parameter> </invoke> </function_calls>`;

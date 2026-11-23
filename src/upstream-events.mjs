@@ -467,7 +467,11 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
           throw invalidMessageStopReason(ev, { started: !!identity, openBlocks: open.size, reasonSeen: reason });
         if (open.size && !closeImplicitToolBlocks())
           throw invalidMessageStopReason(ev, { started: !!identity, openBlocks: open.size, reasonSeen: reason });
-        if (!held && ev.delta.stop_reason === 'tool_use') throw bad('tool stop without a tool block');
+        if (!held && ev.delta.stop_reason === 'tool_use') {
+          // 上游返回了 tool_use 但实际正文中输出的是文本伪工具/XML或无原生 tool 块，
+          // 容错降级为 end_turn，由下游伪工具提取器解析或作为正常文本结束，严禁抛错中断客户端连接
+          ev = { ...ev, delta: { ...ev.delta, stop_reason: 'end_turn' } };
+        }
         if (executableTools && !['tool_use', 'end_turn', 'pause_turn'].includes(ev.delta.stop_reason))
           throw bad('tool turn ended without completing normally');
         reason = true;
