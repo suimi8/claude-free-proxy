@@ -31,7 +31,7 @@ export async function buildUpdate(root, names = RUNTIME) {
   return { baseline, bytes: gzipSync(Buffer.from(JSON.stringify({ schema: 1, version, files })), { level: 9 }) };
 }
 
-export async function downloadUpdate(asset, fetchImpl = fetch) {
+export async function downloadUpdate(asset, fetchImpl = fetch, onProgress = null) {
   if (!asset || !parseVersion(asset.tag) || asset.url !== `${REPO_URL}/releases/download/${asset.tag}/gateway-${asset.tag}.update.json.gz`
       || !/^[a-f0-9]{64}$/.test(asset.digest) || !(asset.size > 0 && asset.size <= 8 * 1024 * 1024)) throw Error('更新包元数据无效');
   let url = asset.url;
@@ -52,6 +52,7 @@ export async function downloadUpdate(asset, fetchImpl = fetch) {
     for await (const chunk of res.body) {
       if ((length += chunk.length) > asset.size) throw Error('更新包长度校验失败');
       chunks.push(chunk);
+      if (typeof onProgress === 'function') onProgress(length, asset.size);
     }
     const bytes = Buffer.concat(chunks);
     if (length !== asset.size || hash(bytes) !== asset.digest) throw Error('更新包 SHA-256 或长度校验失败');

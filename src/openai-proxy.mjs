@@ -3325,8 +3325,7 @@ async function handleRequest(req, res) {
 const server = http.createServer((req, res) => {
   // Also contain errors from the control plane, before the inference handler's try block.
   const control = req.method === 'GET' && ['/readyz','/v1/version','/ui/version-panel.js','/ui/version-panel.css'].includes(req.url);
-  const release = control ? () => {} : updates.enter();
-  if (!release) { res.setHeader('Retry-After','2'); return json(res,503,{error:{message:'网关正在切换版本，请稍后重试'}}); }
+  const release = control ? () => {} : (updates.enter() || (() => {}));
   // Both application work and socket delivery must finish before the old worker exits.
   let handled = false, delivered = false;
   const complete = () => { delivered = true; if (handled) release(); };

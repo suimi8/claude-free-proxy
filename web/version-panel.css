@@ -10,4 +10,11 @@
 .release-panel dl {margin:1rem 0}.release-panel dl div {display:flex;justify-content:space-between;gap:1rem;padding:.35rem 0}.release-panel dt {color:#506276}.release-panel dd {margin:0;text-align:right}
 .release-panel pre {font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;background:#f1f5fa;max-height:12rem;overflow:auto;padding:.75rem;border-radius:7px}
 .release-panel [data-status]:empty {display:none}.release-actions {justify-content:flex-end;margin-top:1rem}.release-pages {flex-wrap:wrap;font-size:.88rem}.release-actions button:disabled {opacity:.55;cursor:wait}
+.release-progress-card {margin: 1rem 0; padding: .85rem 1rem; background: #f0f6ff; border: 1px solid #bfdbfe; border-radius: 10px}
+.release-progress-header {display: flex; justify-content: space-between; align-items: center; font-size: .88rem; font-weight: 500; color: #1e40af; margin-bottom: .5rem}
+.release-progress-pct {font-family: monospace; font-size: .95rem; font-weight: 700; color: #1d4ed8}
+.release-progress-bar {width: 100%; height: 8px; background: #dbeafe; border-radius: 4px; overflow: hidden}
+.release-progress-fill {height: 100%; background: linear-gradient(90deg, #2563eb, #3b82f6); border-radius: 4px; transition: width .3s cubic-bezier(.4,0,.2,1)}
+.release-progress-hint {margin-top: .45rem; font-size: .78rem; color: #64748b; display: flex; align-items: center; gap: .35rem}
+.release-progress-hint::before {content: "●"; color: #10b981; font-size: .65rem}
 @media(max-width:560px) {.release-links {gap:.45rem}.release-panel {padding:1rem}}
