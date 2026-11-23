@@ -870,6 +870,59 @@ sessionKey=sk-ant-sid02-uuuuuuuu; ..."></textarea>
   </div>
 </div>
 
+<!-- 批量过CF 进度弹窗 -->
+<div class="mask" id="maskCfProgress" style="z-index:76">
+  <div class="modal" style="max-width:540px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <h3 style="margin:0;font-size:16px;display:flex;align-items:center;gap:8px">
+        <span>🛡 正在批量过 Cloudflare 验证</span>
+      </h3>
+      <span class="chip" id="cfProgPct" style="font-weight:700;color:#15803d;background:#f0fdf4;border-color:#bbf7d0">0%</span>
+    </div>
+
+    <!-- 动态进度条 -->
+    <div style="height:10px;background:#f1f5f9;border-radius:6px;overflow:hidden;margin-bottom:14px;border:1px solid var(--line)">
+      <div id="cfProgBar" style="width:0%;height:100%;background:linear-gradient(90deg, #10b981, #059669);border-radius:6px;transition:width 0.25s ease"></div>
+    </div>
+
+    <!-- 状态与统计明细 -->
+    <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:8px;margin-bottom:12px;text-align:center">
+      <div style="background:#f8fafc;padding:8px;border-radius:8px;border:1px solid var(--line)">
+        <div style="font-size:11px;color:var(--sub)">总队列数</div>
+        <div id="cfProgTotal" style="font-size:16px;font-weight:700;color:var(--ink)">0</div>
+      </div>
+      <div style="background:#f0fdf4;padding:8px;border-radius:8px;border:1px solid #bbf7d0">
+        <div style="font-size:11px;color:#166534">已成功入池</div>
+        <div id="cfProgOk" style="font-size:16px;font-weight:700;color:#16a34a">0</div>
+      </div>
+      <div style="background:#fef2f2;padding:8px;border-radius:8px;border:1px solid #fecaca">
+        <div style="font-size:11px;color:#991b1b">失败 / 跳过</div>
+        <div id="cfProgFail" style="font-size:16px;font-weight:700;color:#dc2626">0</div>
+      </div>
+    </div>
+
+    <!-- 实时详情框 -->
+    <div style="background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:14px;font-size:12px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px;gap:8px">
+        <span style="color:var(--sub);flex-shrink:0">当前账号:</span>
+        <b id="cfProgCurrent" style="color:var(--ink);max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">准备中…</b>
+      </div>
+      <div style="display:flex;justify-content:space-between;gap:8px">
+        <span style="color:var(--sub);flex-shrink:0">实时步骤:</span>
+        <span id="cfProgStep" style="color:#2563eb;font-weight:600;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">等待启动浏览器…</span>
+      </div>
+      <div style="margin-top:8px;font-size:11.5px;color:#b45309;background:#fffbeb;padding:6px 10px;border-radius:6px;border:1px solid #fde68a;line-height:1.4">
+        💡 <b>提示</b>：浏览器弹出后请在窗口中完成「确认您是真人」点击，验证通过后会自动捕获 cf_clearance 并切入下一个账号。
+      </div>
+    </div>
+
+    <div class="mrow" style="margin-top:0">
+      <button class="btn danger sm" id="btnCfStop">🛑 停止批量</button>
+      <button class="btn primary sm" id="btnCfClose" style="display:none">完成并关闭</button>
+    </div>
+  </div>
+</div>
+
 <!-- API Key -->
 <div class="mask" id="maskKey" style="z-index:70">
   <div class="modal">
@@ -985,40 +1038,101 @@ async function api(path, opts = {}) {
   return j;
 }
 
-/* 手动过CF：启动后轮询流程状态；状态/进度变化用 toast 提示，终态自动停止并刷新列表 */
+/* 手动/批量过CF：启动后轮询流程状态；同步更新进度面板，终态自动停止并刷新列表 */
 let _cfPoll = null, _cfLast = "", _cfLastMsg = "";
 function pollCfVerify(fid) {
   if (_cfPoll) clearInterval(_cfPoll);
   _cfLast = ""; _cfLastMsg = "";
   const t0 = Date.now();
+
+  const mask = typeof document !== 'undefined' ? document.getElementById("maskCfProgress") : null;
+  const pBar = typeof document !== 'undefined' ? document.getElementById("cfProgBar") : null;
+  const pPct = typeof document !== 'undefined' ? document.getElementById("cfProgPct") : null;
+  const pTotal = typeof document !== 'undefined' ? document.getElementById("cfProgTotal") : null;
+  const pOk = typeof document !== 'undefined' ? document.getElementById("cfProgOk") : null;
+  const pFail = typeof document !== 'undefined' ? document.getElementById("cfProgFail") : null;
+  const pCurrent = typeof document !== 'undefined' ? document.getElementById("cfProgCurrent") : null;
+  const pStep = typeof document !== 'undefined' ? document.getElementById("cfProgStep") : null;
+  const btnStop = typeof document !== 'undefined' ? document.getElementById("btnCfStop") : null;
+  const btnClose = typeof document !== 'undefined' ? document.getElementById("btnCfClose") : null;
+
+  if (mask) mask.classList.add("on");
+  if (btnStop) {
+    btnStop.style.display = "";
+    btnStop.disabled = false;
+    btnStop.textContent = "🛑 停止批量";
+    btnStop.onclick = async () => {
+      btnStop.disabled = true;
+      btnStop.textContent = "正在停止…";
+      try {
+        await api("/v1/cfverify/" + encodeURIComponent(fid) + "/cancel", { method: "POST" });
+        toast("已发送停止信号（当前正在进行的账号完成后将停止）");
+      } catch (ex) { toast("停止失败: " + ex.message, true); }
+    };
+  }
+  if (btnClose) {
+    btnClose.style.display = "none";
+    btnClose.onclick = () => {
+      if (mask) mask.classList.remove("on");
+      if (_cfPoll) { clearInterval(_cfPoll); _cfPoll = null; }
+      load(true);
+    };
+  }
+
   _cfPoll = setInterval(async () => {
     try {
       const s = await api("/v1/cfverify/" + encodeURIComponent(fid) + "/state");
+      const isBatch = !!s.batch;
+      const total = isBatch ? s.batch.total : 1;
+      const results = isBatch ? (s.batch.results || []) : [];
+      const okN = results.filter(x => x.ok).length + (s.state === 'done' && !isBatch ? 1 : 0);
+      const failN = results.filter(x => !x.ok).length;
+      const doneN = results.length;
+      const pct = Math.min(100, Math.round((doneN / Math.max(1, total)) * 100));
+
+      if (pTotal) pTotal.textContent = total;
+      if (pOk) pOk.textContent = okN;
+      if (pFail) pFail.textContent = failN;
+      if (pPct) pPct.textContent = pct + "%";
+      if (pBar) pBar.style.width = pct + "%";
+
+      if (pCurrent) {
+        const curId = isBatch ? s.batch.current_account_id : s.accountId;
+        const acct = curId && S.status?.accounts ? S.status.accounts.find(x => x.id === curId) : null;
+        pCurrent.textContent = acct?.label ? `${acct.label} (${curId})` : (curId || "准备中…");
+      }
+      if (pStep) pStep.textContent = s.message || "进行中…";
+
       if (s.state !== _cfLast) {
         _cfLast = s.state;
         if (s.state === "waiting") toast("🛡 请在弹出的浏览器窗口里完成 Cloudflare 验证，通过后自动写回账号池");
         else if (s.state === "capturing") toast("🛡 检测到新 cf_clearance，正在校验并写回…");
       }
-      // 批量模式：进度消息变化就提示（如「3/22 · 已弹出浏览器…」）
-      if (s.batch && s.message !== _cfLastMsg) { _cfLastMsg = s.message; toast("🛡 " + s.message); }
-      if (s.state === "done") {
+      if (isBatch && s.message !== _cfLastMsg) { _cfLastMsg = s.message; }
+
+      const isTerminal = s.state !== "starting" && s.state !== "waiting" && s.state !== "capturing" && s.state !== "running";
+      if (isTerminal) {
         clearInterval(_cfPoll); _cfPoll = null;
-        toast("✅ " + s.message);
-        load(true);
-        return;
-      }
-      if (s.state !== "starting" && s.state !== "waiting" && s.state !== "capturing" && s.state !== "running") {
-        clearInterval(_cfPoll); _cfPoll = null;
-        toast((s.state === "error" ? "❌ " : "⚠️ ") + s.message, true);
+        if (pBar) pBar.style.width = "100%";
+        if (pPct) pPct.textContent = "100%";
+        if (pStep) pStep.textContent = s.message || "批量处理完毕";
+        if (btnStop) btnStop.style.display = "none";
+        if (btnClose) btnClose.style.display = "";
+        toast((s.state === "done" ? "✅ " : "⚠️ ") + s.message, s.state !== "done");
         load(true);
       }
     } catch (ex) {
       clearInterval(_cfPoll); _cfPoll = null;
+      if (pStep) pStep.textContent = "轮询异常: " + ex.message;
+      if (btnStop) btnStop.style.display = "none";
+      if (btnClose) btnClose.style.display = "";
       toast("🛡 " + ex.message, true);
     }
-    // 兜底：轮询最长 30 分钟（批量多个账号），防止状态端异常时永久空转
-    if (_cfPoll && Date.now() - t0 > 30 * 60 * 1000) { clearInterval(_cfPoll); _cfPoll = null; }
-  }, 2000);
+    if (_cfPoll && Date.now() - t0 > 30 * 60 * 1000) {
+      clearInterval(_cfPoll); _cfPoll = null;
+      if (btnClose) btnClose.style.display = "";
+    }
+  }, 1500);
 }
 
 function startSerialPoll(intervalMs, poll, immediate = false) {
@@ -1651,6 +1765,9 @@ function load(silent) {
       rejectedDashboardKey = null;
       S.status = st;
       if (h) S.health = h;
+      if (st.cf_batch && st.cf_batch.id && !_cfPoll) {
+        pollCfVerify(st.cf_batch.id);
+      }
       st.accounts.forEach(a => S.cd.set(a.id, a.cooldown_remaining_s > 0
         ? Date.now() + a.cooldown_remaining_s * 1000 : 0));
       renderHeader();

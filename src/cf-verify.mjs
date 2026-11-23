@@ -724,6 +724,7 @@ export function createCfVerifyManager(opts) {
 
     state,
     activeFlow: () => (active ? stateOf(active) : null),
+    activeBatch: () => (batch && BATCH_LIVE.has(batch.state) ? batchStateOf(batch) : null),
   };
 }
 

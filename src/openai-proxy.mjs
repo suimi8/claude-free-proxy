@@ -2426,6 +2426,7 @@ async function handleRequest(req, res) {
       Object.assign(st, publicSettings(setts));
       st.server = KEYS.serverConfig();
       st.cf_storm = cfStormActive(); // CF 风暴状态，WebUI 顶部横幅用
+      st.cf_batch = CFVERIFY.activeBatch ? CFVERIFY.activeBatch() : null;
       // 用请求级用量日志校准「已用 token」：
       // 账号池的 tokensInEst 只在请求成功时累加——失败的 429 请求同样消耗了输入，
       // 重启也会丢，所以它只能算运行时参考值。日志是权威源，且 input_tokens 用的是

@@ -20,6 +20,7 @@ assert.strictEqual(typeof cfm.startBatch, 'function');
 assert.strictEqual(typeof cfm.state, 'function');
 assert.strictEqual(typeof cfm.cancel, 'function');
 assert.strictEqual(typeof cfm.activeFlow, 'function');
+assert.strictEqual(typeof cfm.activeBatch, 'function');
 console.log('PASS: createCfVerifyManager 实例方法校验通过');
 
 // 3. 验证参数校验
