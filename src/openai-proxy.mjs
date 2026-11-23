@@ -129,6 +129,7 @@ const CFVERIFY = createCfVerifyManager({
       ua,
       ...(org ? { org } : {}),
       ...(prev.enabled !== false ? { enabled: true } : {}),
+      cooldownUntil: 0,
       clearError: true,
     });
     console.log(`[cfverify] 账号 ${accountId} 已更新 cf_clearance + 配套 UA (label=${account?.label || '-'})`);
@@ -187,8 +188,8 @@ function accountTokenStats() {
 // ---------------------------------------------------------------- 上游请求
 function webHeaders(acct) {
   const ua = acct.ua || DEFAULT_UA;
-  const major = (String(ua).match(/Chrome\/(\d+)/) || [])[1] || '131';
-  const cappedMajor = Math.min(+major || 131, 136);
+  const major = (String(ua).match(/Chrome\/(\d+)/) || [])[1] || '140';
+  const platform = /Macintosh|Mac OS/i.test(ua) ? '"macOS"' : /Linux/i.test(ua) ? '"Linux"' : '"Windows"';
   return {
     'cookie': acct.cookie || `sessionKey=${acct.sessionKey}`,
     'user-agent': ua,
@@ -197,9 +198,9 @@ function webHeaders(acct) {
     'content-type': 'application/json',
     'origin': acct.base || 'https://claude.ai',
     'referer': (acct.base || 'https://claude.ai') + '/',
-    'sec-ch-ua': `"Chromium";v="${cappedMajor}", "Not?A_Brand";v="24"`,
+    'sec-ch-ua': `"Chromium";v="${major}", "Not?A_Brand";v="24"`,
     'sec-ch-ua-mobile': '?0',
-    'sec-ch-ua-platform': '"Windows"',
+    'sec-ch-ua-platform': platform,
   };
 }
 
