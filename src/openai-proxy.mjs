@@ -758,13 +758,30 @@ export function extractPseudoToolCalls(fullText) {
   let firstCallIdx = fullText.length;
 
   // 1. 匹配 XML <function_calls> 或 <invoke name="..."> 或 <function_call name="...">
-  const xmlInvokeRegex = /<(?:invoke|function_call)\s+name=["']?([a-zA-Z0-9_\-\.]+)["']?\s*>([\s\S]*?)<\/(?:invoke|function_call)>/gi;
-  let xmlMatch;
-  while ((xmlMatch = xmlInvokeRegex.exec(fullText)) !== null) {
-    const name = xmlMatch[1];
-    const body = xmlMatch[2];
+  // 容错：允许末尾省略 </invoke> 或 </function_calls>（LLM 生成截断或未闭合）
+  const xmlInvokeStartRegex = /<(?:invoke|function_call)\s+name=["']?([a-zA-Z0-9_\-\.]+)["']?\s*>/gi;
+  const invokeMatches = [];
+  let m;
+  while ((m = xmlInvokeStartRegex.exec(fullText)) !== null) {
+    invokeMatches.push({
+      name: m[1],
+      startIndex: m.index,
+      bodyStart: m.index + m[0].length,
+    });
+  }
+
+  for (let i = 0; i < invokeMatches.length; i++) {
+    const cur = invokeMatches[i];
+    const nextStart = (i + 1 < invokeMatches.length) ? invokeMatches[i + 1].startIndex : fullText.length;
+    let slice = fullText.slice(cur.bodyStart, nextStart);
+
+    // 检查是否有闭合标签 </invoke> 或 </function_call> 或 </function_calls>
+    const closeMatch = /<\/(?:invoke|function_call|function_calls)>/i.exec(slice);
+    const body = closeMatch ? slice.slice(0, closeMatch.index) : slice;
+
     const args = {};
-    const paramRegex = /<parameter\s+name=["']?([a-zA-Z0-9_\-\.]+)["']?(?:\s*\/>|\s*>([\s\S]*?)<\/parameter>)/gi;
+    // 支持闭合的 <parameter ...>...</parameter>，以及末尾未闭合的 <parameter ...>...
+    const paramRegex = /<parameter\s+name=["']?([a-zA-Z0-9_\-\.]+)["']?(?:\s*\/>|\s*>([\s\S]*?)(?:<\/parameter>|(?=<parameter\s+name=)|$))/gi;
     let paramMatch;
     let hasParams = false;
     while ((paramMatch = paramRegex.exec(body)) !== null) {
@@ -789,7 +806,7 @@ export function extractPseudoToolCalls(fullText) {
       }
     }
 
-    const startIdx = xmlMatch.index;
+    const startIdx = cur.startIndex;
     const fcTag = '<function_calls>';
     const fcIdx = fullText.lastIndexOf(fcTag, startIdx);
     let effectiveStart = startIdx;
@@ -802,7 +819,7 @@ export function extractPseudoToolCalls(fullText) {
       id: 'call_' + randomUUID().replace(/-/g, '').slice(0, 9),
       type: 'function',
       function: {
-        name,
+        name: cur.name,
         arguments: argsStr
       }
     });
@@ -875,15 +892,8 @@ export function extractPseudoToolCalls(fullText) {
 
 export function findToolCallTrigger(text) {
   if (!text || typeof text !== 'string') return -1;
-  const triggers = ['[TOOL_CALL', '<function_calls', '<invoke name=', '<function_call name='];
-  let minIdx = -1;
-  for (const t of triggers) {
-    const idx = text.toLowerCase().indexOf(t.toLowerCase());
-    if (idx !== -1 && (minIdx === -1 || idx < minIdx)) {
-      minIdx = idx;
-    }
-  }
-  return minIdx;
+  const match = /(?:\[TOOL_CALL|<function_calls|<(?:invoke|function_call)\s+name\s*=)/i.exec(text);
+  return match ? match.index : -1;
 }
 
 function prepareContext(body) {

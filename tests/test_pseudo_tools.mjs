@@ -83,6 +83,16 @@ test('end-to-end integration: upstream emits XML in text + stop_reason tool_use'
   assert.deepEqual(JSON.parse(extracted.toolCalls[0].function.arguments), { command: 'Get-Process' });
 });
 
+test('extract XML function calls when closing invoke or function_calls is omitted', () => {
+  const input = `<function_calls> <invoke name="pwsh"> <parameter name="description">只读：确认 hdraw 里 now 的单位，查已有流程在 t.mjs 的接入写法和 skin_flow 开头</parameter> <parameter name="command">[Console]::OutputEncoding=[System.Text.Encoding]::UTF8 \ng\n=\n′\nD\n:...\n</parameter> <parameter name="timeoutMs">30000</parameter> <parameter name="workdir">D:\\Downloads\\game</parameter>`;
+  const res = extractPseudoToolCalls(input);
+  assert.equal(res.toolCalls.length, 1);
+  assert.equal(res.toolCalls[0].function.name, 'pwsh');
+  const args = JSON.parse(res.toolCalls[0].function.arguments);
+  assert.equal(args.timeoutMs, 30000);
+  assert.equal(args.workdir, 'D:\\Downloads\\game');
+});
+
 test('extract XML function calls', () => {
   const input = `<function_calls> <invoke name="pwsh"> <parameter name="description">在拷贝里对 menu 和 meta 各跑一遍合并检查，并列出页面名和 NOTES 末行</parameter> <parameter name="command">[Console]::OutputEncoding=[System.Text.Encoding]::UTF8 \ng\n=\n′\nD\n:...</parameter> <parameter name="timeoutMs">200000</parameter> <parameter name="workdir">D:\\Downloads\\game</parameter> </invoke> </function_calls>`;
   const res = extractPseudoToolCalls(input);
@@ -248,6 +258,106 @@ test('streaming simulation with intercepted XML tool call', async () => {
   assert.equal(toolCallsEmitted.length, 1);
   assert.equal(toolCallsEmitted[0].delta.tool_calls[0].function.name, 'pwsh');
   assert.deepEqual(JSON.parse(toolCallsEmitted[0].delta.tool_calls[0].function.arguments), { command: 'Get-Process' });
+
+  // 校验 finish_reason
+  const lastChunk = emitted[emitted.length - 1];
+  assert.equal(lastChunk.finish_reason, 'tool_calls');
+});
+
+test('streaming simulation with intercepted unclosed XML tool call', async () => {
+  const chunks = [
+    '<function_calls> <invoke name="pwsh"> ',
+    '<parameter name="description">只读测试</parameter> ',
+    '<parameter name="command">dir</parameter> ',
+    '<parameter name="timeoutMs">30000</parameter> ',
+    '<parameter name="workdir">D:\\Downloads\\game</parameter>'
+    // 注意：末尾完全没有 </invoke> </function_calls>，模拟截断
+  ];
+
+  const emitted = [];
+  const chunk = (delta, finish_reason = null) => {
+    emitted.push({ delta, finish_reason });
+  };
+
+  let accumulatedText = '';
+  let sentTextLength = 0;
+  let pseudoToolMode = false;
+  let finishedToolEmitted = false;
+  let stop = null;
+  const SAFE_WINDOW = 25;
+
+  const flushFallbackTools = () => {
+    if (finishedToolEmitted) return;
+    if (pseudoToolMode || findToolCallTrigger(accumulatedText) !== -1) {
+      const extracted = extractPseudoToolCalls(accumulatedText);
+      if (extracted.toolCalls.length > 0) {
+        if (extracted.cleanText.length > sentTextLength) {
+          chunk({ content: extracted.cleanText.slice(sentTextLength) });
+          sentTextLength = extracted.cleanText.length;
+        }
+        for (let i = 0; i < extracted.toolCalls.length; i++) {
+          const tc = extracted.toolCalls[i];
+          chunk({
+            tool_calls: [{
+              index: i,
+              id: tc.id,
+              type: 'function',
+              function: {
+                name: tc.function.name,
+                arguments: tc.function.arguments,
+              }
+            }]
+          });
+        }
+        finishedToolEmitted = true;
+        stop = 'tool_use';
+        return;
+      }
+    }
+    if (accumulatedText.length > sentTextLength) {
+      chunk({ content: accumulatedText.slice(sentTextLength) });
+      sentTextLength = accumulatedText.length;
+    }
+  };
+
+  for (const textPiece of chunks) {
+    accumulatedText += textPiece;
+    if (pseudoToolMode) {
+      // accumulating
+    } else {
+      const toolIdx = findToolCallTrigger(accumulatedText);
+      if (toolIdx !== -1) {
+        pseudoToolMode = true;
+        if (toolIdx > sentTextLength) {
+          chunk({ content: accumulatedText.slice(sentTextLength, toolIdx) });
+          sentTextLength = toolIdx;
+        }
+      } else {
+        const safeLen = Math.max(0, accumulatedText.length - SAFE_WINDOW);
+        if (safeLen > sentTextLength) {
+          chunk({ content: accumulatedText.slice(sentTextLength, safeLen) });
+          sentTextLength = safeLen;
+        }
+      }
+    }
+  }
+
+  flushFallbackTools();
+  chunk({}, finishedToolEmitted ? 'tool_calls' : (stop || 'stop'));
+
+  // 校验发送的内容：绝不能有任何 content 泄露给客户端
+  const contentPushed = emitted.filter(e => e.delta?.content).map(e => e.delta.content).join('');
+  assert.equal(contentPushed, '');
+
+  // 校验 tool_calls 正常下发
+  const toolCallsEmitted = emitted.filter(e => e.delta?.tool_calls);
+  assert.equal(toolCallsEmitted.length, 1);
+  assert.equal(toolCallsEmitted[0].delta.tool_calls[0].function.name, 'pwsh');
+  const args = JSON.parse(toolCallsEmitted[0].delta.tool_calls[0].function.arguments);
+  assert.equal(args.description, '只读测试');
+  assert.equal(args.command, 'dir');
+  assert.equal(args.timeoutMs, 30000);
+  assert.equal(args.workdir, 'D:\\Downloads\\game');
 
   // 校验 finish_reason
   const lastChunk = emitted[emitted.length - 1];
