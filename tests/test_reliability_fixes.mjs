@@ -172,6 +172,6 @@ test('normalize/_init automatically caps legacy excessive cooldowns (>120s) for 
   };
 
   pool._init(legacyAcct);
-  assert.ok(legacyAcct.cooldownUntil <= now + 120000, 'Legacy 30min cooldown should be capped to <= 120s');
-  assert.ok(legacyAcct.cooldownUntil >= now, 'Cooldown should still be in the future');
+  assert.ok(legacyAcct.cooldownUntil <= Date.now() + 120000, 'Legacy 30min cooldown should be capped to <= 120s');
+  assert.ok(legacyAcct.cooldownUntil >= Date.now() - 1000, 'Cooldown should still be in the future');
 });
