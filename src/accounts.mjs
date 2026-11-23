@@ -34,7 +34,11 @@ export const DEFAULT_BASE = 'https://claude.ai';
 
 /** 冷却档位（毫秒），按连续失败次数递增 */
 const COOLDOWN = {
-  rate_limit:   [60e3, 180e3, 600e3, 1800e3], // 429 配额用尽：1m/3m/10m/30m
+  // 429 瞬时速率限制 / 边缘限流（无 resetsAt 时间戳）：
+  // 5 小时配额耗尽由 exhaustedUntil 处理（带精确恢复时刻，进 429 耗尽池）；
+  // 无 resetsAt 的 429 均为上游/Cloudflare 瞬时频控（通常 15~60 秒自动恢复），
+  // 绝不能按 10m/30m 惩罚，否则会导致全池账号瞬间雪崩耗尽！
+  rate_limit:   [15e3, 30e3, 60e3, 120e3],    // 瞬时限流：15s/30s/1m/2m
   // 429 concurrents：上游并发槽是「确定性释放」——前一个 completion 跑完就空出来（实测 1~5s）。
   // 所以固定 1.5s 冷却，不随 failStreak 递增：并发满只是排队，不是账号出问题，
   // 惩罚性递增（3s/10s/30s）会让多子代理并发场景雪崩式恶化。
@@ -226,6 +230,12 @@ export class AccountPool {
         }
       }
     }
+
+    // 智能校准：若因历史版本瞬时 429 被误判了长达 30 分钟的惩罚性冷却（且非 5h 耗尽池），
+    // 自动将其平滑收敛到至多 120 秒（瞬时速率限制最大冷却上限），解除全池冻结状态。
+    if (a.cooldownUntil && a.cooldownUntil > now + 120e3 && (!a.exhaustedUntil || a.exhaustedUntil <= now)) {
+      a.cooldownUntil = now + 120e3;
+    }
   }
 
   save() {
@@ -392,8 +402,18 @@ export class AccountPool {
     cur.stats.fail++;
     cur.stats.lastError = String(message || '').slice(0, 200);
     cur.failStreak++;
+
+    const now = Date.now();
+    const lastFail = cur.lastFailAt || 0;
+    cur.lastFailAt = now;
+    // 孤立失败保护：若距离上次失败超过 5 分钟，说明并非持续雪崩，清空历史连续失败计数，给账号崭新机会
+    if (lastFail && (now - lastFail > 5 * 60 * 1000)) {
+      cur.streaks = {};
+      cur.failStreak = 1;
+    }
+
     // 按错误类别各自累计再选档：concurrency/transient 这类秒级故障连续出现，
-    // 不该把 rate_limit 的 1m/30m 档位顶上去（反之亦然）。
+    // 不该把 rate_limit 档位顶上去（反之亦然）。
     cur.streaks = cur.streaks || {};
     cur.streaks[kind] = (cur.streaks[kind] || 0) + 1;
 
@@ -573,23 +593,37 @@ export class AccountPool {
     if (patch.clearError && a.stats) a.stats.lastError = '';
     if (patch.base) a.base = patch.base;
     if (patch.ua) a.ua = patch.ua;
-    if (typeof patch.cooldownUntil === 'number') a.cooldownUntil = patch.cooldownUntil;
+    if (typeof patch.cooldownUntil === 'number') {
+      a.cooldownUntil = patch.cooldownUntil;
+      if (patch.cooldownUntil === 0) {
+        a.failStreak = 0;
+        a.streaks = {};
+        if (a.stats) a.stats.lastError = '';
+      }
+    }
     if (patch.enabled) { a.failStreak = 0; a.streaks = {}; a.cooldownUntil = 0; a.autoDisabledAt = 0; }
     this.save();
     return a;
   }
 
-  /** 一键清除所有账号的冷却与连续失败状态（例如误报恢复后） */
-  clearAllCooldowns() {
+  /** 一键清除所有账号的冷却与连续失败状态（例如误报恢复后，可选包含 429 耗尽池） */
+  clearAllCooldowns(includeExhausted = false) {
     let count = 0;
+    const now = Date.now();
     for (const a of this.data.accounts) {
-      if ((a.cooldownUntil && a.cooldownUntil > 0) || (a.failStreak && a.failStreak > 0) || (a.stats && /cloudflare|challenge/i.test(a.stats.lastError || ''))) {
+      const hasCd = (a.cooldownUntil && a.cooldownUntil > 0) || (a.failStreak && a.failStreak > 0);
+      const isExh = includeExhausted && a.exhaustedUntil && a.exhaustedUntil > now;
+      const isCf = a.stats && /cloudflare|challenge/i.test(a.stats.lastError || '');
+      if (hasCd || isExh || isCf) {
         a.cooldownUntil = 0;
         a.failStreak = 0;
         a.streaks = {};
-        if (a.stats && /cloudflare|challenge/i.test(a.stats.lastError || '')) {
-          a.stats.lastError = '';
+        if (includeExhausted) {
+          a.exhaustedUntil = 0;
+          a.exhaustedReason = '';
+          a.exhaustedAt = 0;
         }
+        if (a.stats) a.stats.lastError = '';
         count++;
       }
     }

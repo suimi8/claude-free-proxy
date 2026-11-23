@@ -108,3 +108,70 @@ test('validatedEvents keeps thinking stream alive when receiving upstream pings'
   assert.ok(events.some(e => e.type === 'ping'), 'Ping event was yielded');
   assert.ok(events.some(e => e.delta?.thinking === 'Let me think...'), 'Thinking delta was yielded');
 });
+
+test('burst 429 without resetsAt uses progressive short cooldown (15s..120s) and does not escalate to 30m', async () => {
+  const pool = new AccountPool(null);
+  pool.data.accounts = [
+    { id: 'acc_burst', label: 'acc burst', enabled: true, sessionKey: 'sk_b', org: 'org_b', stats: { ok: 0, fail: 0 }, inflight: 0, failStreak: 0 }
+  ];
+
+  const acct = pool.get('acc_burst');
+  const cd1 = pool.fail(acct, 'rate_limit', 'Rate limited. Please try again later.');
+  assert.equal(cd1, 15000, 'First burst 429 should cooldown for 15s');
+
+  const cd2 = pool.fail(acct, 'rate_limit', 'Rate limited. Please try again later.');
+  assert.equal(cd2, 30000, 'Second burst 429 should cooldown for 30s');
+
+  const cd3 = pool.fail(acct, 'rate_limit', 'Rate limited. Please try again later.');
+  assert.equal(cd3, 60000, 'Third burst 429 should cooldown for 60s');
+
+  const cd4 = pool.fail(acct, 'rate_limit', 'Rate limited. Please try again later.');
+  assert.equal(cd4, 120000, 'Fourth burst 429 should cap at 120s (NOT 1800s / 30 minutes!)');
+
+  const cd5 = pool.fail(acct, 'rate_limit', 'Rate limited. Please try again later.');
+  assert.equal(cd5, 120000, 'Subsequent burst 429 stays capped at 120s');
+});
+
+test('clearing cooldown resets failStreak, streaks, and lastError cleanly', async () => {
+  const pool = new AccountPool(null);
+  pool.data.accounts = [
+    { id: 'acc_cd', label: 'acc cd', enabled: true, sessionKey: 'sk_c', org: 'org_c', stats: { ok: 0, fail: 3, lastError: 'Rate limited' }, inflight: 0, failStreak: 3, streaks: { rate_limit: 3 }, cooldownUntil: Date.now() + 60000 }
+  ];
+
+  // Single account clear via set
+  pool.set('acc_cd', { cooldownUntil: 0 });
+  const a = pool.get('acc_cd');
+  assert.equal(a.cooldownUntil, 0, 'cooldownUntil should be 0');
+  assert.equal(a.failStreak, 0, 'failStreak should be reset');
+  assert.deepEqual(a.streaks, {}, 'streaks should be empty');
+  assert.equal(a.stats.lastError, '', 'lastError should be cleared');
+
+  // Multi-account clear via clearAllCooldowns
+  pool.fail(a, 'rate_limit', 'Rate limited');
+  assert.ok(a.cooldownUntil > Date.now());
+  const cleared = pool.clearAllCooldowns();
+  assert.equal(cleared, 1, 'Should have cleared 1 account');
+  assert.equal(a.cooldownUntil, 0);
+  assert.equal(a.failStreak, 0);
+  assert.deepEqual(a.streaks, {});
+});
+
+test('normalize/_init automatically caps legacy excessive cooldowns (>120s) for non-exhausted accounts', async () => {
+  const pool = new AccountPool(null);
+  const now = Date.now();
+  const legacyAcct = {
+    id: 'acc_legacy',
+    label: 'acc legacy',
+    enabled: true,
+    sessionKey: 'sk_l',
+    org: 'org_l',
+    stats: { ok: 0, fail: 4, lastError: 'completion 429: {"error":{"message":"Rate limited. Please try again later."}}' },
+    cooldownUntil: now + 1730000, // Legacy 30 minute cooldown
+    failStreak: 4,
+    streaks: { rate_limit: 4 }
+  };
+
+  pool._init(legacyAcct);
+  assert.ok(legacyAcct.cooldownUntil <= now + 120000, 'Legacy 30min cooldown should be capped to <= 120s');
+  assert.ok(legacyAcct.cooldownUntil >= now, 'Cooldown should still be in the future');
+});

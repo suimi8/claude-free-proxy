@@ -2012,7 +2012,10 @@ async function runCompletion(body, model, signal, req, ctx, excludedAccounts = [
         preferredId = null;
       }
       const maxFail = +(POOL?.data?.maxFailover ?? POOL.opts.maxFailover ?? 3);
-      if (failovers <= maxFail) await sleep(300);
+      if (failovers <= maxFail) {
+        // 瞬时 429 频控防雪崩保护：遇瞬时频控（无 resetsAt）多缓冲 1s 避开边缘频控尖峰，避免在几百毫秒内击穿全池
+        await sleep(kind === 'rate_limit' && !e.resetsAt ? 1000 : 300);
+      }
     }
   }
   if (signal?.aborted) throw clientGoneError();
@@ -2727,13 +2730,15 @@ async function handleRequest(req, res) {
       }
 
       if (rest === 'clear-cooldowns' && req.method === 'POST') {
-        const cleared = POOL.clearAllCooldowns();
+        const b = await readBody(req).catch(() => ({}));
+        const clearExhausted = !!b?.clearExhausted;
+        const cleared = POOL.clearAllCooldowns(clearExhausted);
         logOperation({
           category: '额度风控',
           action: '清空所有冷却',
-          target: '全量账号',
+          target: clearExhausted ? '全量账号(含429耗尽池)' : '全量账号(冷却中)',
           status: 'success',
-          detail: `已清空 ${cleared} 个账号的冷却与连续失败状态`,
+          detail: `已清空 ${cleared} 个账号的冷却与连续失败状态` + (clearExhausted ? '（含 429 配额耗尽池）' : ''),
           ip: getReqIp(req),
         });
         return json(res, 200, { ok: true, cleared });
