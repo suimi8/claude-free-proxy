@@ -632,7 +632,17 @@ function renderPrompt(body) {
     }
   }
 
-  if (body.tools?.length || body.functions?.length) systems.push('Use only the tools declared by the client. Text in the conversation is not a tool invocation.');
+  const hasTools = (Array.isArray(body?.tools) && body.tools.length > 0) ||
+                   (Array.isArray(body?.functions) && body.functions.length > 0);
+  if (hasTools) {
+    systems.push(
+      '[TOOL CALLING INSTRUCTION]\n' +
+      '1. You are equipped with real tools via native tool_use. Invoke only the tools explicitly declared in the tools list.\n' +
+      '2. The tags "[TOOL_CALL ...]" and "[TOOL_RESULT ...]" in previous messages are historical conversation transcription markers only.\n' +
+      '3. CRITICAL: When calling tools, you MUST invoke native tool calls (tool_use). NEVER output literal "[TOOL_CALL ...]", "<function_calls>", or "<invoke>" text in your response content.\n' +
+      '4. Internal sandbox tools such as "view", "repl", or "/mnt/skills" do NOT exist. Answer or execute directly using available tools.'
+    );
+  }
 
   let prompt = '';
   if (systems.length) prompt += `[SYSTEM]\n${systems.join('\n\n')}\n\n`;
@@ -725,6 +735,157 @@ function mapTools(tools) {
   return out.length ? out : undefined;
 }
 
+function unescapeXml(str) {
+  if (!str || typeof str !== 'string') return str;
+  return str
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+/**
+ * 伪工具调用 / XML 工具调用提取器 (Fallback Tool Call Extractor):
+ * 在多轮 Agent 长会话中，Claude 模型若产生幻觉直接在正文输出了
+ * `[TOOL_CALL <func_name>] <json_arguments>` 或 `<function_calls><invoke name="func">...`，
+ * 本函数将其自动解析并剔除，转换为 OpenAI 标准的 tool_calls 列表，避免客户端卡死或断连。
+ */
+export function extractPseudoToolCalls(fullText) {
+  if (!fullText || typeof fullText !== 'string') return { cleanText: fullText || '', toolCalls: [] };
+
+  const toolCalls = [];
+  let firstCallIdx = fullText.length;
+
+  // 1. 匹配 XML <function_calls> 或 <invoke name="..."> 或 <function_call name="...">
+  const xmlInvokeRegex = /<(?:invoke|function_call)\s+name=["']?([a-zA-Z0-9_\-\.]+)["']?\s*>([\s\S]*?)<\/(?:invoke|function_call)>/gi;
+  let xmlMatch;
+  while ((xmlMatch = xmlInvokeRegex.exec(fullText)) !== null) {
+    const name = xmlMatch[1];
+    const body = xmlMatch[2];
+    const args = {};
+    const paramRegex = /<parameter\s+name=["']?([a-zA-Z0-9_\-\.]+)["']?(?:\s*\/>|\s*>([\s\S]*?)<\/parameter>)/gi;
+    let paramMatch;
+    let hasParams = false;
+    while ((paramMatch = paramRegex.exec(body)) !== null) {
+      hasParams = true;
+      const pName = paramMatch[1];
+      let pVal = paramMatch[2] !== undefined ? unescapeXml(paramMatch[2].trim()) : '';
+      try {
+        const parsed = JSON.parse(pVal);
+        if (typeof parsed === 'number' || typeof parsed === 'boolean' || Array.isArray(parsed) || (parsed && typeof parsed === 'object')) {
+          pVal = parsed;
+        }
+      } catch {}
+      args[pName] = pVal;
+    }
+    let argsStr = '{}';
+    if (hasParams) {
+      argsStr = JSON.stringify(args);
+    } else {
+      const trimmed = body.trim();
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        argsStr = trimmed;
+      }
+    }
+
+    const startIdx = xmlMatch.index;
+    const fcTag = '<function_calls>';
+    const fcIdx = fullText.lastIndexOf(fcTag, startIdx);
+    let effectiveStart = startIdx;
+    if (fcIdx !== -1 && fullText.slice(fcIdx + fcTag.length, startIdx).trim() === '') {
+      effectiveStart = fcIdx;
+    }
+    if (effectiveStart < firstCallIdx) firstCallIdx = effectiveStart;
+
+    toolCalls.push({
+      id: 'call_' + randomUUID().replace(/-/g, '').slice(0, 9),
+      type: 'function',
+      function: {
+        name,
+        arguments: argsStr
+      }
+    });
+  }
+
+  // 2. 匹配 [TOOL_CALL <name> ...]
+  if (toolCalls.length === 0) {
+    const markerRegex = /\[TOOL_CALL(?::|\s+)?([a-zA-Z0-9_\-\.]+)(?:\s+id=([a-zA-Z0-9_\-\.]+))?\s*\]/g;
+    let match;
+    const matches = [];
+    while ((match = markerRegex.exec(fullText)) !== null) {
+      matches.push({
+        name: match[1],
+        id: match[2],
+        startIndex: match.index,
+        argsStart: match.index + match[0].length,
+      });
+    }
+
+    for (let i = 0; i < matches.length; i++) {
+      const cur = matches[i];
+      const nextStart = (i + 1 < matches.length) ? matches[i + 1].startIndex : fullText.length;
+      let candidate = fullText.slice(cur.argsStart, nextStart).trim();
+
+      let parsedArgs = '{}';
+      const braceStart = candidate.indexOf('{');
+      if (braceStart !== -1) {
+        let depth = 0;
+        let inString = false;
+        let escape = false;
+        let braceEnd = -1;
+        for (let pos = braceStart; pos < candidate.length; pos++) {
+          const ch = candidate[pos];
+          if (escape) { escape = false; continue; }
+          if (ch === '\\') { escape = true; continue; }
+          if (ch === '"') { inString = !inString; continue; }
+          if (!inString) {
+            if (ch === '{') depth++;
+            else if (ch === '}') {
+              depth--;
+              if (depth === 0) { braceEnd = pos; break; }
+            }
+          }
+        }
+        if (braceEnd !== -1) {
+          parsedArgs = candidate.slice(braceStart, braceEnd + 1);
+        }
+      }
+      try {
+        JSON.parse(parsedArgs);
+      } catch {
+        parsedArgs = JSON.stringify({ input: parsedArgs });
+      }
+
+      toolCalls.push({
+        id: cur.id || ('call_' + randomUUID().replace(/-/g, '').slice(0, 9)),
+        type: 'function',
+        function: {
+          name: cur.name,
+          arguments: parsedArgs
+        }
+      });
+      if (cur.startIndex < firstCallIdx) firstCallIdx = cur.startIndex;
+    }
+  }
+
+  const cleanText = fullText.slice(0, firstCallIdx).trimEnd();
+  return { cleanText, toolCalls };
+}
+
+export function findToolCallTrigger(text) {
+  if (!text || typeof text !== 'string') return -1;
+  const triggers = ['[TOOL_CALL', '<function_calls', '<invoke name=', '<function_call name='];
+  let minIdx = -1;
+  for (const t of triggers) {
+    const idx = text.toLowerCase().indexOf(t.toLowerCase());
+    if (idx !== -1 && (minIdx === -1 || idx < minIdx)) {
+      minIdx = idx;
+    }
+  }
+  return minIdx;
+}
+
 function prepareContext(body) {
   // ── 上下文优化：修剪历史旧图片与冗长工具输出，大幅减小 prompt 体积 ──
   // 仅当池配置启用 pruneContext 时生效（默认 true）
@@ -752,7 +913,8 @@ function buildUpstreamBody(body, model) {
     files: [],
     rendering_mode: 'messages',
   };
-  const tools = mapTools(body.tools);
+  const rawTools = body.tools || (Array.isArray(body.functions) ? body.functions : null);
+  const tools = mapTools(rawTools);
   if (tools) out.tools = tools;
   const effort = pickEffort(body);
   if (effort) out.effort = effort;
@@ -960,6 +1122,21 @@ async function collect(events, ctx) {
     }
   }
 
+  // 兜底补救：如果模型在正文中输出了伪工具指令/XML调用且上游没出原生 tool_use，自动转换
+  if (toolCalls.length === 0 && text) {
+    const extracted = extractPseudoToolCalls(text);
+    if (extracted.toolCalls.length > 0) {
+      console.log(`[tool_fallback] (非流式) 拦截到模型正文输出伪工具/XML指令，已自动转换为 ${extracted.toolCalls.length} 个原生 tool_calls`);
+      return {
+        text: extracted.cleanText,
+        toolCalls: extracted.toolCalls,
+        stop: 'tool_use',
+        model, id, limit,
+        reasoning: [...thoughtBlocks.values()].join('\n')
+      };
+    }
+  }
+
   return { text, toolCalls, stop, model, id, limit, reasoning: [...thoughtBlocks.values()].join('\n') };
 }
 
@@ -977,29 +1154,105 @@ async function streamToClient(res, run, model, chatId, includeUsage) {
     res.write('data: ' + JSON.stringify(data) + '\n\n');
   };
   const chunk = (delta, finish_reason = null) => send([{ index: 0, delta, finish_reason }]);
-  const slot = new Map(); let stop=null;
+  const slot = new Map();
+  let stop = null;
+  let accumulatedText = '';
+  let sentTextLength = 0;
+  let pseudoToolMode = false;
+  let finishedToolEmitted = false;
+  const SAFE_WINDOW = 25;
+
+  const flushFallbackToolsIfNeeded = () => {
+    if (slot.size > 0 || finishedToolEmitted) return;
+    if (pseudoToolMode || findToolCallTrigger(accumulatedText) !== -1) {
+      const extracted = extractPseudoToolCalls(accumulatedText);
+      if (extracted.toolCalls.length > 0) {
+        console.log(`[tool_fallback] (流式) 拦截到模型输出伪工具/XML指令，已自动下发 ${extracted.toolCalls.length} 个原生 tool_calls 给客户端`);
+        if (extracted.cleanText.length > sentTextLength) {
+          chunk({ content: extracted.cleanText.slice(sentTextLength) });
+          sentTextLength = extracted.cleanText.length;
+        }
+        for (let i = 0; i < extracted.toolCalls.length; i++) {
+          const tc = extracted.toolCalls[i];
+          chunk({
+            tool_calls: [{
+              index: i,
+              id: tc.id,
+              type: 'function',
+              function: {
+                name: tc.function.name,
+                arguments: tc.function.arguments,
+              }
+            }]
+          });
+        }
+        finishedToolEmitted = true;
+        stop = 'tool_use';
+        return;
+      }
+    }
+    if (accumulatedText.length > sentTextLength) {
+      chunk({ content: accumulatedText.slice(sentTextLength) });
+      sentTextLength = accumulatedText.length;
+    }
+  };
+
   try {
     for await (const ev of run.events()) {
-      const d=ev.delta || {}, cb=ev.content_block || {};
-      if (ev.type==='message_start') chunk({role:'assistant',content:''});
-      if (ev.type==='content_block_start' && cb.type==='tool_use') {
-        slot.set(ev.index, {index:slot.size, id:cb.id, name:cb.name});
-      }
-      if (ev.type==='content_block_delta') {
-        if (d.type==='text_delta') chunk({content:d.text});
-        else if (d.type==='input_json_delta') {
-          // One complete call per chunk: a reader never sees a name without its arguments.
-          const {index,id,name} = slot.get(ev.index);
-          chunk({tool_calls:[{index,id,type:'function',function:{name,arguments:d.partial_json}}]});
+      const d = ev.delta || {}, cb = ev.content_block || {};
+      if (ev.type === 'message_start') chunk({ role: 'assistant', content: '' });
+      if (ev.type === 'content_block_start' && cb.type === 'tool_use') {
+        if (accumulatedText.length > sentTextLength) {
+          chunk({ content: accumulatedText.slice(sentTextLength) });
+          sentTextLength = accumulatedText.length;
         }
-        else if (d.thinking || d.summary?.summary) chunk({reasoning_content:d.thinking || d.summary.summary});
+        slot.set(ev.index, { index: slot.size, id: cb.id, name: cb.name });
       }
-      if (ev.type==='message_delta' && d.stop_reason) stop=d.stop_reason;
+      if (ev.type === 'content_block_delta') {
+        if (d.type === 'text_delta') {
+          accumulatedText += (d.text || '');
+          if (slot.size === 0) {
+            if (pseudoToolMode) {
+              // 处于伪工具拦截状态，静默缓冲，不向客户端发 content
+            } else {
+              const toolIdx = findToolCallTrigger(accumulatedText);
+              if (toolIdx !== -1) {
+                pseudoToolMode = true;
+                if (toolIdx > sentTextLength) {
+                  chunk({ content: accumulatedText.slice(sentTextLength, toolIdx) });
+                  sentTextLength = toolIdx;
+                }
+              } else {
+                const safeLen = Math.max(0, accumulatedText.length - SAFE_WINDOW);
+                if (safeLen > sentTextLength) {
+                  chunk({ content: accumulatedText.slice(sentTextLength, safeLen) });
+                  sentTextLength = safeLen;
+                }
+              }
+            }
+          } else {
+            chunk({ content: d.text });
+          }
+        } else if (d.type === 'input_json_delta') {
+          // One complete call per chunk: a reader never sees a name without its arguments.
+          const { index, id, name } = slot.get(ev.index);
+          chunk({ tool_calls: [{ index, id, type: 'function', function: { name, arguments: d.partial_json } }] });
+        } else if (d.thinking || d.summary?.summary) {
+          chunk({ reasoning_content: d.thinking || d.summary.summary });
+        }
+      }
+      if (ev.type === 'message_delta') {
+        flushFallbackToolsIfNeeded();
+        if (d.stop_reason) stop = d.stop_reason;
+      }
     }
-    chunk({}, slot.size ? 'tool_calls' : mapStopReason(stop));
+    flushFallbackToolsIfNeeded();
+    chunk({}, (slot.size || finishedToolEmitted) ? 'tool_calls' : mapStopReason(stop));
     if (includeUsage) send([], chatUsage(ctx));
     res.end('data: [DONE]\n\n');
-  } finally { stopHeartbeat(); }
+  } finally {
+    stopHeartbeat();
+  }
 }
 
 // ------------------------------------------------------------- 估算 usage
@@ -1533,7 +1786,7 @@ function cleanupConvRouting() {
     if (now - v.at > CONV_ROUTING_TTL) CONV_ROUTING.delete(k);
   }
 }
-setInterval(cleanupConvRouting, 60 * 1000);
+setInterval(cleanupConvRouting, 60 * 1000).unref();
 
 function completionErrorStatus(e) {
   if (e.name === 'AbortError') return 499;
@@ -3088,7 +3341,7 @@ function maskAccount(a) {
 }
 
 // 重新载入手动更新的上游配置
-setInterval(() => { UP = loadUpstream(); }, 5000);
+setInterval(() => { UP = loadUpstream(); }, 5000).unref();
 // accounts.json 被手工编辑时热加载，不用重启
 setInterval(() => {
   POOL.autoRestoreDisabled();   // 401/403 自动禁用 60 分钟到期 -> 恢复启用
@@ -3098,46 +3351,50 @@ setInterval(() => {
     console.log(`[pool] accounts.json reloaded: total=${st.total} eligible=${st.eligible_now} strategy=${st.strategy}`);
   }
   POOL.restoreExhausted();      // 429 配额窗口到期 -> 自动回到有效池（用上游给的 resetsAt）
-}, 2000);
+}, 2000).unref();
 
-// config.json 改了也热加载（key / 额度 / 到期时间立即生效；port/host 需要重启）
-setInterval(() => {
-  if (KEYS.reloadIfChanged()) {
-    console.log(`[config] config.json reloaded: keys=${KEYS.keyCount()}（port/host 变更需重启）`);
-  }
-}, 3000);
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
 
-if (process.send) {
-  process.on('message', msg => {
-    if (msg?.type === 'drain') updates.drain(() => {
-      updates.close();
-      server.close(() => process.exit(0));
-      server.closeIdleConnections();
+if (isMain) {
+  // config.json 改了也热加载（key / 额度 / 到期时间立即生效；port/host 需要重启）
+  setInterval(() => {
+    if (KEYS.reloadIfChanged()) {
+      console.log(`[config] config.json reloaded: keys=${KEYS.keyCount()}（port/host 变更需重启）`);
+    }
+  }, 3000).unref();
+
+  if (process.send) {
+    process.on('message', msg => {
+      if (msg?.type === 'drain') updates.drain(() => {
+        updates.close();
+        server.close(() => process.exit(0));
+        server.closeIdleConnections();
+      });
+      if (msg?.type === 'refused') updates.refuse();
     });
-    if (msg?.type === 'refused') updates.refuse();
+    process.on('disconnect', () => process.exit(0));
+  }
+  server.listen(PORT, HOST, () => {
+    updates.start();
+    process.send?.({type:'listening',address:server.address().address,port:server.address().port,version:VERSION});
+    const st = POOL.status();
+    console.log(`[openai-proxy] http://127.0.0.1:${server.address().port}/v1`);
+    // 只提示配置位置，不把原始 Key 打进日志。
+    if (KEYS.wasCreated()) {
+      console.warn(`[openai-proxy] 首次启动，已生成配置文件 ${path.basename(CONFIG_FILE)}`);
+      console.warn('[openai-proxy] 请在主机私有配置中查看 Key；不会打印到日志。');
+    }
+    if (isLanExposed) {
+      // 列出本机所有非回环 IPv4，方便直接把地址发给其他设备
+      const nets = Object.values(os.networkInterfaces()).flat()
+        .filter(n => n && n.family === 'IPv4' && !n.internal).map(n => n.address);
+      console.warn(`[openai-proxy] 已开放到局域网 HOST=${HOST}，其他设备可用：`);
+      for (const ip of nets) console.warn(`[openai-proxy]   http://${ip}:${PORT}/v1   (API Key 用你的 LOCAL_API_KEY)`);
+      console.warn('[openai-proxy] 注意：任何能访问该端口的人都会消耗你的账号额度；sessionKey 等同账号凭据，切勿暴露到公网');
+      // key 的强弱由 config.json 决定，这里不再提示
+    }
+    console.log(`[openai-proxy] pool strategy=${st.strategy} accounts=${st.total} enabled=${st.enabled} eligible=${st.eligible_now} concurrency=${st.per_account_concurrency}/acct`);
+    console.log(`[openai-proxy] plan=${UP.plan} apiKeys=${KEYS.keyCount()} config=${path.basename(CONFIG_FILE)} models=${(UP.models || []).join(',')}`);
+    for (const a of st.accounts) console.log(`[pool]   ${a.id} ${a.label} org=${a.org || '(none)'} ${a.session_key} ${a.enabled ? 'on' : 'OFF'}`);
   });
-  process.on('disconnect', () => process.exit(0));
 }
-server.listen(PORT, HOST, () => {
-  updates.start();
-  process.send?.({type:'listening',address:server.address().address,port:server.address().port,version:VERSION});
-  const st = POOL.status();
-  console.log(`[openai-proxy] http://127.0.0.1:${server.address().port}/v1`);
-  // 只提示配置位置，不把原始 Key 打进日志。
-  if (KEYS.wasCreated()) {
-    console.warn(`[openai-proxy] 首次启动，已生成配置文件 ${path.basename(CONFIG_FILE)}`);
-    console.warn('[openai-proxy] 请在主机私有配置中查看 Key；不会打印到日志。');
-  }
-  if (isLanExposed) {
-    // 列出本机所有非回环 IPv4，方便直接把地址发给其他设备
-    const nets = Object.values(os.networkInterfaces()).flat()
-      .filter(n => n && n.family === 'IPv4' && !n.internal).map(n => n.address);
-    console.warn(`[openai-proxy] 已开放到局域网 HOST=${HOST}，其他设备可用：`);
-    for (const ip of nets) console.warn(`[openai-proxy]   http://${ip}:${PORT}/v1   (API Key 用你的 LOCAL_API_KEY)`);
-    console.warn('[openai-proxy] 注意：任何能访问该端口的人都会消耗你的账号额度；sessionKey 等同账号凭据，切勿暴露到公网');
-    // key 的强弱由 config.json 决定，这里不再提示
-  }
-  console.log(`[openai-proxy] pool strategy=${st.strategy} accounts=${st.total} enabled=${st.enabled} eligible=${st.eligible_now} concurrency=${st.per_account_concurrency}/acct`);
-  console.log(`[openai-proxy] plan=${UP.plan} apiKeys=${KEYS.keyCount()} config=${path.basename(CONFIG_FILE)} models=${(UP.models || []).join(',')}`);
-  for (const a of st.accounts) console.log(`[pool]   ${a.id} ${a.label} org=${a.org || '(none)'} ${a.session_key} ${a.enabled ? 'on' : 'OFF'}`);
-});
