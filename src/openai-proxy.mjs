@@ -264,12 +264,8 @@ function clientGoneError() {
 
 async function upstreamFetch(url, init = {}) {
   try {
-    const proxy = resolveProxySetting();
-    if (proxy) {
-      const dispatcher = getSharedDispatcher();
-      return await undiciFetch(url, { ...init, dispatcher });
-    }
-    return await fetch(url, init);
+    const dispatcher = getSharedDispatcher();
+    return await undiciFetch(url, { ...init, dispatcher });
   } catch (e) {
     if (e?.name === 'AbortError' || init?.signal?.aborted) throw clientGoneError();
     const inner = e?.cause ? `: ${e.cause.code || e.cause.message || e.cause}` : '';
@@ -1151,13 +1147,21 @@ async function collect(events, ctx) {
 }
 
 /** 流式：把上游事件逐个转成 OpenAI chunk 写出去 */
-function heartbeat(res) {
-  const timer = setInterval(() => { if (!res.destroyed && !res.writableEnded) res.write(': keep-alive\n\n'); }, 10000);
-  timer.unref(); return () => clearInterval(timer);
+function heartbeat(res, isAnthropic = false) {
+  const timer = setInterval(() => {
+    if (!res.destroyed && !res.writableEnded) {
+      res.write(': keep-alive\n\n');
+      if (isAnthropic) {
+        res.write('event: ping\ndata: {"type": "ping"}\n\n');
+      }
+    }
+  }, 10000);
+  timer.unref();
+  return () => clearInterval(timer);
 }
 async function streamToClient(res, run, model, chatId, includeUsage) {
   const ctx = run.ctx;
-  const created = Math.floor(Date.now()/1000), stopHeartbeat = heartbeat(res);
+  const created = Math.floor(Date.now()/1000), stopHeartbeat = heartbeat(res, false);
   const send = (choices, usage) => {
     const data = { id: chatId, object: 'chat.completion.chunk', created, model, choices };
     if (includeUsage) data.usage = usage ?? null;
@@ -1209,6 +1213,10 @@ async function streamToClient(res, run, model, chatId, includeUsage) {
 
   try {
     for await (const ev of run.events()) {
+      if (ev.type === 'ping') {
+        if (!res.destroyed && !res.writableEnded) res.write(': keep-alive\n\n');
+        continue;
+      }
       const d = ev.delta || {}, cb = ev.content_block || {};
       if (ev.type === 'message_start') chunk({ role: 'assistant', content: '' });
       if (ev.type === 'content_block_start' && cb.type === 'tool_use') {
@@ -1979,9 +1987,20 @@ async function runCompletion(body, model, signal, req, ctx, excludedAccounts = [
           await sleep(backoff);
           continue;
         }
-        // transient：网络抖动/5xx，秒级重试即可
-        await sleep(Math.min(8000, 300 * Math.max(1, queueWaits)));
-        continue;
+        if (kind === 'transient') {
+          // transient：网络超时或上游抖动，若池中有其他备用账号，立即切换备用账号，严禁就地空转 50+ 次导致 502
+          const others = POOL.eligible(Date.now(), tried).filter(a => a.id !== acct.id);
+          if (others.length) {
+            tried.add(acct.id);
+            console.log(`[pool] ${acct.label} transient(${e.message}) -> 立即切换其他可用备选账号(剩${others.length}个)`);
+            await sleep(50);
+            continue;
+          }
+          // 仅在无备选账号时退避重试，最多重试 3 次防止超时
+          if (queueWaits >= 3) break;
+          await sleep(Math.min(5000, 500 * queueWaits));
+          continue;
+        }
       }
       tried.add(acct.id);                      // rate_limit / auth / challenge：这个账号本轮别再用了
       failovers++;
@@ -2057,11 +2076,16 @@ function attachStreamRecovery(run, body, model, signal, req, ctx) {
           return;
         } catch (error) {
           const conflict = error.code === 'UPSTREAM_MESSAGE_CONFLICT';
-          if (committed || retried || signal?.aborted || (!conflict && error.code !== 'UPSTREAM_TRANSPORT_INTERRUPTED')) throw error;
+          const isTransportOrStall = error.code === 'UPSTREAM_TRANSPORT_INTERRUPTED' ||
+            error.code === 'UPSTREAM_STALLED' ||
+            error.kind === 'transient' ||
+            /stopped making progress|stalled|transport interrupted|fetch failed|timeout/i.test(error.message || '');
+          if (committed || retried || signal?.aborted || (!conflict && !isTransportOrStall)) throw error;
           const failed = current;
           failed.release(false, error.message, conflict ? 'neutral' : 'transient');
           retried = true;
           try {
+            console.log(`[stream] pre-output failure (${error.message || error.code}) on ${failed.account.label} -> 自动故障转移至备选账号`);
             current = await runCompletion(body, model, signal, req, ctx, conflict ? [] : [failed.account.id], false);
           } catch (retryError) {
             console.warn(`[stream] pre-output recovery unavailable: kind=${retryError?.kind || 'unknown'} status=${retryError?.status || 0}`);
@@ -3198,10 +3222,14 @@ async function handleRequest(req, res) {
           });
           // 转成 Anthropic 事件
           const send = o => res.write(`event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`);
-          const stopHeartbeat = heartbeat(res);
+          const stopHeartbeat = heartbeat(res, true);
           const summaryBlocks = new Set();
           try {
             for await (const ev of run.events()) {
+              if (ev.type === 'ping') {
+                send({ type: 'ping' });
+                continue;
+              }
               // 上游思考只回摘要（thinking_summary_delta 不是 Anthropic 标准事件，
               // 客户端 SDK 会丢弃）→ 转成标准 thinking_delta 下发，SDK 才能展示思考过程
               if (ev.type === 'content_block_delta' && ev.delta?.type === 'thinking_summary_delta') {

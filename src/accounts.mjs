@@ -41,7 +41,7 @@ const COOLDOWN = {
   concurrency:  [1500],
   auth:         [300e3, 900e3, 1800e3],       // 401/403：5m/15m/30m
   challenge:    [300e3, 900e3, 1800e3],       // Cloudflare 挑战：5m/15m/30m
-  transient:    [0, 2e3, 10e3],               // 网络抖动/5xx：几乎不冷却，快速重试
+  transient:    [3e3, 8e3, 20e3],             // 网络抖动/5xx：短冷却 3s，给断开的连接释放时间，防止并发立即重踩
   error:        [15e3, 60e3, 300e3],          // 其它：15s/1m/5m
 };
 
@@ -229,6 +229,7 @@ export class AccountPool {
   }
 
   save() {
+    if (!this.file) return;
     const out = {
       ...this.data,
       accounts: this.data.accounts.map(a => {

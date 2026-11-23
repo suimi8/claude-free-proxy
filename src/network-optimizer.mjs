@@ -79,31 +79,37 @@ export function createUpstreamDispatcher(options = {}) {
   const keepAliveMaxTimeout = options.keepAliveMaxTimeout ?? DEFAULT_DISPATCHER_CONFIG.keepAliveMaxTimeout;
   const maxSockets = options.maxSockets ?? DEFAULT_DISPATCHER_CONFIG.maxSockets;
 
+  const agentDefaults = {
+    keepAliveTimeout,
+    keepAliveMaxTimeout,
+    maxSockets,
+    // 超时与长连接保护：给上游深度思考和生成预留充足时间，防止 Undici 误判 socket/body 超时
+    headersTimeout: 300_000, // 5 分钟
+    bodyTimeout: 0,          // 流式生成不设 body 超时
+    connect: {
+      timeout: 15_000,       // 15s 握手超时（比默认 10s 宽容，防止跨国网络首包抖动）
+      keepAlive: true,
+      ...(options.agentOptions?.connect || {}),
+    },
+    ...(options.agentOptions || {}),
+  };
+
   if (proxy) {
     if (typeof proxy === 'string') {
       return new ProxyAgent({
         uri: proxy,
-        keepAliveTimeout,
-        keepAliveMaxTimeout,
-        ...(options.agentOptions || {}),
+        ...agentDefaults,
       });
     }
     if (typeof proxy === 'object' && proxy !== null) {
       return new ProxyAgent({
-        keepAliveTimeout,
-        keepAliveMaxTimeout,
         ...proxy,
-        ...(options.agentOptions || {}),
+        ...agentDefaults,
       });
     }
   }
 
-  return new Agent({
-    keepAliveTimeout,
-    keepAliveMaxTimeout,
-    maxSockets,
-    ...(options.agentOptions || {}),
-  });
+  return new Agent(agentDefaults);
 }
 
 /**

@@ -171,7 +171,9 @@ function progressPhase(ev, current, toolPending) {
 
 function stalled(clock) {
   const age = clock.lastByteAt === null ? 'none' : Math.max(0, Date.now() - clock.lastByteAt);
-  return bad(`upstream stopped making progress (phase=${clock.phase}, timeout_ms=${clock.timeoutMs}, last_byte_age_ms=${age})`);
+  const err = bad(`upstream stopped making progress (phase=${clock.phase}, timeout_ms=${clock.timeoutMs}, last_byte_age_ms=${age})`);
+  err.code = 'UPSTREAM_STALLED';
+  return err;
 }
 
 async function readBy(reader, deadline) {
@@ -371,6 +373,7 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
         if (clock.graceAt === null && Date.now() >= clock.stallAt)
           throw stalled(clock);
         if (graceMs && lastWasTool && !open.size) clock.graceAt ??= Date.now() + graceMs;
+        yield ev;
         continue;
       }
       if (ev.type === 'message_start') {

@@ -1576,10 +1576,16 @@ function renderLogs() {
       e.effort ? `思考档位 ${e.effort}` : "",
     ].filter(Boolean).join("\n");
     const outTip = `正文 ${e.text_tokens ?? 0} tok｜思考摘要 ${e.think_tokens ?? 0} tok｜合计 ${e.output_tokens ?? 0} tok`;
+    let outDisplay = nfmt(e.text_tokens ?? e.output_tokens);
+    if ((!e.text_tokens || e.text_tokens === 0) && (e.think_tokens > 0 || (e.output_tokens > 0 && e.output_tokens !== e.text_tokens))) {
+      outDisplay = `${nfmt(e.text_tokens || 0)} <span style="font-size:11px;color:#888" title="思考摘要">(${nfmt(e.think_tokens || e.output_tokens)}思考)</span>`;
+    }
     const full = String(e.error || e.status || "");
     let short = "err";
     if (e.ok) short = "✓";
-    else {
+    else if (e.status === 499 || /client disconnected|client_gone|499/i.test(full)) {
+      short = "✖ 499 · 客户端断连";
+    } else {
       const m = /(?:completion|create_conversation|HTTP)\s*(\d{3})/.exec(full);
       const code = m ? m[1] : (e.status || "err");
       const kind = /concurrents/i.test(full) ? "concurrents"
@@ -1589,7 +1595,7 @@ function renderLogs() {
       short = "✖ " + code + " · " + kind;
     }
     return `<tr><td>${dt(e.ts)}</td><td class="namecell" title="${esc(e.account_label || "")}">${esc((e.account_label || e.account_id || "—").slice(0, 22))}</td>
-      <td>${esc(e.model || "—")}</td><td>${nfmt(e.new_input_tokens)}</td><td title="${esc(outTip)}">${nfmt(e.text_tokens ?? e.output_tokens)}</td>
+      <td>${esc(e.model || "—")}</td><td>${nfmt(e.new_input_tokens)}</td><td title="${esc(outTip)}">${outDisplay}</td>
       <td>${e.cache_hit ? '<b style="color:#16a34a">' + nfmt(e.cached_tokens) + " ✓</b>" : "—"}</td>
       <td title="${esc(speedTip)}">${speed}</td><td>${secs(e.think_ms)}</td>
       <td>${e.ttfb_ms == null ? "—" : e.ttfb_ms + "ms"}</td>
