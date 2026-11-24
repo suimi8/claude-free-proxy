@@ -423,6 +423,7 @@ export async function sendResponsesResult(res, run, model, id, rb = {}, baseMess
 
   const send = rb.stream === true ? async (type, payload) => {
     if (aborted || res?.destroyed || res?.writableEnded) return false;
+    res?._markSseActivity?.();
     const ok = await safeWrite(res, `event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: seq++, ...payload })}\n\n`);
     if (!ok) aborted = true;
     return ok;
@@ -533,6 +534,13 @@ export async function sendResponsesResult(res, run, model, id, rb = {}, baseMess
         break;
       }
       switch (ev.type) {
+        case 'ping': {
+          if (rb.stream === true && !res?.destroyed && !res?.writableEnded) {
+            res?._markSseActivity?.();
+            await safeWrite(res, ': keep-alive\n\nevent: ping\ndata: {"type":"ping"}\n\n');
+          }
+          break;
+        }
         case 'content_block_start': {
           const cb = ev.content_block || {};
           if (cb.type === 'thinking') {

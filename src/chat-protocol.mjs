@@ -199,23 +199,52 @@ export async function collect(events, ctx) {
 }
 
 /**
- * 维持客户端 SSE 连接心跳（定期下发 keep-alive / ping）
+ * 维持客户端 SSE 连接心跳（定期下发 keep-alive / ping / 空增量 chunk）
  * @param {object} res
- * @param {boolean} [isAnthropic=false]
+ * @param {string|boolean} [mode='openai'] 'openai' | 'anthropic' | 'responses'
+ * @param {object} [options={}] { chatId, model, intervalMs }
  * @returns {() => void} 停止心跳回调
  */
-export function heartbeat(res, isAnthropic = false) {
-  const ping = async () => {
+export function heartbeat(res, mode = 'openai', options = {}) {
+  const isAnthropic = mode === true || mode === 'anthropic';
+  const isResponses = mode === 'responses';
+  const created = Math.floor(Date.now() / 1000);
+  const chatId = options?.chatId || `chatcmpl-ping-${created}`;
+  const model = options?.model || 'claude-proxy';
+  const intervalMs = options?.intervalMs || 8000; // 8s 周期，充分抢在 Cursor/Codex/代理的 15s/30s/300s 空闲断开前
+
+  let lastSentAt = Date.now();
+  res._markSseActivity = () => { lastSentAt = Date.now(); };
+
+  const ping = async (initial = false) => {
     if (!res?.destroyed && !res?.writableEnded) {
-      if (isAnthropic) {
+      if (!initial && Date.now() - lastSentAt < Math.max(10, intervalMs * 0.75)) {
+        return; // 近期已有真实事件或文本块下发，无需重复刷心跳
+      }
+      if (isAnthropic || isResponses) {
         await safeWrite(res, ': keep-alive\n\nevent: ping\ndata: {"type": "ping"}\n\n');
       } else {
+        // 先发送 SSE 标准注释保持中间网络通道
         await safeWrite(res, ': keep-alive\n\n');
+        // 定时轮询保活阶段（非初次握手），追加下发合法的空增量事件包 (delta: {})
+        // 彻底解决 Cursor / Codex / 各种客户端在长时间思考时报 "idle timeout waiting for SSE"
+        if (!initial) {
+          const emptyChunk = JSON.stringify({
+            id: chatId,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [{ index: 0, delta: {} }],
+          });
+          await safeWrite(res, `data: ${emptyChunk}\n\n`);
+        }
       }
+      lastSentAt = Date.now();
     }
   };
-  ping().catch(() => {});
-  const timer = setInterval(() => { ping().catch(() => {}); }, 10000);
+
+  ping(true).catch(() => {});
+  const timer = setInterval(() => { ping(false).catch(() => {}); }, intervalMs);
   timer.unref?.();
   return () => clearInterval(timer);
 }
@@ -232,7 +261,7 @@ export function heartbeat(res, isAnthropic = false) {
 export async function streamToClient(res, run, model, chatId, includeUsage = false) {
   const ctx = run?.ctx;
   const created = Math.floor(Date.now() / 1000);
-  const stopHeartbeat = heartbeat(res, false);
+  const stopHeartbeat = heartbeat(res, 'openai', { chatId, model });
 
   let aborted = false;
   const onClientDisconnect = () => {
@@ -246,6 +275,7 @@ export async function streamToClient(res, run, model, chatId, includeUsage = fal
 
   const send = async (choices, usage) => {
     if (aborted || res?.destroyed || res?.writableEnded) return false;
+    res._markSseActivity?.();
     const data = { id: chatId, object: 'chat.completion.chunk', created, model, choices };
     if (includeUsage) data.usage = usage ?? null;
     const ok = await safeWrite(res, 'data: ' + JSON.stringify(data) + '\n\n');

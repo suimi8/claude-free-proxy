@@ -273,7 +273,7 @@ async function readBy(reader, deadline) {
   }
 }
 
-async function* frames(stream, clock) {
+async function* frames(stream, clock, options = {}) {
   const reader = stream.getReader(),
     decoder = new TextDecoder('utf-8', { fatal: true });
   let pieces = [],
@@ -289,7 +289,12 @@ async function* frames(stream, clock) {
       try {
         r = await readBy(reader, grace ? clock.graceAt : clock.stallAt);
       } catch (error) {
-        if (error?.name === 'AbortError') throw error;
+        if (options?.signal?.aborted || error?.name === 'AbortError' || error?.kind === 'client_gone') {
+          const clientErr = Object.assign(new Error('client disconnected'), {
+            name: 'AbortError', kind: 'client_gone', status: 499,
+          });
+          throw clientErr;
+        }
         const interrupted = bad('transport interrupted');
         interrupted.code = 'UPSTREAM_TRANSPORT_INTERRUPTED';
         interrupted.transportCause = error?.code || error?.message || 'unknown';
@@ -445,7 +450,7 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
     return true;
   }
   try {
-    for await (let ev of frames(stream, clock)) {
+    for await (let ev of frames(stream, clock, options)) {
       if (ev === IDLE) break;
       if (clock.ended) {
         // Optional timing diagnostics: drain metadata only, never accept content after the stop.
@@ -630,7 +635,13 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
     if (!reason) yield { type: 'message_delta', delta: { stop_reason: executableTools ? 'tool_use' : 'end_turn', stop_sequence: null } };
     yield { type: 'message_stop' };
   } catch (e) {
-    if (e.kind || e.code || e.name === 'AbortError') throw e;
+    if (options?.signal?.aborted || e?.kind === 'client_gone' || e.name === 'AbortError') {
+      const clientErr = Object.assign(new Error('client disconnected'), {
+        name: 'AbortError', kind: 'client_gone', status: 499,
+      });
+      throw clientErr;
+    }
+    if (e.kind || e.code) throw e;
     const interrupted = bad('transport interrupted');
     interrupted.code = 'UPSTREAM_TRANSPORT_INTERRUPTED';
     interrupted.transportCause = e?.code || e?.message || 'unknown';

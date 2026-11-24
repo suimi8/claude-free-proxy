@@ -46,6 +46,9 @@ import {
   attachStreamRecovery,
 } from '../src/completion-engine.mjs';
 
+import { heartbeat } from '../src/chat-protocol.mjs';
+import { validatedEvents } from '../src/upstream-events.mjs';
+
 // ============================================================================
 // 1. 凭据加解密与安全保险库测试
 // ============================================================================
@@ -380,4 +383,145 @@ test('completion-engine: 非流式调用 (!stream) 中途断连全量缓冲并�
   assert.equal(callCount, 1, '非流式中途崩溃应无感重试并调用 runCompletion 1 次');
   assert.ok(events.some(e => e.delta?.text === 'complete non-stream text'));
   assert.equal(events.some(e => e.delta?.text === 'partial...'), false, '脏数据不应漏出给下游');
+});
+
+// ============================================================================
+// 5. 客户端心跳保活与客户端断连精准识别测试（解决 idle timeout waiting for SSE）
+// ============================================================================
+test('heartbeat: 针对 OpenAI/Anthropic/Responses 协议精准发送保活帧，防止客户端 idle timeout', async () => {
+  // 1. OpenAI 模式：应同时输出 : keep-alive 和空增量 data 帧
+  const writtenOpenAI = [];
+  const fakeResOai = {
+    destroyed: false,
+    writableEnded: false,
+    write(chunk) { writtenOpenAI.push(chunk); return true; },
+  };
+  const stopOai = heartbeat(fakeResOai, 'openai', { chatId: 'chat_test_1', model: 'sonnet', intervalMs: 20 });
+  await new Promise(r => setTimeout(r, 60));
+  stopOai();
+  assert.ok(writtenOpenAI.length >= 1, 'OpenAI heartbeat 应触发');
+  const oaiMsg = writtenOpenAI.join('');
+  assert.ok(oaiMsg.includes(': keep-alive'), '应包含注释保持中间代理连通');
+  assert.ok(oaiMsg.includes('data: {"id":"chat_test_1"'), '应包含合法 data 帧以重置客户端 idle 计时器');
+  assert.ok(oaiMsg.includes('"choices":[{"index":0,"delta":{}}]'), '应为不污染文本的合法空 delta 帧');
+
+  // 2. Anthropic / Responses 模式：应输出 event: ping
+  const writtenAnt = [];
+  const fakeResAnt = {
+    destroyed: false,
+    writableEnded: false,
+    write(chunk) { writtenAnt.push(chunk); return true; },
+  };
+  const stopAnt = heartbeat(fakeResAnt, 'anthropic', { intervalMs: 20 });
+  await new Promise(r => setTimeout(r, 60));
+  stopAnt();
+  const antMsg = writtenAnt.join('');
+  assert.ok(antMsg.includes('event: ping'));
+  assert.ok(antMsg.includes('data: {"type": "ping"}') || antMsg.includes('data: {"type":"ping"}'));
+
+  // 3. 活跃数据抑制特性：当近期已有正文输出，心跳应静默不打扰
+  const writtenActive = [];
+  const fakeResActive = {
+    destroyed: false,
+    writableEnded: false,
+    write(chunk) { writtenActive.push(chunk); return true; },
+  };
+  const stopActive = heartbeat(fakeResActive, 'openai', { intervalMs: 30 });
+  writtenActive.length = 0; // 重置初始握手包
+  // 持续标记正文活动
+  const keepAliveActive = setInterval(() => { fakeResActive._markSseActivity?.(); }, 10);
+  await new Promise(r => setTimeout(r, 70));
+  clearInterval(keepAliveActive);
+  stopActive();
+  assert.equal(writtenActive.length, 0, '正文频繁输出时应抑制冗余心跳包');
+});
+
+test('completion-engine: attachStreamRecovery 即时下发 ping 事件给下游，不造成提交锁死', async () => {
+  let callCount = 0;
+  // 模拟上游首字前下发了 ping 心跳事件，之后抛出断连
+  const streamWithPing = {
+    account: { id: 'acc_ping_1', label: 'Ping Account 1' },
+    stream: new ReadableStream({
+      async start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: ping\ndata: {"type":"ping"}\n\n'));
+        await new Promise(r => setTimeout(r, 10));
+        controller.enqueue(new TextEncoder().encode('event: message_start\ndata: {"type":"message_start","message":{"id":"msg_p"}}\n\n'));
+        await new Promise(r => setTimeout(r, 10));
+        const err = Object.assign(new Error('upstream connection reset'), {
+          code: 'UPSTREAM_TRANSPORT_INTERRUPTED',
+          kind: 'upstream_stream',
+        });
+        controller.error(err);
+      },
+    }),
+    release: () => {},
+  };
+
+  const recoveredRun = {
+    account: { id: 'acc_ping_2', label: 'Ping Account 2' },
+    stream: new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: message_start\ndata: {"type":"message_start","message":{"id":"msg_p2"}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"recovered after ping"}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'));
+        controller.close();
+      },
+    }),
+    release: () => {},
+  };
+
+  const mockEngine = {
+    pool: {
+      eligible: () => [{ id: 'acc_ping_2', label: 'Ping Account 2' }],
+    },
+    runCompletion: async () => {
+      callCount++;
+      return recoveredRun;
+    },
+  };
+
+  const wrapped = attachStreamRecovery(streamWithPing, { stream: true }, 'claude-sonnet-5-5', null, {}, {}, {
+    engine: mockEngine,
+    pool: mockEngine.pool,
+  });
+
+  const events = [];
+  for await (const ev of wrapped.events()) {
+    events.push(ev);
+  }
+
+  // ping 事件应直接下发给下游（保证客户端不断连）
+  assert.ok(events.some(e => e.type === 'ping'), 'ping 事件应及时下发给下游');
+  // 并且 ping 事件不应导致 committed=true，故障后应成功重试
+  assert.equal(callCount, 1, '下发 ping 后遭遇故障仍应成功故障转移重试 1 次');
+  assert.ok(events.some(e => e.delta?.text === 'recovered after ping'));
+});
+
+test('upstream-events: 客户端提前断开连接准确识别为 client_gone (499)，杜绝误判 transport interrupted', async () => {
+  const abortCtrl = new AbortController();
+  const feed = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('data: {"type":"ping"}\n\n'));
+      // 客户端中断
+      abortCtrl.abort();
+      controller.error(new Error('Premature close'));
+    },
+  });
+
+  let thrown = null;
+  try {
+    for await (const ev of validatedEvents(feed, [], { signal: abortCtrl.signal })) {
+      // 消费
+    }
+  } catch (err) {
+    thrown = err;
+  }
+
+  assert.ok(thrown, '应捕获异常');
+  assert.equal(thrown.name, 'AbortError', '客户端断开应抛出 AbortError');
+  assert.equal(thrown.kind, 'client_gone', '错误分类应为 client_gone');
+  assert.equal(thrown.status, 499, '状态码应映射为 499 (Client Closed Request)');
+  assert.notEqual(thrown.code, 'UPSTREAM_TRANSPORT_INTERRUPTED', '绝不应误判为上游传输中断');
 });

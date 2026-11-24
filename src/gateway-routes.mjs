@@ -1415,7 +1415,7 @@ export async function handleInference(req, res, url, body = null, ctx = null, co
         });
         res.flushHeaders?.();
         const heartbeatFn = chatProtocol.heartbeat || srv.heartbeat;
-        stopHeartbeat = heartbeatFn ? heartbeatFn(res) : null;
+        stopHeartbeat = heartbeatFn ? heartbeatFn(res, 'responses') : null;
       }
       const sendResponsesResultFn = responseAdapter.sendResponsesResult || srv.sendResponsesResult;
       return await sendResponsesResultFn(res, run, model, id, rb, chat.messages, req.keyScope);
@@ -1488,9 +1488,12 @@ export async function handleInference(req, res, url, body = null, ctx = null, co
         });
         res.flushHeaders?.();
 
-        const send = o => res.write(`event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`);
+        const send = o => {
+          res?._markSseActivity?.();
+          return res.write(`event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`);
+        };
         const heartbeatFn = chatProtocol.heartbeat || srv.heartbeat;
-        const stopHeartbeat = heartbeatFn ? heartbeatFn(res, true) : () => {};
+        const stopHeartbeat = heartbeatFn ? heartbeatFn(res, 'anthropic') : () => {};
         const summaryBlocks = new Set();
         let hasNativeTool = false;
         let textBlockIndex = -1;

@@ -146,7 +146,7 @@ export function buildUpstreamBody(body, model, { pool = null, tz = null } = {}) 
 /**
  * 收集来自上游校验事件的时间线与用量信息，并生成规范化流事件
  */
-export async function* normalizeSse(stream, acct, ctx, pool = null) {
+export async function* normalizeSse(stream, acct, ctx, pool = null, options = {}) {
   let textStr = '';
   let thinkStr = '';
   let jsonStr = '';
@@ -165,7 +165,7 @@ export async function* normalizeSse(stream, acct, ctx, pool = null) {
   let lastTextAt = null;
 
   try {
-    for await (let ev of validatedEvents(stream, ctx?._tools)) {
+    for await (let ev of validatedEvents(stream, ctx?._tools, options)) {
       ctx?._turn?.observe(ev);
       if (ev.type === 'message_limit' && acct && pool) {
         pool.updateQuota(acct, ev.message_limit);
@@ -342,7 +342,12 @@ export function attachStreamRecovery(run, body, model, signal, req, ctx, deps = 
       let pendingBytes = 0;
       for (;;) {
         try {
-          for await (const event of normalizeSse(current.stream, current.account, ctx, pool)) {
+          for await (const event of normalizeSse(current.stream, current.account, ctx, pool, { signal })) {
+            // ping 事件属于保活心跳包，不携带实质回答内容，优先下发给下游以重置客户端 SSE idle 计时器
+            if (event.type === 'ping') {
+              yield event;
+              continue;
+            }
             // 流式模式下产生首个可见输出才提交并开始向下游下发；非流式模式下全量缓冲保障整段重试自愈能力
             if (isStream && !committed && hasGeneratedOutput(event)) {
               for (const buffered of pending) yield buffered;
@@ -657,8 +662,8 @@ export class CompletionEngine {
     return buildUpstreamBody(body, model, { pool: this.pool, tz: this.tz });
   }
 
-  normalizeSse(stream, acct, ctx) {
-    return normalizeSse(stream, acct, ctx, this.pool);
+  normalizeSse(stream, acct, ctx, options = {}) {
+    return normalizeSse(stream, acct, ctx, this.pool, options);
   }
 
   completionErrorStatus(e) {
