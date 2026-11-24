@@ -775,14 +775,19 @@ export function extractPseudoToolCalls(fullText) {
   const toolCalls = [];
   let firstCallIdx = fullText.length;
 
-  // 1. 匹配 XML <function_calls> 或 <invoke name="..."> 或 <function_call name="...">
-  // 容错：允许末尾省略 </invoke> 或 </function_calls>（LLM 生成截断或未闭合）
-  const xmlInvokeStartRegex = /<(?:invoke|function_call)\s+name=["']?([a-zA-Z0-9_\-\.]+)["']?\s*>/gi;
+  // 1. 匹配 XML <function_calls> 或 <invoke name="..."> 或 <function_call name="..."> 或 <function name="...">
+  // 容错：允许任意属性顺序、类型声明以及末尾省略 </invoke> 或 </function_calls>（LLM 生成截断或未闭合）
+  const xmlInvokeStartRegex = /<(?:invoke|function_call|function)\b([^>]*?)>/gi;
   const invokeMatches = [];
   let m;
   while ((m = xmlInvokeStartRegex.exec(fullText)) !== null) {
+    const attrs = m[1];
+    const nameMatch = /\bname=["']?([a-zA-Z0-9_\-\.]+)["']?/i.exec(attrs);
+    if (!nameMatch) continue;
+    const idMatch = /\bid=["']?([a-zA-Z0-9_\-\.]+)["']?/i.exec(attrs);
     invokeMatches.push({
-      name: m[1],
+      name: nameMatch[1],
+      id: idMatch ? idMatch[1] : undefined,
       startIndex: m.index,
       bodyStart: m.index + m[0].length,
     });
@@ -793,18 +798,21 @@ export function extractPseudoToolCalls(fullText) {
     const nextStart = (i + 1 < invokeMatches.length) ? invokeMatches[i + 1].startIndex : fullText.length;
     let slice = fullText.slice(cur.bodyStart, nextStart);
 
-    // 检查是否有闭合标签 </invoke> 或 </function_call> 或 </function_calls>
-    const closeMatch = /<\/(?:invoke|function_call|function_calls)>/i.exec(slice);
+    // 检查是否有闭合标签 </invoke> 或 </function_call> 或 </function> 或 </function_calls>
+    const closeMatch = /<\/(?:invoke|function_call|function|function_calls)>/i.exec(slice);
     const body = closeMatch ? slice.slice(0, closeMatch.index) : slice;
 
     const args = {};
-    // 支持闭合的 <parameter ...>...</parameter>，以及末尾未闭合的 <parameter ...>...
-    const paramRegex = /<parameter\s+name=["']?([a-zA-Z0-9_\-\.]+)["']?(?:\s*\/>|\s*>([\s\S]*?)(?:<\/parameter>|(?=<parameter\s+name=)|$))/gi;
+    // 支持闭合的 <parameter ...>...</parameter> / <param ...> / <arg ...>，以及末尾未闭合的参数标签
+    const paramRegex = /<(?:parameter|param|arg)\b([^>]*?)(?:\/>|>([\s\S]*?)(?:<\/(?:parameter|param|arg)>|(?=<(?:parameter|param|arg)\b)|$))/gi;
     let paramMatch;
     let hasParams = false;
     while ((paramMatch = paramRegex.exec(body)) !== null) {
+      const pAttrs = paramMatch[1];
+      const pNameMatch = /\bname=["']?([a-zA-Z0-9_\-\.]+)["']?/i.exec(pAttrs);
+      if (!pNameMatch) continue;
       hasParams = true;
-      const pName = paramMatch[1];
+      const pName = pNameMatch[1];
       let pVal = paramMatch[2] !== undefined ? unescapeXml(paramMatch[2].trim()) : '';
       try {
         const parsed = JSON.parse(pVal);
@@ -834,7 +842,7 @@ export function extractPseudoToolCalls(fullText) {
     if (effectiveStart < firstCallIdx) firstCallIdx = effectiveStart;
 
     toolCalls.push({
-      id: 'call_' + randomUUID().replace(/-/g, '').slice(0, 9),
+      id: cur.id || ('call_' + randomUUID().replace(/-/g, '').slice(0, 9)),
       type: 'function',
       function: {
         name: cur.name,
@@ -910,7 +918,7 @@ export function extractPseudoToolCalls(fullText) {
 
 export function findToolCallTrigger(text) {
   if (!text || typeof text !== 'string') return -1;
-  const match = /(?:\[TOOL_CALL|<function_calls|<(?:invoke|function_call)\s+name\s*=)/i.exec(text);
+  const match = /(?:\[TOOL_CALL|<function_calls|<(?:invoke|function_call|function)\b)/i.exec(text);
   return match ? match.index : -1;
 }
 
@@ -1565,6 +1573,93 @@ async function sendResponsesResult(res, run, model, id, rb, baseMessages, owner)
   let text = '';
   let stop = null;
   let lastItem = null;
+  let sentTextLength = 0;
+  let pseudoToolMode = false;
+  let finishedToolEmitted = false;
+  const SAFE_WINDOW = 25;
+
+  const ensureMsgRef = () => {
+    if (!msgRef) {
+      const item = { type: 'message', id: newItemId('msg'), status: 'in_progress', role: 'assistant', content: [] };
+      const index = items.length;
+      items.push(item);
+      msgRef = { item, index };
+      lastItem = item;
+      send?.('response.output_item.added', { output_index: index, item: { ...item, content: [] } });
+      send?.('response.content_part.added', {
+        item_id: item.id, output_index: index, content_index: 0,
+        part: { type: 'output_text', text: '', annotations: [] },
+      });
+    }
+  };
+
+  const flushFallbackToolsIfNeeded = () => {
+    if (slot.size > 0 || finishedToolEmitted) return;
+    if (pseudoToolMode || findToolCallTrigger(text) !== -1) {
+      const extracted = extractPseudoToolCalls(text);
+      if (extracted.toolCalls.length > 0) {
+        console.log(`[tool_fallback] (Responses API) 拦截到模型正文输出伪工具/XML指令，已自动转换为 ${extracted.toolCalls.length} 个原生 function_call`);
+        // 1. 如果有未发送的前置干净文本，补发
+        if (extracted.cleanText.length > sentTextLength) {
+          ensureMsgRef();
+          send?.('response.output_text.delta', {
+            item_id: msgRef.item.id, output_index: msgRef.index, content_index: 0,
+            delta: extracted.cleanText.slice(sentTextLength), logprobs: [],
+          });
+          sentTextLength = extracted.cleanText.length;
+        }
+        // 2. 如果存在 msgRef，完成该 message item
+        if (msgRef) {
+          const part = { type: 'output_text', text: extracted.cleanText, annotations: [] };
+          msgRef.item.content = [part];
+          msgRef.item.status = 'completed';
+          const ref = { item_id: msgRef.item.id, output_index: msgRef.index };
+          send?.('response.output_text.done', { ...ref, content_index: 0, text: extracted.cleanText, logprobs: [] });
+          send?.('response.content_part.done', { ...ref, content_index: 0, part });
+          send?.('response.output_item.done', { output_index: msgRef.index, item: msgRef.item });
+        }
+        // 3. 逐个下发转换后的 function_call
+        for (let i = 0; i < extracted.toolCalls.length; i++) {
+          const tc = extracted.toolCalls[i];
+          const item = {
+            type: 'function_call',
+            id: newItemId('fc'),
+            call_id: tc.id || newItemId('call'),
+            name: tc.function.name,
+            arguments: tc.function.arguments || '{}',
+            status: 'completed',
+          };
+          const index = items.length;
+          items.push(item);
+          slot.set(`fallback_${i}`, { item, index });
+          lastItem = item;
+          send?.('response.output_item.added', { output_index: index, item: { ...item, status: 'in_progress', arguments: '' } });
+          send?.('response.function_call_arguments.delta', {
+            item_id: item.id, output_index: index,
+            delta: item.arguments,
+          });
+          send?.('response.function_call_arguments.done', {
+            item_id: item.id, output_index: index,
+            arguments: item.arguments,
+          });
+          send?.('response.output_item.done', { output_index: index, item });
+        }
+        finishedToolEmitted = true;
+        stop = 'tool_use';
+        text = extracted.cleanText;
+        return;
+      }
+    }
+    // 未发现伪工具，将缓冲区剩余文本补发
+    if (text.length > sentTextLength) {
+      ensureMsgRef();
+      send?.('response.output_text.delta', {
+        item_id: msgRef.item.id, output_index: msgRef.index, content_index: 0,
+        delta: text.slice(sentTextLength), logprobs: [],
+      });
+      sentTextLength = text.length;
+    }
+  };
 
   try {
     for await (const ev of run.events()) {
@@ -1583,6 +1678,14 @@ async function sendResponsesResult(res, run, model, id, rb, baseMessages, owner)
               item_id: item.id, output_index: index, summary_index: 0, part: item.summary[0],
             });
           } else if (cb.type === 'tool_use') {
+            if (text.length > sentTextLength) {
+              ensureMsgRef();
+              send?.('response.output_text.delta', {
+                item_id: msgRef.item.id, output_index: msgRef.index, content_index: 0,
+                delta: text.slice(sentTextLength), logprobs: [],
+              });
+              sentTextLength = text.length;
+            }
             const item = {
               type: 'function_call', id: newItemId('fc'),
               call_id: cb.id || newItemId('call'), name: cb.name || 'unknown',
@@ -1599,23 +1702,42 @@ async function sendResponsesResult(res, run, model, id, rb, baseMessages, owner)
         case 'content_block_delta': {
           const d = ev.delta || {};
           if (d.type === 'text_delta' && d.text) {
-            if (!msgRef) {
-              const item = { type: 'message', id: newItemId('msg'), status: 'in_progress', role: 'assistant', content: [] };
-              const index = items.length;
-              items.push(item);
-              msgRef = { item, index };
-              send?.('response.output_item.added', { output_index: index, item: { ...item, content: [] } });
-              send?.('response.content_part.added', {
-                item_id: item.id, output_index: index, content_index: 0,
-                part: { type: 'output_text', text: '', annotations: [] },
-              });
-            }
-            lastItem = msgRef.item;
             text += d.text;
-            send?.('response.output_text.delta', {
-              item_id: msgRef.item.id, output_index: msgRef.index, content_index: 0,
-              delta: d.text, logprobs: [],
-            });
+            if (slot.size === 0) {
+              if (pseudoToolMode) {
+                // 处于伪工具拦截状态，静默缓冲，不向客户端发 content
+              } else {
+                const toolIdx = findToolCallTrigger(text);
+                if (toolIdx !== -1) {
+                  pseudoToolMode = true;
+                  if (toolIdx > sentTextLength) {
+                    ensureMsgRef();
+                    send?.('response.output_text.delta', {
+                      item_id: msgRef.item.id, output_index: msgRef.index, content_index: 0,
+                      delta: text.slice(sentTextLength, toolIdx), logprobs: [],
+                    });
+                    sentTextLength = toolIdx;
+                  }
+                } else {
+                  const safeLen = Math.max(0, text.length - SAFE_WINDOW);
+                  if (safeLen > sentTextLength) {
+                    ensureMsgRef();
+                    send?.('response.output_text.delta', {
+                      item_id: msgRef.item.id, output_index: msgRef.index, content_index: 0,
+                      delta: text.slice(sentTextLength, safeLen), logprobs: [],
+                    });
+                    sentTextLength = safeLen;
+                  }
+                }
+              }
+            } else {
+              ensureMsgRef();
+              send?.('response.output_text.delta', {
+                item_id: msgRef.item.id, output_index: msgRef.index, content_index: 0,
+                delta: d.text, logprobs: [],
+              });
+              sentTextLength = text.length;
+            }
           } else if (d.type === 'thinking_summary_delta' || d.type === 'thinking_delta') {
             const s = d.type === 'thinking_delta' ? (d.thinking || '') : (d.summary?.summary || '');
             const rs = rsSlot.get(ev.index);
@@ -1641,6 +1763,7 @@ async function sendResponsesResult(res, run, model, id, rb, baseMessages, owner)
           break;
         }
         case 'message_delta':
+          flushFallbackToolsIfNeeded();
           if (ev.delta?.stop_reason) stop = ev.delta.stop_reason;
           break;
         case 'error':
@@ -1648,6 +1771,7 @@ async function sendResponsesResult(res, run, model, id, rb, baseMessages, owner)
         default: break;
       }
     }
+    flushFallbackToolsIfNeeded();
   } catch (e) {
     if (res.destroyed || e.name === 'AbortError' || !send) throw e;
     run.release(false, e.message);
@@ -1659,6 +1783,9 @@ async function sendResponsesResult(res, run, model, id, rb, baseMessages, owner)
 
   const status = responseStatus(stop);
   for (const [index, item] of items.entries()) {
+    if (finishedToolEmitted && item.status === 'completed') {
+      continue;
+    }
     item.status = item === lastItem ? status : 'completed';
     const ref = { item_id: item.id, output_index: index };
     if (item.type === 'reasoning') {
@@ -3276,25 +3403,198 @@ async function handleRequest(req, res) {
           const send = o => res.write(`event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`);
           const stopHeartbeat = heartbeat(res, true);
           const summaryBlocks = new Set();
+          let hasNativeTool = false;
+          let textBlockIndex = -1;
+          let textBlockStarted = false;
+          let textBlockClosed = false;
+          let accumulatedText = '';
+          let sentTextLength = 0;
+          let pseudoToolMode = false;
+          let fallbackToolsEmitted = false;
+          let nextBlockIndex = 0;
+          const SAFE_WINDOW = 25;
+
+          const flushAnthropicFallback = () => {
+            if (hasNativeTool || fallbackToolsEmitted) return;
+            if (pseudoToolMode || findToolCallTrigger(accumulatedText) !== -1) {
+              const extracted = extractPseudoToolCalls(accumulatedText);
+              if (extracted.toolCalls.length > 0) {
+                console.log(`[tool_fallback] (Messages SSE) 拦截到模型输出伪工具/XML指令，已自动转换为 ${extracted.toolCalls.length} 个原生 tool_use 块`);
+                // 1. 如果有未发送的干净前置文本
+                if (extracted.cleanText.length > sentTextLength) {
+                  const chunk = extracted.cleanText.slice(sentTextLength);
+                  if (!textBlockStarted && textBlockIndex !== -1) {
+                    send({ type: 'content_block_start', index: textBlockIndex, content_block: { type: 'text', text: '' } });
+                    textBlockStarted = true;
+                  }
+                  if (textBlockStarted) {
+                    send({ type: 'content_block_delta', index: textBlockIndex, delta: { type: 'text_delta', text: chunk } });
+                  }
+                  sentTextLength = extracted.cleanText.length;
+                }
+                // 2. 如果开启了 text 块，关闭它
+                if (textBlockStarted && !textBlockClosed) {
+                  send({ type: 'content_block_stop', index: textBlockIndex });
+                  textBlockClosed = true;
+                }
+                // 3. 下发每个 tool_use 块
+                for (const tc of extracted.toolCalls) {
+                  const bIdx = nextBlockIndex++;
+                  send({
+                    type: 'content_block_start',
+                    index: bIdx,
+                    content_block: {
+                      type: 'tool_use',
+                      id: tc.id,
+                      name: tc.function.name,
+                      input: {},
+                    }
+                  });
+                  send({
+                    type: 'content_block_delta',
+                    index: bIdx,
+                    delta: {
+                      type: 'input_json_delta',
+                      partial_json: tc.function.arguments,
+                    }
+                  });
+                  send({ type: 'content_block_stop', index: bIdx });
+                }
+                fallbackToolsEmitted = true;
+                return;
+              }
+            }
+            // 没有提取到伪工具，下发剩余文本
+            if (accumulatedText.length > sentTextLength) {
+              const chunk = accumulatedText.slice(sentTextLength);
+              if (!textBlockStarted && textBlockIndex !== -1) {
+                send({ type: 'content_block_start', index: textBlockIndex, content_block: { type: 'text', text: '' } });
+                textBlockStarted = true;
+              }
+              if (textBlockStarted) {
+                send({ type: 'content_block_delta', index: textBlockIndex, delta: { type: 'text_delta', text: chunk } });
+              }
+              sentTextLength = accumulatedText.length;
+            }
+            if (textBlockStarted && !textBlockClosed) {
+              send({ type: 'content_block_stop', index: textBlockIndex });
+              textBlockClosed = true;
+            }
+          };
+
           try {
-            for await (const ev of run.events()) {
+            for await (let ev of run.events()) {
               if (ev.type === 'ping') {
                 send({ type: 'ping' });
                 continue;
               }
-              // 上游思考只回摘要（thinking_summary_delta 不是 Anthropic 标准事件，
-              // 客户端 SDK 会丢弃）→ 转成标准 thinking_delta 下发，SDK 才能展示思考过程
-              if (ev.type === 'content_block_delta' && ev.delta?.type === 'thinking_summary_delta') {
-                const s = ev.delta.summary?.summary || '';
-                if (s) {
-                  send({ type: 'content_block_delta', index: ev.index,
-                    delta: { type: 'thinking_delta', thinking: (summaryBlocks.has(ev.index) ? '\n' : '') + s } });
-                  summaryBlocks.add(ev.index);
+              if (ev.type === 'message_start') {
+                send(ev);
+                continue;
+              }
+              if (ev.type === 'content_block_start') {
+                nextBlockIndex = Math.max(nextBlockIndex, ((ev.index ?? 0) + 1));
+                const cb = ev.content_block || {};
+                if (cb.type === 'tool_use') {
+                  hasNativeTool = true;
+                  send(ev);
+                  continue;
                 }
+                if (cb.type === 'text') {
+                  textBlockIndex = ev.index;
+                  // 暂不立即下发 content_block_start，等有真实干净文本时再下发
+                  continue;
+                }
+                send(ev);
+                continue;
+              }
+              if (ev.type === 'content_block_delta') {
+                const d = ev.delta || {};
+                // 上游思考只回摘要（thinking_summary_delta 不是 Anthropic 标准事件，
+                // 客户端 SDK 会丢弃）→ 转成标准 thinking_delta 下发，SDK 才能展示思考过程
+                if (d.type === 'thinking_summary_delta' || d.type === 'thinking_delta') {
+                  const s = d.type === 'thinking_delta' ? (d.thinking || '') : (d.summary?.summary || '');
+                  if (s) {
+                    send({
+                      type: 'content_block_delta', index: ev.index,
+                      delta: { type: 'thinking_delta', thinking: (summaryBlocks.has(ev.index) ? '\n' : '') + s }
+                    });
+                    summaryBlocks.add(ev.index);
+                  }
+                  continue;
+                }
+                if (d.type === 'input_json_delta') {
+                  hasNativeTool = true;
+                  send(ev);
+                  continue;
+                }
+                if (d.type === 'text_delta') {
+                  if (hasNativeTool) {
+                    send(ev);
+                    continue;
+                  }
+                  accumulatedText += (d.text || '');
+                  if (pseudoToolMode) {
+                    // 缓冲中，不向客户端发 delta
+                  } else {
+                    const toolIdx = findToolCallTrigger(accumulatedText);
+                    if (toolIdx !== -1) {
+                      pseudoToolMode = true;
+                      if (toolIdx > sentTextLength) {
+                        const chunk = accumulatedText.slice(sentTextLength, toolIdx);
+                        if (!textBlockStarted && textBlockIndex !== -1) {
+                          send({ type: 'content_block_start', index: textBlockIndex, content_block: { type: 'text', text: '' } });
+                          textBlockStarted = true;
+                        }
+                        if (textBlockStarted) {
+                          send({ type: 'content_block_delta', index: textBlockIndex, delta: { type: 'text_delta', text: chunk } });
+                        }
+                        sentTextLength = toolIdx;
+                      }
+                    } else {
+                      const safeLen = Math.max(0, accumulatedText.length - SAFE_WINDOW);
+                      if (safeLen > sentTextLength) {
+                        const chunk = accumulatedText.slice(sentTextLength, safeLen);
+                        if (!textBlockStarted && textBlockIndex !== -1) {
+                          send({ type: 'content_block_start', index: textBlockIndex, content_block: { type: 'text', text: '' } });
+                          textBlockStarted = true;
+                        }
+                        if (textBlockStarted) {
+                          send({ type: 'content_block_delta', index: textBlockIndex, delta: { type: 'text_delta', text: chunk } });
+                        }
+                        sentTextLength = safeLen;
+                      }
+                    }
+                  }
+                  continue;
+                }
+                send(ev);
+                continue;
+              }
+              if (ev.type === 'content_block_stop') {
+                if (ev.index === textBlockIndex && !hasNativeTool) {
+                  // 拦截 text 块的 stop，留给 flush 处理
+                  continue;
+                }
+                send(ev);
+                continue;
+              }
+              if (ev.type === 'message_delta') {
+                flushAnthropicFallback();
+                if (fallbackToolsEmitted) {
+                  ev = { ...ev, delta: { ...ev.delta, stop_reason: 'tool_use' } };
+                }
+                send(ev);
+                continue;
+              }
+              if (ev.type === 'message_stop') {
+                flushAnthropicFallback();
+                send(ev);
                 continue;
               }
               send(ev);
             }
+            flushAnthropicFallback();
           } catch(e) {
             run.release(false,e.message);
             if (!res.destroyed) send({type:'error',error:{type:'api_error',message:e.message}});
@@ -3314,7 +3614,12 @@ async function handleRequest(req, res) {
         }
         if (result.text) content.push({ type: 'text', text: result.text });
         for (const tc of result.toolCalls) {
-          const input = JSON.parse(tc.function.arguments);
+          let input = {};
+          try {
+            input = JSON.parse(tc.function.arguments);
+          } catch {
+            input = { input: tc.function.arguments };
+          }
           content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input });
         }
         return json(res, 200, {

@@ -363,3 +363,347 @@ test('streaming simulation with intercepted unclosed XML tool call', async () =>
   const lastChunk = emitted[emitted.length - 1];
   assert.equal(lastChunk.finish_reason, 'tool_calls');
 });
+
+test('extract XML function calls with exec_command and unclosed tag (user case)', () => {
+  const input = `<function_calls>
+<invoke name="exec_command">
+<parameter name="cmd">[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$root = (Get-Location).Path
+Get-ChildItem -Recurse -File -Include .py,.sh,.md,.txt,.toml,.yml,*.json |
+Where-Object { $.FullName -notmatch 'pycache' } |
+Select-String -Pattern 'pwsh|powershell|.ps1' -Encoding UTF8 |
+ForEach-Object { '{0}:{1}: {2}' -f $.Path.Substring($root.Length + 1), $_.LineNumber, (($_.Line.Trim()) -replace '\\s+', ' ') } |
+Select-Object -First 80</parameter>
+<parameter name="workdir">D:\\Desktop\\Agent-Reach-main</parameter>
+<parameter name="max_output_tokens">6000</parameter>`;
+
+  const res = extractPseudoToolCalls(input);
+  assert.equal(res.cleanText, '');
+  assert.equal(res.toolCalls.length, 1);
+  assert.equal(res.toolCalls[0].function.name, 'exec_command');
+  const args = JSON.parse(res.toolCalls[0].function.arguments);
+  assert.ok(args.cmd.includes('[Console]::OutputEncoding'));
+  assert.equal(args.workdir, 'D:\\Desktop\\Agent-Reach-main');
+  assert.equal(args.max_output_tokens, 6000);
+});
+
+test('extract XML function calls with <function> and <param> / <arg> tags and attributes', () => {
+  const input = `<function_calls>
+<function name="web_search" id="call_custom_99">
+<arg name="query">Anthropic Claude</arg>
+<param name="max_results">5</param>
+</function>
+</function_calls>`;
+  const res = extractPseudoToolCalls(input);
+  assert.equal(res.toolCalls.length, 1);
+  assert.equal(res.toolCalls[0].function.name, 'web_search');
+  assert.equal(res.toolCalls[0].id, 'call_custom_99');
+  const args = JSON.parse(res.toolCalls[0].function.arguments);
+  assert.equal(args.query, 'Anthropic Claude');
+  assert.equal(args.max_results, 5);
+});
+
+test('Responses API streaming simulation with intercepted XML tool call', () => {
+  const chunks = [
+    '<function_calls>\n<invoke name="exec_command">\n',
+    '<parameter name="cmd">[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\nGet-Process</parameter>\n',
+    '<parameter name="workdir">D:\\Desktop\\Agent-Reach-main</parameter>\n',
+    '<parameter name="max_output_tokens">6000</parameter>'
+  ];
+
+  const events = [];
+  const send = (type, payload) => events.push({ type, payload });
+
+  const items = [];
+  const slot = new Map();
+  let msgRef = null;
+  let text = '';
+  let stop = null;
+  let lastItem = null;
+  let sentTextLength = 0;
+  let pseudoToolMode = false;
+  let finishedToolEmitted = false;
+  const SAFE_WINDOW = 25;
+
+  const ensureMsgRef = () => {
+    if (!msgRef) {
+      const item = { type: 'message', id: 'msg_1', status: 'in_progress', role: 'assistant', content: [] };
+      const index = items.length;
+      items.push(item);
+      msgRef = { item, index };
+      lastItem = item;
+      send('response.output_item.added', { output_index: index, item: { ...item, content: [] } });
+      send('response.content_part.added', {
+        item_id: item.id, output_index: index, content_index: 0,
+        part: { type: 'output_text', text: '', annotations: [] },
+      });
+    }
+  };
+
+  const flushFallbackToolsIfNeeded = () => {
+    if (slot.size > 0 || finishedToolEmitted) return;
+    if (pseudoToolMode || findToolCallTrigger(text) !== -1) {
+      const extracted = extractPseudoToolCalls(text);
+      if (extracted.toolCalls.length > 0) {
+        if (extracted.cleanText.length > sentTextLength) {
+          ensureMsgRef();
+          send('response.output_text.delta', {
+            item_id: msgRef.item.id, output_index: msgRef.index, content_index: 0,
+            delta: extracted.cleanText.slice(sentTextLength), logprobs: [],
+          });
+          sentTextLength = extracted.cleanText.length;
+        }
+        if (msgRef) {
+          const part = { type: 'output_text', text: extracted.cleanText, annotations: [] };
+          msgRef.item.content = [part];
+          msgRef.item.status = 'completed';
+          const ref = { item_id: msgRef.item.id, output_index: msgRef.index };
+          send('response.output_text.done', { ...ref, content_index: 0, text: extracted.cleanText, logprobs: [] });
+          send('response.content_part.done', { ...ref, content_index: 0, part });
+          send('response.output_item.done', { output_index: msgRef.index, item: msgRef.item });
+        }
+        for (let i = 0; i < extracted.toolCalls.length; i++) {
+          const tc = extracted.toolCalls[i];
+          const item = {
+            type: 'function_call',
+            id: 'fc_1',
+            call_id: tc.id || 'call_1',
+            name: tc.function.name,
+            arguments: tc.function.arguments || '{}',
+            status: 'completed',
+          };
+          const index = items.length;
+          items.push(item);
+          slot.set(`fallback_${i}`, { item, index });
+          lastItem = item;
+          send('response.output_item.added', { output_index: index, item: { ...item, status: 'in_progress', arguments: '' } });
+          send('response.function_call_arguments.delta', {
+            item_id: item.id, output_index: index,
+            delta: item.arguments,
+          });
+          send('response.function_call_arguments.done', {
+            item_id: item.id, output_index: index,
+            arguments: item.arguments,
+          });
+          send('response.output_item.done', { output_index: index, item });
+        }
+        finishedToolEmitted = true;
+        stop = 'tool_use';
+        text = extracted.cleanText;
+        return;
+      }
+    }
+    if (text.length > sentTextLength) {
+      ensureMsgRef();
+      send('response.output_text.delta', {
+        item_id: msgRef.item.id, output_index: msgRef.index, content_index: 0,
+        delta: text.slice(sentTextLength), logprobs: [],
+      });
+      sentTextLength = text.length;
+    }
+  };
+
+  for (const piece of chunks) {
+    text += piece;
+    if (slot.size === 0) {
+      if (pseudoToolMode) {
+        // 处于伪工具拦截状态，静默缓冲
+      } else {
+        const toolIdx = findToolCallTrigger(text);
+        if (toolIdx !== -1) {
+          pseudoToolMode = true;
+          if (toolIdx > sentTextLength) {
+            ensureMsgRef();
+            send('response.output_text.delta', {
+              item_id: msgRef.item.id, output_index: msgRef.index, content_index: 0,
+              delta: text.slice(sentTextLength, toolIdx), logprobs: [],
+            });
+            sentTextLength = toolIdx;
+          }
+        } else {
+          const safeLen = Math.max(0, text.length - SAFE_WINDOW);
+          if (safeLen > sentTextLength) {
+            ensureMsgRef();
+            send('response.output_text.delta', {
+              item_id: msgRef.item.id, output_index: msgRef.index, content_index: 0,
+              delta: text.slice(sentTextLength, safeLen), logprobs: [],
+            });
+            sentTextLength = safeLen;
+          }
+        }
+      }
+    }
+  }
+
+  flushFallbackToolsIfNeeded();
+
+  // 校验没有文本内容泄露
+  const textDeltas = events.filter(e => e.type === 'response.output_text.delta');
+  assert.equal(textDeltas.length, 0);
+
+  // 校验生成了 function_call output item
+  const itemAdded = events.find(e => e.type === 'response.output_item.added');
+  assert.ok(itemAdded, 'should emit output_item.added');
+  assert.equal(itemAdded.payload.item.type, 'function_call');
+  assert.equal(itemAdded.payload.item.name, 'exec_command');
+
+  // 校验参数正常下发
+  const argsDelta = events.find(e => e.type === 'response.function_call_arguments.delta');
+  assert.ok(argsDelta, 'should emit function_call_arguments.delta');
+  const parsedArgs = JSON.parse(argsDelta.payload.delta);
+  assert.ok(parsedArgs.cmd.includes('[Console]::OutputEncoding'));
+  assert.equal(parsedArgs.workdir, 'D:\\Desktop\\Agent-Reach-main');
+  assert.equal(parsedArgs.max_output_tokens, 6000);
+
+  // 校验 output_item.done
+  const itemDone = events.find(e => e.type === 'response.output_item.done');
+  assert.ok(itemDone);
+  assert.equal(itemDone.payload.item.type, 'function_call');
+  assert.equal(itemDone.payload.item.status, 'completed');
+  assert.equal(stop, 'tool_use');
+});
+
+test('Anthropic Messages SSE streaming simulation with intercepted XML tool call', () => {
+  const chunks = [
+    '<function_calls>\n<invoke name="exec_command">\n',
+    '<parameter name="cmd">dir</parameter>\n',
+    '<parameter name="workdir">D:\\Desktop</parameter>\n',
+    '</invoke>\n</function_calls>'
+  ];
+
+  const events = [];
+  const send = o => events.push(o);
+
+  let hasNativeTool = false;
+  let textBlockIndex = 0;
+  let textBlockStarted = false;
+  let textBlockClosed = false;
+  let accumulatedText = '';
+  let sentTextLength = 0;
+  let pseudoToolMode = false;
+  let fallbackToolsEmitted = false;
+  let nextBlockIndex = 0;
+  const SAFE_WINDOW = 25;
+
+  const flushAnthropicFallback = () => {
+    if (hasNativeTool || fallbackToolsEmitted) return;
+    if (pseudoToolMode || findToolCallTrigger(accumulatedText) !== -1) {
+      const extracted = extractPseudoToolCalls(accumulatedText);
+      if (extracted.toolCalls.length > 0) {
+        if (extracted.cleanText.length > sentTextLength) {
+          const chunk = extracted.cleanText.slice(sentTextLength);
+          if (!textBlockStarted && textBlockIndex !== -1) {
+            send({ type: 'content_block_start', index: textBlockIndex, content_block: { type: 'text', text: '' } });
+            textBlockStarted = true;
+          }
+          if (textBlockStarted) {
+            send({ type: 'content_block_delta', index: textBlockIndex, delta: { type: 'text_delta', text: chunk } });
+          }
+          sentTextLength = extracted.cleanText.length;
+        }
+        if (textBlockStarted && !textBlockClosed) {
+          send({ type: 'content_block_stop', index: textBlockIndex });
+          textBlockClosed = true;
+        }
+        for (const tc of extracted.toolCalls) {
+          const bIdx = nextBlockIndex++;
+          send({
+            type: 'content_block_start',
+            index: bIdx,
+            content_block: {
+              type: 'tool_use',
+              id: tc.id,
+              name: tc.function.name,
+              input: {},
+            }
+          });
+          send({
+            type: 'content_block_delta',
+            index: bIdx,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: tc.function.arguments,
+            }
+          });
+          send({ type: 'content_block_stop', index: bIdx });
+        }
+        fallbackToolsEmitted = true;
+        return;
+      }
+    }
+    if (accumulatedText.length > sentTextLength) {
+      const chunk = accumulatedText.slice(sentTextLength);
+      if (!textBlockStarted && textBlockIndex !== -1) {
+        send({ type: 'content_block_start', index: textBlockIndex, content_block: { type: 'text', text: '' } });
+        textBlockStarted = true;
+      }
+      if (textBlockStarted) {
+        send({ type: 'content_block_delta', index: textBlockIndex, delta: { type: 'text_delta', text: chunk } });
+      }
+      sentTextLength = accumulatedText.length;
+    }
+    if (textBlockStarted && !textBlockClosed) {
+      send({ type: 'content_block_stop', index: textBlockIndex });
+      textBlockClosed = true;
+    }
+  };
+
+  for (const piece of chunks) {
+    accumulatedText += piece;
+    if (pseudoToolMode) {
+      // 缓冲中
+    } else {
+      const toolIdx = findToolCallTrigger(accumulatedText);
+      if (toolIdx !== -1) {
+        pseudoToolMode = true;
+        if (toolIdx > sentTextLength) {
+          const chunk = accumulatedText.slice(sentTextLength, toolIdx);
+          if (!textBlockStarted && textBlockIndex !== -1) {
+            send({ type: 'content_block_start', index: textBlockIndex, content_block: { type: 'text', text: '' } });
+            textBlockStarted = true;
+          }
+          if (textBlockStarted) {
+            send({ type: 'content_block_delta', index: textBlockIndex, delta: { type: 'text_delta', text: chunk } });
+          }
+          sentTextLength = toolIdx;
+        }
+      } else {
+        const safeLen = Math.max(0, accumulatedText.length - SAFE_WINDOW);
+        if (safeLen > sentTextLength) {
+          const chunk = accumulatedText.slice(sentTextLength, safeLen);
+          if (!textBlockStarted && textBlockIndex !== -1) {
+            send({ type: 'content_block_start', index: textBlockIndex, content_block: { type: 'text', text: '' } });
+            textBlockStarted = true;
+          }
+          if (textBlockStarted) {
+            send({ type: 'content_block_delta', index: textBlockIndex, delta: { type: 'text_delta', text: chunk } });
+          }
+          sentTextLength = safeLen;
+        }
+      }
+    }
+  }
+
+  flushAnthropicFallback();
+
+  let msgDelta = { type: 'message_delta', delta: { stop_reason: 'end_turn' } };
+  if (fallbackToolsEmitted) {
+    msgDelta = { ...msgDelta, delta: { ...msgDelta.delta, stop_reason: 'tool_use' } };
+  }
+  send(msgDelta);
+
+  // 校验事件：必须包含 tool_use 的 content_block_start 与 input_json_delta
+  const blockStart = events.find(e => e.type === 'content_block_start');
+  assert.ok(blockStart);
+  assert.equal(blockStart.content_block.type, 'tool_use');
+  assert.equal(blockStart.content_block.name, 'exec_command');
+
+  const jsonDelta = events.find(e => e.type === 'content_block_delta');
+  assert.ok(jsonDelta);
+  assert.equal(jsonDelta.delta.type, 'input_json_delta');
+  const parsed = JSON.parse(jsonDelta.delta.partial_json);
+  assert.equal(parsed.cmd, 'dir');
+  assert.equal(parsed.workdir, 'D:\\Desktop');
+
+  assert.equal(msgDelta.delta.stop_reason, 'tool_use');
+});
