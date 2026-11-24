@@ -1679,7 +1679,31 @@ export async function handleInference(req, res, url, body = null, ctx = null, co
           flushAnthropicFallback();
         } catch (e) {
           run.release(false, e.message);
-          if (!res.destroyed) send({ type: 'error', error: { type: 'api_error', message: e.message } });
+          // 容错与优雅降级保护：
+          // 若属于传输中断/超时等网络层异常 (isTransportOrStall)，且已向下游客户端发送了部分正文或工具，
+          // 进行优雅封口 (content_block_stop -> message_delta -> message_stop)，避免客户端 turn 崩溃报错 (如 PT_AT_ERROR)；
+          // 若为 UPSTREAM_MESSAGE_CONFLICT 等协议冲突，保持原样抛出以供上层诊断或重试
+          const isTransportOrStall = e.code !== 'UPSTREAM_MESSAGE_CONFLICT' && (
+            e.code === 'UPSTREAM_TRANSPORT_INTERRUPTED' ||
+            e.code === 'UPSTREAM_STALLED' ||
+            /stopped making progress|stalled|transport interrupted|fetch failed|timeout|socket|econnreset|other side closed|premature close/i.test(e.message || '')
+          );
+          if (isTransportOrStall && (sentTextLength > 0 || hasNativeTool || fallbackToolsEmitted || accumulatedText.length > 0)) {
+            console.warn(`[gateway] 流式中断 (${e.message})，但已有部分输出 (sent=${sentTextLength}, tools=${hasNativeTool || fallbackToolsEmitted})，执行优雅封口`);
+            try {
+              flushAnthropicFallback();
+              if (textBlockStarted && !textBlockClosed) {
+                send({ type: 'content_block_stop', index: textBlockIndex });
+                textBlockClosed = true;
+              }
+              send({ type: 'message_delta', delta: { stop_reason: (hasNativeTool || fallbackToolsEmitted) ? 'tool_use' : 'end_turn', stop_sequence: null } });
+              send({ type: 'message_stop' });
+            } catch (err) {
+              console.error(`[gateway] 优雅封口异常:`, err);
+            }
+          } else {
+            if (!res.destroyed) send({ type: 'error', error: { type: 'api_error', message: e.message } });
+          }
         } finally {
           stopHeartbeat();
           res.end();

@@ -1,6 +1,6 @@
 {
   "name": "claude-desktop-proxy",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "description": "Claude Desktop (free) reverse proxy to OpenAI compatible API",
   "main": "src/openai-proxy.mjs",
   "type": "module",

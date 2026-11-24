@@ -262,8 +262,73 @@ test('completion-engine: hasGeneratedOutput 精确识别实质性输出，思考
   assert.equal(hasGeneratedOutput({ type: 'content_block_delta', delta: { type: 'text_delta', text: '' } }), false);
   assert.equal(hasGeneratedOutput({ type: 'content_block_delta', delta: { type: 'text_delta', text: 'token' } }), true);
   assert.equal(hasGeneratedOutput({ type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: '' } }), false);
-  assert.equal(hasGeneratedOutput({ type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'Let me think...' } }), true);
+  assert.equal(hasGeneratedOutput({ type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'Let me think...' } }), false, '思考增量默认不判定为实质性输出，避免锁死流式重试恢复能力');
+  assert.equal(hasGeneratedOutput({ type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'Let me think...' } }, true), true, '显式 includeThinking=true 时判定为 true');
   assert.equal(hasGeneratedOutput({ type: 'content_block_delta', delta: { type: 'input_json_delta', partial_json: '{"a":1}' } }), true);
+});
+
+test('completion-engine: 思考增量 delta 阶段上游断连 (transport interrupted) 允许自动故障转移重试', async () => {
+  let callCount = 0;
+  // 模拟上游已下发 message_start, content_block_start (thinking), 以及若干 thinking_delta，
+  // 但在正文/工具产生前连接意外中断 (transport interrupted)
+  const brokenThinkingDeltaRun = {
+    account: { id: 'acc_think_1', label: 'Thinking Account 1' },
+    stream: new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: message_start\ndata: {"type":"message_start","message":{"id":"msg_think"}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"analyzing code deeply..."}}\n\n'));
+        // 模拟深度思考中途连接中断
+        const err = Object.assign(new Error('Invalid upstream stream: transport interrupted'), {
+          code: 'UPSTREAM_TRANSPORT_INTERRUPTED',
+          kind: 'upstream_stream',
+        });
+        controller.error(err);
+      },
+    }),
+    release: () => {},
+  };
+
+  const recoveredRun = {
+    account: { id: 'acc_think_2', label: 'Thinking Account 2' },
+    stream: new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: message_start\ndata: {"type":"message_start","message":{"id":"msg_ok"}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"retried thinking ok"}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"final text after thinking"}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_stop\ndata: {"type":"content_block_stop","index":1}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'));
+        controller.close();
+      },
+    }),
+    release: () => {},
+  };
+
+  const mockEngine = {
+    pool: {
+      eligible: () => [{ id: 'acc_think_2', label: 'Thinking Account 2' }],
+    },
+    runCompletion: async () => {
+      callCount++;
+      return recoveredRun;
+    },
+  };
+
+  const wrapped = attachStreamRecovery(brokenThinkingDeltaRun, { stream: true }, 'claude-sonnet-5-5', null, {}, {}, {
+    engine: mockEngine,
+    pool: mockEngine.pool,
+  });
+
+  const events = [];
+  for await (const ev of wrapped.events()) {
+    events.push(ev);
+  }
+
+  assert.equal(callCount, 1, '思考增量 delta 阶段连接中断应透明重试并调用 runCompletion 1 次');
+  assert.ok(events.some(e => e.delta?.text === 'final text after thinking'));
 });
 
 test('completion-engine: 思考块 start 阶段上游断连 (transport interrupted) 允许自动故障转移重试', async () => {
@@ -524,4 +589,43 @@ test('upstream-events: 客户端提前断开连接准确识别为 client_gone (4
   assert.equal(thrown.kind, 'client_gone', '错误分类应为 client_gone');
   assert.equal(thrown.status, 499, '状态码应映射为 499 (Client Closed Request)');
   assert.notEqual(thrown.code, 'UPSTREAM_TRANSPORT_INTERRUPTED', '绝不应误判为上游传输中断');
+});
+
+test('upstream-events: 工具调用已完整到达后遭遇断连 (transport interrupted) 优雅自愈封口', async () => {
+  const tools = [{
+    name: 'read_file',
+    input_schema: {
+      type: 'object',
+      properties: { path: { type: 'string' } },
+      required: ['path'],
+    },
+  }];
+
+  let pullCount = 0;
+  const feed = new ReadableStream({
+    pull(controller) {
+      if (pullCount === 0) {
+        pullCount++;
+        controller.enqueue(Buffer.from('data: {"type":"message_start","message":{"id":"msg_test_tool"}}\n\n'));
+        controller.enqueue(Buffer.from('data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"read log"}}\n\n'));
+        controller.enqueue(Buffer.from('data: {"type":"content_block_stop","index":0}\n\n'));
+        controller.enqueue(Buffer.from('data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_123","name":"read_file","input":{}}}\n\n'));
+        controller.enqueue(Buffer.from('data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\": \\"C:\\\\\\\\test.log\\"}"}}\n\n'));
+        controller.enqueue(Buffer.from('data: {"type":"content_block_stop","index":1}\n\n'));
+        return;
+      }
+      // 模拟上游在发送完完整工具块后，后续读取时抛出连接重置
+      controller.error(new Error('other side closed'));
+    },
+  });
+
+  const events = [];
+  for await (const ev of validatedEvents(feed, tools)) {
+    events.push(ev);
+  }
+
+  // 应自愈输出完整的 tool_use 块，并将 stop_reason 置为 tool_use，且以 message_stop 优雅完结，绝不抛出 transport interrupted
+  assert.ok(events.some(e => e.type === 'content_block_start' && e.content_block?.type === 'tool_use' && e.content_block?.name === 'read_file'), '应产出完整的 tool_use 块');
+  assert.ok(events.some(e => e.type === 'message_delta' && e.delta?.stop_reason === 'tool_use'), '应优雅封口输出 stop_reason: tool_use');
+  assert.ok(events.some(e => e.type === 'message_stop'), '应优雅输出 message_stop 完结消息');
 });

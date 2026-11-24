@@ -295,6 +295,10 @@ async function* frames(stream, clock, options = {}) {
           });
           throw clientErr;
         }
+        // 关键保护：若流已正常闭合并标记 ended，后续由于上游远端关闭连接引发的 socket close 绝不视为断流异常
+        if (clock.ended) {
+          return;
+        }
         const interrupted = bad('transport interrupted');
         interrupted.code = 'UPSTREAM_TRANSPORT_INTERRUPTED';
         interrupted.transportCause = error?.code || error?.message || 'unknown';
@@ -630,6 +634,21 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
       }
     }
     if (clock.ended) return;
+    // 关键自愈：若上游在 EOF 前已生成了完整的工具调用（所有参数块已闭合），或者正文块已全部闭合，直接 commit 并优雅封口！
+    if (held && executableTools && open.size === 0) {
+      yield* commit();
+      if (!reason) yield { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null } };
+      yield { type: 'message_stop' };
+      clock.ended = true;
+      return;
+    }
+    if (!held && seen.size > 0 && open.size === 0) {
+      yield* commit();
+      if (!reason) yield { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null } };
+      yield { type: 'message_stop' };
+      clock.ended = true;
+      return;
+    }
     if (!held || open.size || clock.graceAt === null) throw bad('unexpected EOF before message completion');
     yield* commit();
     if (!reason) yield { type: 'message_delta', delta: { stop_reason: executableTools ? 'tool_use' : 'end_turn', stop_sequence: null } };
@@ -640,6 +659,15 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
         name: 'AbortError', kind: 'client_gone', status: 499,
       });
       throw clientErr;
+    }
+    // 关键自愈：若上游连接中断（transport interrupted），但已有完整的工具调用或所有正文块已闭合，优雅封口而非抛错崩溃
+    if ((held && executableTools && open.size === 0) || (seen.size > 0 && open.size === 0)) {
+      console.warn(`[stream] Upstream connection closed (${e?.message || e?.code}) after content completion; gracefully sealing message turn.`);
+      if (held) yield* commit();
+      if (!reason) yield { type: 'message_delta', delta: { stop_reason: executableTools ? 'tool_use' : 'end_turn', stop_sequence: null } };
+      yield { type: 'message_stop' };
+      clock.ended = true;
+      return;
     }
     if (e.kind || e.code) throw e;
     const interrupted = bad('transport interrupted');

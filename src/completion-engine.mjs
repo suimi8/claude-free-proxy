@@ -263,9 +263,11 @@ export function recordCompletion(ctx, status, error = '', usage = null) {
 }
 
 /**
- * 判定事件是否已经产生了用户可见内容或工具调用
+ * 判定事件是否已经产生了用户可见实质性输出或工具调用
+ * @param {object} ev
+ * @param {boolean} [includeThinking=false] - 是否将深度思考增量计入可见输出（流式恢复自愈时默认为 false，思考阶段断连仍可无缝重试换号）
  */
-export function hasGeneratedOutput(ev) {
+export function hasGeneratedOutput(ev, includeThinking = false) {
   if (!ev) return false;
   if (ev.type === 'content_block_start') {
     const block = ev.content_block || {};
@@ -274,10 +276,13 @@ export function hasGeneratedOutput(ev) {
   }
   if (ev.type !== 'content_block_delta') return false;
   const delta = ev.delta || {};
-  return (delta.type === 'text_delta' && !!delta.text) ||
-    (delta.type === 'input_json_delta' && !!delta.partial_json) ||
-    (delta.type === 'thinking_delta' && !!delta.thinking) ||
-    (delta.type === 'thinking_summary_delta' && !!delta.summary?.summary);
+  if (delta.type === 'text_delta' && !!delta.text) return true;
+  if (delta.type === 'input_json_delta' && !!delta.partial_json) return true;
+  if (includeThinking) {
+    if (delta.type === 'thinking_delta' && !!delta.thinking) return true;
+    if (delta.type === 'thinking_summary_delta' && !!delta.summary?.summary) return true;
+  }
+  return false;
 }
 
 /**
@@ -348,8 +353,10 @@ export function attachStreamRecovery(run, body, model, signal, req, ctx, deps = 
               yield event;
               continue;
             }
-            // 流式模式下产生首个可见输出才提交并开始向下游下发；非流式模式下全量缓冲保障整段重试自愈能力
-            if (isStream && !committed && hasGeneratedOutput(event)) {
+            // 流式模式下产生首个实质性可见输出才提交并开始向下游下发；
+            // 思考阶段全量缓冲在 pending 中，若在此期间上游发生断流或超时，仍可保留无缝自动故障转移换号重试能力；
+            // 非流式模式下全量缓冲保障整段重试自愈能力
+            if (isStream && !committed && hasGeneratedOutput(event, false)) {
               for (const buffered of pending) yield buffered;
               pending = [];
               pendingBytes = 0;

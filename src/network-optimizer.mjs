@@ -23,7 +23,7 @@ import { Agent, ProxyAgent } from 'undici';
 
 /** 默认连接池参数 */
 export const DEFAULT_DISPATCHER_CONFIG = {
-  keepAliveTimeout: 10_000,     // 空闲连接保持 10s
+  keepAliveTimeout: 4_000,      // 空闲连接保持 4s (防止 Cloudflare 边际网关 5s 提前断开导致的重用失效)
   keepAliveMaxTimeout: 600_000, // 最大存活 10 分钟（严禁设为 15s，否则会导致长文本深度思考/流式生成中途被 Undici 重置切断连接！）
   maxSockets: 512,              // 最大连接数（512 高并发吞吐保障）
   pipelining: 0,                // 保持 0（防止 HTTP/1.1 管道队列队头阻塞）
@@ -94,6 +94,7 @@ export function createUpstreamDispatcher(options = {}) {
       timeout: 30_000,       // 30s 握手超时（防网络或代理首包抖动）
       keepAlive: true,
       keepAliveInitialDelay: 5_000, // 5s 开启 TCP keep-alive 探测，保障长文本推理跨 NAT/防火墙长连接存活
+      autoSelectFamily: true, // IPv4/IPv6 双栈优化
       ...(options.agentOptions?.connect || {}),
     },
     ...(options.agentOptions || {}),
