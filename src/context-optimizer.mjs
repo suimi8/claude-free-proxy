@@ -208,10 +208,13 @@ export function pruneMessageImages(messages, keepRecentTurns = 2, maxImages = 3)
  * @param {string} text
  * @param {number} [headLines=15]
  * @param {number} [tailLines=15]
+ * @param {number} [maxChars=2000]
  * @returns {string}
  */
-export function pruneLines(text, headLines = 15, tailLines = 15) {
+export function pruneLines(text, headLines = 15, tailLines = 15, maxChars = 2000) {
   if (typeof text !== 'string') return text;
+  if (text.length <= maxChars) return text;
+
   const lines = text.split(/\r?\n/);
   if (lines.length > headLines + tailLines) {
     const head = lines.slice(0, headLines);
@@ -220,7 +223,7 @@ export function pruneLines(text, headLines = 15, tailLines = 15) {
     return [...head, `... [已省略中间 ${omitted} 行输出] ...`, ...tail].join('\n');
   }
 
-  // 若行数 <= headLines + tailLines，但总字符长（如多行密集长输出）：
+  // 若行数 <= headLines + tailLines，但总字符长（如多行密集长输出，超出 maxChars）：
   if (lines.length > 2) {
     const halfHead = Math.min(headLines, Math.floor((lines.length - 1) / 2));
     const halfTail = Math.min(tailLines, Math.floor((lines.length - 1) / 2));
@@ -232,8 +235,8 @@ export function pruneLines(text, headLines = 15, tailLines = 15) {
     }
   }
 
-  // 单行或极少行但超出 2000 字符的极端超长输出
-  const keepChars = 800;
+  // 单行或极少行但超出 maxChars 字符的极端超长输出
+  const keepChars = Math.min(800, Math.floor(maxChars / 2));
   if (text.length > keepChars * 2 + 100) {
     const head = text.slice(0, keepChars);
     const tail = text.slice(-keepChars);
@@ -281,7 +284,7 @@ function pruneJsonObject(obj, opts) {
   for (const [key, value] of entries) {
     if (typeof value === 'string') {
       if (value.length > maxChars) {
-        res[key] = pruneLines(value, headLines, tailLines);
+        res[key] = pruneLines(value, headLines, tailLines, maxChars);
       } else {
         res[key] = value;
       }
@@ -323,7 +326,7 @@ export function pruneToolContent(content, options = {}) {
       }
     }
 
-    return pruneLines(content, headLines, tailLines);
+    return pruneLines(content, headLines, tailLines, maxChars);
   }
 
   if (typeof content === 'object' && content !== null) {

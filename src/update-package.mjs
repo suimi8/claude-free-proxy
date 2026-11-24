@@ -9,7 +9,9 @@ export const RUNTIME = Object.freeze([
   'package.json', 'package-lock.json', 'web/webui.html', 'web/version-panel.css', 'web/version-panel.js',
   ...['accounts','cf-verify','config','context-optimizer','network-optimizer','openai-proxy','child-http','init-admin',
     'operation-log','quota-probe','usage-log','kyc','paths','public-http','upstream-events','doctor',
-    'github-releases','update-package','update-service','serve'].map(n => `src/${n}.mjs`),
+    'github-releases','update-package','update-service','serve',
+    'prompt-renderer','pseudo-tools','http-auth','image-uploader','conversation-router','stream-metrics',
+    'external-tools','responses-api','chat-protocol','claude-web-client','gateway-routes','completion-engine','crypto-vault'].map(n => `src/${n}.mjs`),
 ]);
 export const hash = data => createHash('sha256').update(data).digest('hex');
 const canonical = text => text.replace(/\r\n/g, '\n');

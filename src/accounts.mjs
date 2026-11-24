@@ -25,6 +25,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { hasRecentRateLimit, selectOptimalAccount } from './network-optimizer.mjs';
+import { encryptField, decryptField } from './crypto-vault.mjs';
 
 export const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
@@ -122,6 +123,16 @@ export class AccountPool {
       accounts: [],
     };
     this.rr = 0;
+    this._dirty = false;
+    this._saveTimer = null;
+    this._exitHandler = () => {
+      try { this.flushSave(); } catch { /* noop on exit */ }
+    };
+    if (typeof process !== 'undefined' && process.on) {
+      process.on('beforeExit', this._exitHandler);
+      process.on('SIGINT', this._exitHandler);
+      process.on('SIGTERM', this._exitHandler);
+    }
     this.load();
   }
 
@@ -130,7 +141,15 @@ export class AccountPool {
     try {
       const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'));
       if (raw && Array.isArray(raw.accounts)) {
-        this.data = { ...this.data, ...raw, accounts: raw.accounts };
+        const decryptedAccounts = raw.accounts.map(a => {
+          if (!a) return a;
+          return {
+            ...a,
+            sessionKey: decryptField(a.sessionKey),
+            cookie: decryptField(a.cookie),
+          };
+        });
+        this.data = { ...this.data, ...raw, accounts: decryptedAccounts };
       }
     } catch { /* 首次运行，用空池 */ }
     try { this._mtime = fs.statSync(this.file).mtimeMs; } catch { /* noop */ }
@@ -240,21 +259,31 @@ export class AccountPool {
 
   save() {
     if (!this.file) return;
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    this._dirty = false;
     const out = {
       ...this.data,
       accounts: this.data.accounts.map(a => {
         const { inflight, ...rest } = a;   // 运行时字段不落盘
-        return rest;
+        return {
+          ...rest,
+          sessionKey: encryptField(rest.sessionKey),
+          cookie: encryptField(rest.cookie),
+        };
       }),
     };
-    const tmp = this.file + '.tmp';
-    fs.mkdirSync(path.dirname(this.file), {recursive:true, mode:0o700});
-    fs.writeFileSync(tmp, JSON.stringify(out, null, 2), {mode:0o600});
-    // Windows 上目标文件被别的进程短暂打开时，rename 会抛 EPERM/EACCES/EBUSY。
-    // 以前直接往上抛，这一次的落盘就整个丢了（账号冷却、统计不落盘），
-    // 这里重试几次，绕开那个毫秒级窗口。
+    const dir = path.dirname(this.file);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // 使用带进程号与时间随机戳的唯一临时文件名，彻底杜绝高并发下写同一 .tmp 文件引起的锁死与覆盖冲突
+    const tmp = `${this.file}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(out, null, 2), { mode: 0o600 });
+    // Windows 上目标文件被其他句柄占用时，rename 会抛 EPERM/EACCES/EBUSY。
+    // 指数避让重试几次，绕开微秒级锁窗口；最终失败则安全清理临时文件避免垃圾堆积。
     let lastErr = null;
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 8; i++) {
       try {
         fs.renameSync(tmp, this.file);
         lastErr = null;
@@ -262,11 +291,63 @@ export class AccountPool {
       } catch (e) {
         lastErr = e;
         if (!['EPERM', 'EACCES', 'EBUSY'].includes(e.code)) break;
-        sleepSync(25 * (i + 1));
+        sleepSync(20 * (i + 1));
       }
     }
-    if (lastErr) throw lastErr;
+    if (lastErr) {
+      try { fs.unlinkSync(tmp); } catch { /* noop */ }
+      throw lastErr;
+    }
     try { this._mtime = fs.statSync(this.file).mtimeMs; } catch { /* noop */ }
+  }
+
+  /**
+   * 异步防抖 / 批量合并落盘：
+   * 在高并发请求（数十至上百 QPS）场景下，高频状态更新（addTokens、updateQuota、release）
+   * 仅更新内存状态并合并至定时批次落盘，彻底消除 Windows 磁盘写冲突与事件循环 I/O 锁风暴。
+   */
+  scheduleSave(delayMs = 1000) {
+    if (!this.file) return;
+    this._dirty = true;
+    if (this._saveTimer) return;
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null;
+      if (this._dirty) {
+        try {
+          this.save();
+        } catch (err) {
+          console.error('[pool] 异步批量落盘异常:', err?.message || err);
+        }
+      }
+    }, delayMs);
+    if (typeof this._saveTimer?.unref === 'function') {
+      this._saveTimer.unref();
+    }
+  }
+
+  /**
+   * 立即刷新脏数据落盘（关闭前、热加载前或退出前调用）
+   */
+  flushSave() {
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    if (this._dirty && this.file) {
+      this.save();
+    }
+  }
+
+  /**
+   * 销毁池实例并清理进程退出钩子与定时器
+   */
+  destroy() {
+    this.flushSave();
+    if (typeof process !== 'undefined' && process.removeListener && this._exitHandler) {
+      process.removeListener('beforeExit', this._exitHandler);
+      process.removeListener('SIGINT', this._exitHandler);
+      process.removeListener('SIGTERM', this._exitHandler);
+    }
   }
 
   // ---------------------------------------------------------------- 查询
@@ -364,6 +445,7 @@ export class AccountPool {
     if (!pick) return null;
 
     pick.inflight++;
+    if (!pick.stats) pick.stats = { ok: 0, fail: 0, lastUsedAt: 0, lastError: '' };
     pick.stats.lastUsedAt = Date.now();
     return pick;
   }
@@ -386,7 +468,8 @@ export class AccountPool {
         cur.cooldownUntil = 0;
       }
     }
-    this.save();
+    // 成功释放仅更新内存状态并通过 scheduleSave 批量防抖落盘，彻底消除高并发写盘风暴
+    this.scheduleSave(1000);
   }
 
   /**
@@ -511,16 +594,27 @@ export class AccountPool {
   updateQuota(a, limit) {
     if (!a || !limit || typeof limit !== 'object') return;
     a.quota = { ...limit, updatedAt: Date.now() };
-    this.save();
+    this.scheduleSave(1000);
   }
 
   /** 累计本地估算 token（上游不返回 usage；只用于展示"已用多少"，不是配额） */
   noteTokens(a, inEst = 0, outEst = 0) {
+    return this.addTokens(a, inEst, outEst);
+  }
+
+  /**
+   * 高并发安全增加已用 token 计数并触发防抖批量落盘
+   * @param {object|string} a 账号对象或账号 id
+   * @param {number} inEst 输入 token 估算
+   * @param {number} outEst 输出 token 估算
+   */
+  addTokens(a, inEst = 0, outEst = 0) {
     if (!a || (!inEst && !outEst)) return;
-    const cur = this.get(a.id) || a;
+    const cur = (typeof a === 'string' ? this.get(a) : this.get(a?.id)) || a;
+    if (!cur || !cur.stats) return;
     cur.stats.tokensInEst = (cur.stats.tokensInEst || 0) + inEst;
     cur.stats.tokensOutEst = (cur.stats.tokensOutEst || 0) + outEst;
-    this.save();
+    this.scheduleSave(1000);
   }
 
   // ---------------------------------------------------------------- 变更
@@ -640,6 +734,9 @@ export class AccountPool {
     let mtime = 0;
     try { mtime = fs.statSync(this.file).mtimeMs; } catch { return false; }
     if (mtime === this._mtime) return false;
+    if (this._dirty) {
+      try { this.flushSave(); } catch { /* noop */ }
+    }
     this._mtime = mtime;
     this.load();
     return true;

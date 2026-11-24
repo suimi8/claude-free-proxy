@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
-import { spawn, execSync } from 'node:child_process';
+import { spawn, execSync, execFileSync } from 'node:child_process';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
@@ -21,18 +21,20 @@ const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 export function getDefaultBrowserWindows() {
   if (process.platform !== 'win32') return null;
   try {
-    const raw = execSync('reg query "HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\http\\UserChoice" /v ProgId', {
+    const raw = execFileSync('reg', ['query', 'HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\http\\UserChoice', '/v', 'ProgId'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 2500,
+      windowsHide: true,
     });
-    const progMatch = raw.match(/ProgId\s+REG_SZ\s+(\S+)/);
+    const progMatch = raw.match(/ProgId\s+REG_SZ\s+([a-zA-Z0-9._-]+)/);
     if (!progMatch) return null;
     const progId = progMatch[1];
-    const cmdRaw = execSync(`reg query "HKCR\\${progId}\\shell\\open\\command" /ve`, {
+    const cmdRaw = execFileSync('reg', ['query', `HKCR\\${progId}\\shell\\open\\command`, '/ve'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 2500,
+      windowsHide: true,
     });
     const cmdMatch = cmdRaw.match(/REG_SZ\s+(.+)/);
     if (!cmdMatch) return null;

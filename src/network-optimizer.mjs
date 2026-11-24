@@ -25,7 +25,8 @@ import { Agent, ProxyAgent } from 'undici';
 export const DEFAULT_DISPATCHER_CONFIG = {
   keepAliveTimeout: 4000,       // 空闲连接保持 4s（Cloudflare 边缘通常 5s 关闭空闲长连接，设 4s 提前在客户端主动废弃，防止向已半关闭的 stale socket 发请求导致 UND_ERR_SOCKET）
   keepAliveMaxTimeout: 15000,   // 最大存活 15s
-  maxSockets: 256,              // 最大连接数
+  maxSockets: 512,              // 最大连接数（提升至 512 高并发吞吐保障）
+  pipelining: 0,                // 保持 0（防止 HTTP/1.1 管道队列队头阻塞）
 };
 
 /** 默认健康评分权重配置 */
@@ -78,6 +79,7 @@ export function createUpstreamDispatcher(options = {}) {
   const keepAliveTimeout = options.keepAliveTimeout ?? DEFAULT_DISPATCHER_CONFIG.keepAliveTimeout;
   const keepAliveMaxTimeout = options.keepAliveMaxTimeout ?? DEFAULT_DISPATCHER_CONFIG.keepAliveMaxTimeout;
   const maxSockets = options.maxSockets ?? DEFAULT_DISPATCHER_CONFIG.maxSockets;
+  const pipelining = options.pipelining ?? DEFAULT_DISPATCHER_CONFIG.pipelining;
 
   const agentDefaults = {
     keepAliveTimeout,
@@ -87,10 +89,11 @@ export function createUpstreamDispatcher(options = {}) {
     headersTimeout: 300_000, // 5 分钟
     bodyTimeout: 0,          // 流式生成不设 body 超时
     allowH2: false,          // 强制 HTTP/1.1：Cloudflare 对 Undici HTTP/2 握手指纹拦截（403 挑战），HTTP/1.1 携带 cf_clearance 可完美通行
-    pipelining: 0,
+    pipelining,              // 保持 0（杜绝队头阻塞）
     connect: {
       timeout: 15_000,       // 15s 握手超时（比默认 10s 宽容，防止跨国网络首包抖动）
       keepAlive: true,
+      keepAliveInitialDelay: 10_000, // 开启 TCP keep-alive 探测，初始延迟 10s 保障跨 NAT/防火墙长连接存活
       ...(options.agentOptions?.connect || {}),
     },
     ...(options.agentOptions || {}),
@@ -371,11 +374,43 @@ export function getSharedDispatcher(options = {}) {
 }
 
 /**
- * 重置全局共享的 Dispatcher 实例
+ * 优雅关闭并释放指定 Dispatcher
+ * @param {object} dispatcher
+ * @param {number} [timeoutMs=3000]
+ * @returns {Promise<void>}
  */
-export function resetSharedDispatcher() {
-  if (_sharedDispatcher && typeof _sharedDispatcher.close === 'function') {
-    try { _sharedDispatcher.close(); } catch {}
-  }
+export async function closeDispatcherGracefully(dispatcher, timeoutMs = 3000) {
+  if (!dispatcher) return;
+  try {
+    if (typeof dispatcher.close === 'function') {
+      const closePromise = dispatcher.close();
+      if (timeoutMs > 0) {
+        let timer;
+        const timeoutPromise = new Promise(resolve => { timer = setTimeout(resolve, timeoutMs); });
+        await Promise.race([closePromise, timeoutPromise]);
+        clearTimeout(timer);
+        if (typeof dispatcher.destroy === 'function' && !dispatcher.destroyed) {
+          try { await dispatcher.destroy(); } catch {}
+        }
+      } else {
+        await closePromise;
+      }
+    } else if (typeof dispatcher.destroy === 'function') {
+      await dispatcher.destroy();
+    }
+  } catch {}
+}
+
+/**
+ * 重置全局共享的 Dispatcher 实例（支持同步触发与异步优雅退出）
+ * @param {object} [options]
+ * @param {number} [options.timeoutMs=3000] - 优雅退出超时毫秒数
+ * @returns {Promise<void>}
+ */
+export function resetSharedDispatcher(options = {}) {
+  const current = _sharedDispatcher;
   _sharedDispatcher = null;
+  if (!current) return Promise.resolve();
+  const timeoutMs = options?.timeoutMs ?? 3000;
+  return closeDispatcherGracefully(current, timeoutMs);
 }
