@@ -292,6 +292,9 @@ async function* frames(stream, clock) {
         if (error?.name === 'AbortError') throw error;
         const interrupted = bad('transport interrupted');
         interrupted.code = 'UPSTREAM_TRANSPORT_INTERRUPTED';
+        interrupted.transportCause = error?.code || error?.message || 'unknown';
+        interrupted.transportPhase = clock.phase;
+        interrupted.cause = error;
         throw interrupted;
       }
       if (r === IDLE) {
@@ -385,8 +388,8 @@ function finishArgs(t) {
 
 export async function* validatedEvents(stream, tools = [], options = {}) {
   const configuredIdle = options.idleMs ?? process.env.SSE_IDLE_TIMEOUT_MS;
-  const idleMs = duration(configuredIdle, 120_000, 1);
-  const thinkingIdleMs = duration(options.thinkingIdleMs ?? process.env.SSE_THINKING_IDLE_TIMEOUT_MS ?? configuredIdle, 360_000, 1);
+  const idleMs = duration(configuredIdle, 180_000, 1);
+  const thinkingIdleMs = duration(options.thinkingIdleMs ?? process.env.SSE_THINKING_IDLE_TIMEOUT_MS ?? configuredIdle, 600_000, 1);
   const graceMs = duration(options.graceMs ?? process.env.TOOL_PING_GRACE_MS, 2000, 0);
   const clock = { phase: 'initial', timeoutMs: idleMs, stallAt: Date.now() + idleMs, graceAt: null, lastByteAt: null };
   const declared = new Map(tools.map((t) => [t.name, t.input_schema || {}]));
@@ -630,6 +633,9 @@ export async function* validatedEvents(stream, tools = [], options = {}) {
     if (e.kind || e.code || e.name === 'AbortError') throw e;
     const interrupted = bad('transport interrupted');
     interrupted.code = 'UPSTREAM_TRANSPORT_INTERRUPTED';
+    interrupted.transportCause = e?.code || e?.message || 'unknown';
+    interrupted.transportPhase = clock.phase;
+    interrupted.cause = e;
     throw interrupted;
   }
 }

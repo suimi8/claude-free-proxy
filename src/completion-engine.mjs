@@ -269,7 +269,8 @@ export function hasGeneratedOutput(ev) {
   if (!ev) return false;
   if (ev.type === 'content_block_start') {
     const block = ev.content_block || {};
-    return block.type === 'tool_use' || (block.type === 'text' && !!block.text) || block.type === 'thinking';
+    // 纯思考块开始 (type === 'thinking') 或空文本块尚未产生任何正文，不视为已产生实质性输出
+    return block.type === 'tool_use' || (block.type === 'text' && !!block.text);
   }
   if (ev.type !== 'content_block_delta') return false;
   const delta = ev.delta || {};
@@ -333,6 +334,7 @@ export function attachStreamRecovery(run, body, model, signal, req, ctx, deps = 
     if (consumed) throw new Error('completion stream already consumed');
     consumed = true;
     return (async function* () {
+      const isStream = Boolean(body?.stream);
       let committed = false;
       let retries = 0;
       let conflictRetries = 0;
@@ -341,7 +343,8 @@ export function attachStreamRecovery(run, body, model, signal, req, ctx, deps = 
       for (;;) {
         try {
           for await (const event of normalizeSse(current.stream, current.account, ctx, pool)) {
-            if (!committed && hasGeneratedOutput(event)) {
+            // 流式模式下产生首个可见输出才提交并开始向下游下发；非流式模式下全量缓冲保障整段重试自愈能力
+            if (isStream && !committed && hasGeneratedOutput(event)) {
               for (const buffered of pending) yield buffered;
               pending = [];
               pendingBytes = 0;

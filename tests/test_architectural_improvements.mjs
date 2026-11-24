@@ -41,6 +41,11 @@ import {
   loadResponsesCache,
 } from '../src/responses-api.mjs';
 
+import {
+  hasGeneratedOutput,
+  attachStreamRecovery,
+} from '../src/completion-engine.mjs';
+
 // ============================================================================
 // 1. 凭据加解密与安全保险库测试
 // ============================================================================
@@ -238,4 +243,141 @@ test('responses-api: 状态暂存容量扩展、持久化与恢复测试', () =>
     clearResponses();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+// ============================================================================
+// 4. 彻底根治 transport interrupted：首字前与思考阶段容灾状态机测试
+// ============================================================================
+test('completion-engine: hasGeneratedOutput 精确识别实质性输出，思考块开始不造成过早提交锁死', () => {
+  // 1. content_block_start
+  assert.equal(hasGeneratedOutput({ type: 'content_block_start', content_block: { type: 'thinking' } }), false, '纯思考块 start 不应判定为已产生可见输出');
+  assert.equal(hasGeneratedOutput({ type: 'content_block_start', content_block: { type: 'text', text: '' } }), false, '空文本 start 不应判定为已产生可见输出');
+  assert.equal(hasGeneratedOutput({ type: 'content_block_start', content_block: { type: 'text', text: 'hi' } }), true);
+  assert.equal(hasGeneratedOutput({ type: 'content_block_start', content_block: { type: 'tool_use', id: 'call_1', name: 'calc' } }), true);
+
+  // 2. content_block_delta
+  assert.equal(hasGeneratedOutput({ type: 'content_block_delta', delta: { type: 'text_delta', text: '' } }), false);
+  assert.equal(hasGeneratedOutput({ type: 'content_block_delta', delta: { type: 'text_delta', text: 'token' } }), true);
+  assert.equal(hasGeneratedOutput({ type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: '' } }), false);
+  assert.equal(hasGeneratedOutput({ type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'Let me think...' } }), true);
+  assert.equal(hasGeneratedOutput({ type: 'content_block_delta', delta: { type: 'input_json_delta', partial_json: '{"a":1}' } }), true);
+});
+
+test('completion-engine: 思考块 start 阶段上游断连 (transport interrupted) 允许自动故障转移重试', async () => {
+  let callCount = 0;
+  // 模拟上游已下发 message_start 与 content_block_start (thinking)，但思考阶段连接意外中断
+  const brokenThinkingRun = {
+    account: { id: 'acc_think_1', label: 'Thinking Account 1' },
+    stream: new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: message_start\ndata: {"type":"message_start","message":{"id":"msg_think"}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}\n\n'));
+        // 模拟 Undici keepAliveMaxTimeout 触发或网络中断抛出 UPSTREAM_TRANSPORT_INTERRUPTED
+        const err = Object.assign(new Error('Invalid upstream stream: transport interrupted'), {
+          code: 'UPSTREAM_TRANSPORT_INTERRUPTED',
+          kind: 'upstream_stream',
+        });
+        controller.error(err);
+      },
+    }),
+    release: () => {},
+  };
+
+  const recoveredRun = {
+    account: { id: 'acc_think_2', label: 'Thinking Account 2' },
+    stream: new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: message_start\ndata: {"type":"message_start","message":{"id":"msg_ok"}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"thinking failover success"}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'));
+        controller.close();
+      },
+    }),
+    release: () => {},
+  };
+
+  const mockEngine = {
+    pool: {
+      eligible: () => [{ id: 'acc_think_2', label: 'Thinking Account 2' }],
+    },
+    runCompletion: async () => {
+      callCount++;
+      return recoveredRun;
+    },
+  };
+
+  const wrapped = attachStreamRecovery(brokenThinkingRun, { stream: true }, 'claude-sonnet-5-5', null, {}, {}, {
+    engine: mockEngine,
+    pool: mockEngine.pool,
+  });
+
+  const events = [];
+  for await (const ev of wrapped.events()) {
+    events.push(ev);
+  }
+
+  assert.equal(callCount, 1, '思考块 start 阶段连接中断应透明重试并调用 runCompletion 1 次');
+  assert.ok(events.some(e => e.delta?.text === 'thinking failover success'));
+});
+
+test('completion-engine: 非流式调用 (!stream) 中途断连全量缓冲并自动故障转移', async () => {
+  let callCount = 0;
+  // 模拟非流式请求下，中间产生部分文本后断连
+  const partialRun = {
+    account: { id: 'acc_nonstream_1', label: 'NonStream Account 1' },
+    stream: new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: message_start\ndata: {"type":"message_start","message":{"id":"msg_part"}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial..."}}\n\n'));
+        const err = Object.assign(new Error('Invalid upstream stream: transport interrupted'), {
+          code: 'UPSTREAM_TRANSPORT_INTERRUPTED',
+          kind: 'upstream_stream',
+        });
+        controller.error(err);
+      },
+    }),
+    release: () => {},
+  };
+
+  const fullCleanRun = {
+    account: { id: 'acc_nonstream_2', label: 'NonStream Account 2' },
+    stream: new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: message_start\ndata: {"type":"message_start","message":{"id":"msg_full"}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"complete non-stream text"}}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n'));
+        controller.enqueue(new TextEncoder().encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'));
+        controller.close();
+      },
+    }),
+    release: () => {},
+  };
+
+  const mockEngine = {
+    pool: {
+      eligible: () => [{ id: 'acc_nonstream_2', label: 'NonStream Account 2' }],
+    },
+    runCompletion: async () => {
+      callCount++;
+      return fullCleanRun;
+    },
+  };
+
+  const wrapped = attachStreamRecovery(partialRun, { stream: false }, 'claude-sonnet-5-5', null, {}, {}, {
+    engine: mockEngine,
+    pool: mockEngine.pool,
+  });
+
+  const events = [];
+  for await (const ev of wrapped.events()) {
+    events.push(ev);
+  }
+
+  assert.equal(callCount, 1, '非流式中途崩溃应无感重试并调用 runCompletion 1 次');
+  assert.ok(events.some(e => e.delta?.text === 'complete non-stream text'));
+  assert.equal(events.some(e => e.delta?.text === 'partial...'), false, '脏数据不应漏出给下游');
 });

@@ -23,9 +23,9 @@ import { Agent, ProxyAgent } from 'undici';
 
 /** 默认连接池参数 */
 export const DEFAULT_DISPATCHER_CONFIG = {
-  keepAliveTimeout: 4000,       // 空闲连接保持 4s（Cloudflare 边缘通常 5s 关闭空闲长连接，设 4s 提前在客户端主动废弃，防止向已半关闭的 stale socket 发请求导致 UND_ERR_SOCKET）
-  keepAliveMaxTimeout: 15000,   // 最大存活 15s
-  maxSockets: 512,              // 最大连接数（提升至 512 高并发吞吐保障）
+  keepAliveTimeout: 10_000,     // 空闲连接保持 10s
+  keepAliveMaxTimeout: 600_000, // 最大存活 10 分钟（严禁设为 15s，否则会导致长文本深度思考/流式生成中途被 Undici 重置切断连接！）
+  maxSockets: 512,              // 最大连接数（512 高并发吞吐保障）
   pipelining: 0,                // 保持 0（防止 HTTP/1.1 管道队列队头阻塞）
 };
 
@@ -86,14 +86,14 @@ export function createUpstreamDispatcher(options = {}) {
     keepAliveMaxTimeout,
     maxSockets,
     // 超时与长连接保护：给上游深度思考和生成预留充足时间，防止 Undici 误判 socket/body 超时
-    headersTimeout: 300_000, // 5 分钟
+    headersTimeout: 600_000, // 10 分钟超长思维链与大 Prompt Prefill 保护
     bodyTimeout: 0,          // 流式生成不设 body 超时
     allowH2: false,          // 强制 HTTP/1.1：Cloudflare 对 Undici HTTP/2 握手指纹拦截（403 挑战），HTTP/1.1 携带 cf_clearance 可完美通行
     pipelining,              // 保持 0（杜绝队头阻塞）
     connect: {
-      timeout: 15_000,       // 15s 握手超时（比默认 10s 宽容，防止跨国网络首包抖动）
+      timeout: 30_000,       // 30s 握手超时（防网络或代理首包抖动）
       keepAlive: true,
-      keepAliveInitialDelay: 10_000, // 开启 TCP keep-alive 探测，初始延迟 10s 保障跨 NAT/防火墙长连接存活
+      keepAliveInitialDelay: 5_000, // 5s 开启 TCP keep-alive 探测，保障长文本推理跨 NAT/防火墙长连接存活
       ...(options.agentOptions?.connect || {}),
     },
     ...(options.agentOptions || {}),
